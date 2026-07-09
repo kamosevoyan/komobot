@@ -14,7 +14,7 @@ echo "Starting VNC Server on port 5900..."
 x11vnc -display :99 -nopw -forever -bg -quiet
 
 echo "Starting Android Emulator..."
-# Boot the emulator inside Xvfb. 
+# Boot the emulator inside Xvfb.
 # swiftshader_indirect forces CPU rendering since Docker has no GPU.
 emulator -avd Pixel_Automation -no-audio -gpu swiftshader_indirect &
 
@@ -22,7 +22,7 @@ echo "Waiting for Android OS to boot (this may take a few minutes)..."
 # Smart polling: Check ADB until the boot animation finishes
 adb wait-for-device
 while [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != "1" ]; do
-    sleep 2
+	sleep 2
 done
 echo "Android is fully booted!"
 

@@ -29,17 +29,34 @@ def keep_app_awake():
 
 
 def human_like_keep_alive():
+    print("Hardware key keep-alive initialized.")
     while True:
-        time.sleep(random.uniform(30.0, 120.0))
+        try:
+            # Sleep between 20 to 45 seconds (must be shorter than the app's timeout)
+            sleep_time = random.uniform(20.0, 45.0)
+            time.sleep(sleep_time)
 
-        base_x, base_y = 500, 1000
-        jitter_x = base_x + random.randint(-50, 50)
-        jitter_y = base_y + random.randint(-50, 50)
+            # 24 = Volume Up, 25 = Volume Down
+            # Pressing volume keys resets the Android idle timer without touching the app UI
+            print("Sending hardware volume key to keep session alive.")
 
-        duration = random.randint(200, 600)
+            subprocess.run(
+                ["adb", "shell", "input", "keyevent", "24"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.5)
+            subprocess.run(
+                ["adb", "shell", "input", "keyevent", "25"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
-        cmd = f"adb shell input swipe {jitter_x} {jitter_y} {jitter_x + random.randint(-10, 10)} {jitter_y - random.randint(20, 80)} {duration}"
-        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print("Keep-alive error!")
+            time.sleep(5)
 
 
 def get_window_geometry(title_keyword):
