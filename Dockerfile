@@ -1,44 +1,45 @@
 FROM ubuntu:22.04
 
-# Prevent interactive prompts during apt installs
 ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:99
 
-# Install dependencies, Xvfb, wmctrl, and KVM tools
+# Install core dependencies, Xvfb, Fluxbox (Window Manager), VNC, and KVM tools
 RUN apt-get update && apt-get install -y \
     python3 python3-pip \
-    xvfb wmctrl \
+    xvfb fluxbox wmctrl x11vnc \
     wget unzip \
     openjdk-17-jre cpu-checker qemu-kvm \
+    android-tools-adb \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up the Android SDK environment variables
+# Set up Android SDK paths
 ENV ANDROID_HOME=/opt/android-sdk
 ENV PATH=${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/emulator
 
-# Download and install Android Command Line Tools
+# Install Android Command Line Tools
 RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     wget -q https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip -O /tmp/tools.zip && \
     unzip -q /tmp/tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm /tmp/tools.zip
 
-# Accept licenses and install the system image (x86_64 with Google APIs)
+# Accept licenses and install emulator image
 RUN yes | sdkmanager --licenses && \
     sdkmanager "platform-tools" "platforms;android-33" "system-images;android-33;google_apis;x86_64" "emulator"
 
 # Create the virtual device
 RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;android-33;google_apis;x86_64"
 
-# Copy your Python bot script and requirements
 WORKDIR /app
 COPY main.py .
 COPY .env .
+# Install your Python libraries
 RUN pip3 install telebot mss python-dotenv
 
-# Create a startup script
 COPY start.sh .
 RUN chmod +x start.sh
 
-# Run the startup script
-# CMD ["./start.sh"]
-CMD ["sleep", "infinity"]
+# Expose VNC port
+EXPOSE 5900
+
+CMD ["./start.sh"]
