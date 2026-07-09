@@ -1,0 +1,10 @@
+line-length = 120
+
+[lint]
+select = ["E",  "I"]
+
+[lint.isort]
+split-on-trailing-comma = false
+
+[format]
+skip-magic-trailing-comma = true
