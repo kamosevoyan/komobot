@@ -140,12 +140,8 @@ def handle_just_qr(message):
         time.sleep(0.5)
 
         # Tap 1 (Replace X1, Y1)
-        subprocess.run(["adb", "shell", "input", "tap", "272", "72"])
+        subprocess.run(["adb", "shell", "input", "tap", "272", "172"])
         time.sleep(1.5)
-
-        # Tap 2 (Replace X2, Y2)
-        subprocess.run(["adb", "shell", "input", "tap", "175", "175"])
-        time.sleep(1)
 
         bot.send_message(chat_id, "✅ QR Code is ready! Press '📸 Take Screenshot'.")
     except Exception as e:
