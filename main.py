@@ -1,14 +1,15 @@
-import telebot
-from telebot import types
+import logging
+import os
+import random
 import subprocess
+import threading
 import time
+
 import mss
 import mss.tools
-import os
-import threading
-import random
-import logging
+import telebot
 from dotenv import load_dotenv
+from telebot import types
 
 # --- LOGGING SETUP ---
 LOG_DIR = "./logs"
@@ -30,11 +31,27 @@ APP_PIN = os.getenv("APP_PIN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 EMULATOR_TITLE = "Android Emulator"
+APP_NAME = "ru.deltapay.puntopago.telcell"
 
 OFFSET_X = 10
 OFFSET_Y = 40
 CROP_WIDTH = 20
 CROP_HEIGHT = 50
+
+# --- PIN PAD COORDINATES ---
+# Replace these strings with the exact X and Y coordinates from your emulator
+PIN_COORDS = {
+    "1": ("77", "438"),
+    "4": ("77", "476"),
+    "7": ("77", "514"),
+    "2": ("160", "438"),
+    "5": ("160", "476"),
+    "8": ("160", "514"),
+    "0": ("160", "552"),
+    "3": ("243", "438"),
+    "6": ("243", "476"),
+    "9": ("243", "514"),
+}
 # ---------------------
 
 
@@ -97,11 +114,13 @@ def send_welcome(message):
     chat_id = message.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
 
-    btn_unlock_qr = types.KeyboardButton("🔓 Unlock")
-    btn_just_qr = types.KeyboardButton("📲 Open QR")
+    btn_unlock = types.KeyboardButton("🔓 Unlock")
+    btn_open_qr = types.KeyboardButton("📲 Open QR")
     btn_screenshot = types.KeyboardButton("📸 Take Screenshot")
+    btn_open_app = types.KeyboardButton("📱 Open the app")
+    btn_close_app = types.KeyboardButton("❌️ Close the app")
 
-    markup.add(btn_unlock_qr, btn_just_qr, btn_screenshot)
+    markup.add(btn_open_app, btn_close_app, btn_unlock, btn_open_qr, btn_screenshot)
     bot.send_message(
         chat_id,
         "Welcome to the Automation Controller!\nChoose the action that matches the emulator's current state.",
@@ -109,26 +128,69 @@ def send_welcome(message):
     )
 
 
-@bot.message_handler(func=lambda message: message.text == "🔓 Unlock")
+@bot.message_handler(func=lambda message: message.text == "❌️ Close the app")
 def handle_unlock_qr(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "Executing PIN unlock and navigating to QR code...")
+    bot.send_message(chat_id, "Closing the app..")
 
     try:
+        subprocess.run(["adb", "shell", "am", "force-stop", APP_NAME])
+        time.sleep(1.0)
+
+    except Exception as e:
+        logger.exception(f"An error occurred: {e}")
+        bot.send_message(chat_id, "Failed to close the app.")
+
+
+@bot.message_handler(func=lambda message: message.text == "📱 Open the app")
+def handle_unlock_qr(message):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "Opening the app..")
+
+    try:
+        subprocess.run(["adb", "shell", "monkey", "-p", APP_NAME, "1"])
+        time.sleep(1.0)
+
+    except Exception as e:
+        logger.exception(f"An error occurred: {e}")
+        bot.send_message(chat_id, "Failed to open the app.")
+
+
+@bot.message_handler(commands=["login"])
+@bot.message_handler(func=lambda message: message.text == "🔓 Unlock")
+def handle_login_command(message):
+    """Executes ADB touches to input the custom PIN."""
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "Initiating automated PIN sequence...")
+
+    try:
+        # 1. Wake up the screen just in case
         subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_WAKEUP"])
         time.sleep(0.5)
 
-        if not APP_PIN:
+        # 2. Get the PIN from your .env file
+        app_pin = os.getenv("APP_PIN")
+        if not app_pin:
             bot.send_message(chat_id, "Error: APP_PIN not found in .env file.")
             return
 
-        subprocess.run(["adb", "shell", "input", "text", APP_PIN])
-        logger.info("PIN entered via ADB.")
-        time.sleep(4)  # Wait for dashboard
+        # 3. Loop through each digit in the PIN and tap its specific coordinate
+        for digit in str(app_pin):
+            if digit in PIN_COORDS:
+                x, y = PIN_COORDS[digit]
+                subprocess.run(["adb", "shell", "input", "tap", x, y])
+
+                # Wait 0.3 seconds between taps to mimic human speed
+                # and allow the app's UI animation to register the input
+                time.sleep(0.3)
+            else:
+                logger.warning(f"Warning: Digit {digit} not found in coordinate map.")
+
+        bot.send_message(chat_id, "PIN sequence executed successfully.")
 
     except Exception as e:
-        logger.exception("Failed to execute unlock macro.")
-        bot.send_message(chat_id, f"An error occurred: {e}")
+        logger.exception(f"Failed to execute ADB commands: {e}")
+        bot.send_message(chat_id, "Failed to unlock the app.")
 
 
 @bot.message_handler(func=lambda message: message.text == "📲 Open QR")
