@@ -39,7 +39,6 @@ CROP_WIDTH = 20
 CROP_HEIGHT = 50
 
 # --- PIN PAD COORDINATES ---
-# Replace these strings with the exact X and Y coordinates from your emulator
 PIN_COORDS = {
     "1": ("77", "438"),
     "4": ("77", "476"),
@@ -55,30 +54,50 @@ PIN_COORDS = {
 # ---------------------
 
 
+# --- CORE ADB EXECUTOR ---
+def execute_adb(args, delay=0.5, silent=False):
+    """
+    Executes an ADB command safely, logs the output, and applies a mandatory delay.
+    :param args: List of arguments after 'adb' (e.g. ["shell", "input", "tap", "X", "Y"])
+    :param delay: Seconds to wait after execution to allow the UI to catch up.
+    :param silent: If True, suppresses normal logs (useful for spammy keep-alive commands).
+    :return: True if successful, False if the command failed.
+    """
+    cmd = ["adb"] + args
+    cmd_str = " ".join(cmd)
+
+    if not silent:
+        logger.debug(f"Executing: {cmd_str}")
+
+    try:
+        # capture_output lets us read exactly why ADB failed if it crashes
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if delay > 0:
+            time.sleep(delay)
+        return True
+    except subprocess.CalledProcessError as e:
+        if not silent:
+            logger.error(f"ADB command failed: {cmd_str} | Error: {e.stderr.strip()}")
+        return False
+    except Exception as e:
+        if not silent:
+            logger.exception(f"Unexpected error running ADB: {cmd_str}")
+        return False
+
+
+# -------------------------
+
+
 def keep_app_awake():
     logger.info("Hardware key keep-alive initialized.")
     while True:
         try:
-            # 20 to 45 seconds is safe for most financial apps
             sleep_time = random.uniform(20.0, 45.0)
             time.sleep(sleep_time)
 
-            logger.debug("Sending hardware volume key to keep session alive without touching UI.")
-            # Volume Up (24)
-            subprocess.run(
-                ["adb", "shell", "input", "keyevent", "24"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.5)
-            # Volume Down (25)
-            subprocess.run(
-                ["adb", "shell", "input", "keyevent", "25"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            # Use the new helper function in silent mode so we don't flood the logs
+            execute_adb(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)  # Volume Up
+            execute_adb(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)  # Volume Down
 
         except Exception as e:
             logger.exception("Keep-alive error!")
@@ -123,103 +142,86 @@ def send_welcome(message):
     markup.add(btn_open_app, btn_close_app, btn_unlock, btn_open_qr, btn_screenshot)
     bot.send_message(
         chat_id,
-        "Welcome to the Automation Controller!\nChoose the action that matches the emulator's current state.",
+        "Welcome to the Automation Controller! 🤖\nChoose an action below to interact with the emulator.",
         reply_markup=markup,
     )
 
 
 @bot.message_handler(func=lambda message: message.text == "❌️ Close the app")
-def handle_unlock_qr(message):
+def handle_close_app(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "Closing the app..")
+    bot.send_message(chat_id, "🧹 Closing the app...")
 
-    try:
-        subprocess.run(["adb", "shell", "am", "force-stop", APP_NAME])
-        time.sleep(1.0)
-
-    except Exception as e:
-        logger.exception(f"An error occurred: {e}")
-        bot.send_message(chat_id, "Failed to close the app.")
+    if execute_adb(["shell", "am", "force-stop", APP_NAME], delay=1.0):
+        logger.info("App closed successfully.")
+    else:
+        bot.send_message(chat_id, "⚠️ Failed to close the app. Check the logs.")
 
 
 @bot.message_handler(func=lambda message: message.text == "📱 Open the app")
-def handle_unlock_qr(message):
+def handle_open_app(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "Opening the app..")
+    bot.send_message(chat_id, "🚀 Opening the app...")
 
-    try:
-        subprocess.run(["adb", "shell", "monkey", "-p", APP_NAME, "1"])
-        time.sleep(1.0)
-
-    except Exception as e:
-        logger.exception(f"An error occurred: {e}")
-        bot.send_message(chat_id, "Failed to open the app.")
+    if execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=2.0):
+        logger.info("App launched successfully.")
+    else:
+        bot.send_message(chat_id, "⚠️ Failed to open the app. Check the logs.")
 
 
 @bot.message_handler(commands=["login"])
 @bot.message_handler(func=lambda message: message.text == "🔓 Unlock")
 def handle_login_command(message):
-    """Executes ADB touches to input the custom PIN."""
     chat_id = message.chat.id
-    bot.send_message(chat_id, "Initiating automated PIN sequence...")
+    bot.send_message(chat_id, "🔐 Initiating automated PIN sequence...")
 
-    try:
-        # 1. Wake up the screen just in case
-        subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-        time.sleep(0.5)
+    execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
 
-        # 2. Get the PIN from your .env file
-        app_pin = os.getenv("APP_PIN")
-        if not app_pin:
-            bot.send_message(chat_id, "Error: APP_PIN not found in .env file.")
-            return
+    if not APP_PIN:
+        bot.send_message(chat_id, "❌ Error: APP_PIN not found in .env file.")
+        logger.error("Unlock failed: Missing APP_PIN.")
+        return
 
-        # 3. Loop through each digit in the PIN and tap its specific coordinate
-        for digit in str(app_pin):
-            if digit in PIN_COORDS:
-                x, y = PIN_COORDS[digit]
-                subprocess.run(["adb", "shell", "input", "tap", x, y])
+    logger.info("Executing PIN sequence...")
+    success = True
 
-                # Wait 0.3 seconds between taps to mimic human speed
-                # and allow the app's UI animation to register the input
-                time.sleep(0.3)
-            else:
-                logger.warning(f"Warning: Digit {digit} not found in coordinate map.")
+    for digit in str(APP_PIN):
+        if digit in PIN_COORDS:
+            x, y = PIN_COORDS[digit]
+            if not execute_adb(["shell", "input", "tap", x, y], delay=0.3):
+                success = False
+                break
+        else:
+            logger.warning(f"Digit '{digit}' not found in coordinate map. Skipping.")
 
-        bot.send_message(chat_id, "PIN sequence executed successfully.")
-
-    except Exception as e:
-        logger.exception(f"Failed to execute ADB commands: {e}")
-        bot.send_message(chat_id, "Failed to unlock the app.")
+    if success:
+        bot.send_message(chat_id, "✅ PIN sequence executed successfully.")
+    else:
+        bot.send_message(chat_id, "⚠️ Something went wrong during the PIN sequence. Check logs.")
 
 
 @bot.message_handler(func=lambda message: message.text == "📲 Open QR")
 def handle_just_qr(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "App is already open. Navigating directly to QR...")
-    try:
-        subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_WAKEUP"])
-        time.sleep(0.5)
+    bot.send_message(chat_id, "🧭 Navigating directly to QR code...")
 
-        # Tap 1 (Replace X1, Y1)
-        subprocess.run(["adb", "shell", "input", "tap", "272", "172"])
-        time.sleep(1.5)
+    execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
 
+    if execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5):
         bot.send_message(chat_id, "✅ QR Code is ready! Press '📸 Take Screenshot'.")
-    except Exception as e:
-        logger.exception("Failed direct QR navigation.")
-        bot.send_message(chat_id, f"Error: {e}")
+    else:
+        bot.send_message(chat_id, "⚠️ Failed to navigate to QR code.")
 
 
 @bot.message_handler(func=lambda message: message.text == "📸 Take Screenshot")
 def handle_screenshot_command(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "Locating emulator and capturing screen...")
+    bot.send_message(chat_id, "🔍 Locating emulator and capturing screen...")
 
     monitor = get_window_geometry(EMULATOR_TITLE)
     if not monitor:
         logger.warning("Screenshot requested, but wmctrl could not find window.")
-        bot.send_message(chat_id, "Error: Could not find the emulator window.")
+        bot.send_message(chat_id, "❌ Error: Could not find the emulator window on the host.")
         return
 
     try:
@@ -254,10 +256,13 @@ def handle_screenshot_command(message):
 
         with open(screenshot_path, "rb") as photo:
             bot.send_photo(chat_id, photo)
+
         os.remove(screenshot_path)
+        logger.info("Screenshot successfully taken and sent to Telegram.")
+
     except Exception as e:
         logger.exception("Screenshot capture failed.")
-        bot.send_message(chat_id, f"Capture error: {e}")
+        bot.send_message(chat_id, "❌ Capture error. Check the server logs for details.")
 
 
 if __name__ == "__main__":
