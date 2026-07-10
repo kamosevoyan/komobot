@@ -6,7 +6,7 @@ docker run -d \
 	--device /dev/kvm \
 	--privileged \
 	-e BOOT_MODE=resume \
-	-p 5900:5900 \
+	-p 127.0.0.1:5900:5900 \
 	-v emulator-data:/root/.android \
 	-v ~/android_bot_logs:/app/logs \
 	android-bot-image
