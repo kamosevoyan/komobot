@@ -259,7 +259,8 @@ def process_automated_screenshot(chat_id):
             bot.send_message(chat_id, "🔄 App in background. Restoring...")
             # The monkey command safely brings a background app to the front
             execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=3.0)
-            state = "locked"
+            state = check_app_state()
+
         elif state == "closed":
             bot.send_message(chat_id, "🚀 Launching app...")
             execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=4.0)
