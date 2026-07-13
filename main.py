@@ -74,6 +74,41 @@ state = {"public_access_enabled": True}
 emulator_lock = threading.Lock()
 request_queue = queue.Queue()
 
+# --- INACTIVITY TRACKING ---
+last_interaction_time = time.time()
+
+
+def update_activity():
+    """Call this only inside user command handlers."""
+    global last_interaction_time
+    last_interaction_time = time.time()
+
+
+def inactivity_monitor():
+    logger.info("Inactivity monitor initialized.")
+    while True:
+        time.sleep(60)
+        global last_interaction_time
+        # Check if the time has passed
+        if time.time() - last_interaction_time > 60:
+            logger.info("Inactivity limit reached (5m). Hard locking device...")
+
+            with emulator_lock:
+                # 1. Force stop the app
+                execute_adb(["shell", "am", "force-stop", APP_NAME])
+
+                # 2. Go Home (clears the UI state from the screen)
+                execute_adb(["shell", "input", "keyevent", "3"])
+
+                # 3. Turn screen off / Lock device (KEYCODE_POWER)
+                # This ensures the screen is dark and the app isn't active.
+                execute_adb(["shell", "input", "keyevent", "26"])
+
+                logger.info("Inactivity lock sequence executed.")
+
+            # Reset timer
+            last_interaction_time = time.time()
+
 
 def is_admin(message):
     return message.chat.id == ADMIN_ID
@@ -177,16 +212,28 @@ def check_app_state():
     """
     Returns:
     'closed' - App not running
+    'minimized' - App running but in the background
     'locked' - App open but PIN screen detected
     'ready'  - App open and dashboard detected
     'qr_section' - App in the QR section
     """
-    # 1. Check if app is in foreground
+    # 1. Check if app is running at all
     res = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"], capture_output=True, text=True)
     if APP_NAME not in res.stdout:
         return "closed"
 
-    # 2. Check UI hierarchy
+    # NEW: Verify if it is actually the app currently active on screen
+    is_foreground = False
+    for line in res.stdout.split("\n"):
+        if "mResumedActivity" in line or "topResumedActivity" in line:
+            if APP_NAME in line:
+                is_foreground = True
+            break
+
+    if not is_foreground:
+        return "minimized"
+
+    # 2. Check UI hierarchy (Safe now, as we know the app is in the foreground)
     execute_adb(["shell", "uiautomator", "dump", "/sdcard/view.xml"], silent=True)
     execute_adb(["pull", "/sdcard/view.xml", "view.xml"], silent=True)
 
@@ -208,11 +255,15 @@ def process_automated_screenshot(chat_id):
         execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=1.0)
         state = check_app_state()
 
-        # LOGIC BASED ON STATE
-        if state == "closed":
+        if state == "minimized":
+            bot.send_message(chat_id, "🔄 App in background. Restoring...")
+            # The monkey command safely brings a background app to the front
+            execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=3.0)
+            state = "locked"
+        elif state == "closed":
             bot.send_message(chat_id, "🚀 Launching app...")
             execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=4.0)
-            state = "locked"  # Assume it lands on PIN screen
+            state = "locked"
 
         if state == "locked":
             bot.send_message(chat_id, "🔐 App locked. Entering PIN...")
@@ -226,6 +277,7 @@ def process_automated_screenshot(chat_id):
             bot.send_message(chat_id, "📲 Generating QR...")
             execute_adb(["shell", "input", "tap", "40", "600"], delay=1.5)
             execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5)
+            state = "qr_section"
 
         if state == "qr_section":
             bot.send_message(chat_id, "📸 Capturing...")
@@ -335,6 +387,9 @@ def toggle_access(message):
 # Regular User Flow
 @bot.message_handler(func=lambda m: m.text == "📸 Get Screenshot" and is_allowed(m))
 def handle_user_screenshot(message):
+
+    update_activity()
+
     chat_id = message.chat.id
     logger.info(f"User {chat_id} requested an automated screenshot.")
     if not state["public_access_enabled"]:
@@ -349,6 +404,8 @@ def handle_user_screenshot(message):
 @bot.message_handler(func=lambda m: m.text == "❌️ Close the app" and is_admin(m))
 def handle_close_app(message):
     with emulator_lock:
+        update_activity()
+
         logger.info("Admin requested to close the app.")
         bot.send_message(message.chat.id, "🧹 Closing the app...")
         if execute_adb(["shell", "am", "force-stop", APP_NAME], delay=1.0):
@@ -362,6 +419,8 @@ def handle_close_app(message):
 @bot.message_handler(func=lambda m: m.text == "📱 Open the app" and is_admin(m))
 def handle_open_app(message):
     with emulator_lock:
+        update_activity()
+
         logger.info("Admin requested to open the app.")
         bot.send_message(message.chat.id, "🚀 Opening the app...")
         if execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=2.0):
@@ -375,6 +434,8 @@ def handle_open_app(message):
 @bot.message_handler(func=lambda m: m.text == "🔓 Unlock" and is_admin(m))
 def handle_unlock(message):
     with emulator_lock:
+        update_activity()
+
         logger.info("Admin requested to unlock the app.")
         bot.send_message(message.chat.id, "🔐 Unlocking...")
 
@@ -395,6 +456,8 @@ def handle_unlock(message):
 @bot.message_handler(func=lambda m: m.text == "📲 Open QR" and is_admin(m))
 def handle_just_qr(message):
     with emulator_lock:
+        update_activity()
+
         logger.info("Admin requested to navigate to QR code.")
         bot.send_message(message.chat.id, "🧭 Navigating directly to QR code...")
 
@@ -412,6 +475,8 @@ def handle_just_qr(message):
 @bot.message_handler(func=lambda m: m.text == "📸 Take Screenshot" and is_admin(m))
 def handle_screenshot_command(message):
     with emulator_lock:
+        update_activity()
+
         logger.info("Admin requested a manual screenshot.")
         bot.send_message(message.chat.id, "🔍 Capturing screen...")
         img_path = capture_screenshot_logic()
@@ -430,6 +495,9 @@ def handle_screenshot_command(message):
 if __name__ == "__main__":
     awake_thread = threading.Thread(target=keep_app_awake, daemon=True)
     awake_thread.start()
+
+    activity_thread = threading.Thread(target=inactivity_monitor, daemon=True)
+    activity_thread.start()
 
     worker_thread = threading.Thread(target=queue_worker, daemon=True)
     worker_thread.start()
