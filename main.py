@@ -31,6 +31,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_PIN = os.getenv("APP_PIN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
+DEEP_SLEEP_TIME = 3600
+SOFT_SLEEP_TIME = 300
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 EMULATOR_TITLE = "Android Emulator"
@@ -74,6 +77,50 @@ state = {"public_access_enabled": True}
 emulator_lock = threading.Lock()
 request_queue = queue.Queue()
 
+# --- SLEEP STATE MANAGEMENT ---
+emulator_is_sleeping = False
+
+
+def wake_emulator_if_needed(chat_id=None):
+    global emulator_is_sleeping
+    if emulator_is_sleeping:
+        if chat_id:
+            bot.send_message(chat_id, "🥱 Waking up the emulator from deep sleep. This will take ~15 seconds...")
+        logger.info("Waking up emulator from deep sleep...")
+
+        # Launch the emulator process in the background
+        subprocess.Popen(
+            [
+                "emulator",
+                "-avd",
+                "Pixel_Automation",
+                "-memory",
+                "2048",
+                "-no-audio",
+                "-gpu",
+                "swiftshader_indirect",
+                "-snapshot",
+                "telcell_ready",
+                "-no-snapshot-save",
+                "-dns-server",
+                "8.8.8.8,8.8.4.4",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Block until the ADB daemon is responsive again
+        subprocess.run(["adb", "wait-for-device"], check=True)
+        time.sleep(15)  # Allow the snapshot to fully load into memory
+
+        # Reset any stale ADB connections
+        subprocess.run(["adb", "kill-server"])
+        subprocess.run(["adb", "start-server"])
+
+        emulator_is_sleeping = False
+        logger.info("Emulator is fully awake.")
+
+
 # --- INACTIVITY TRACKING ---
 last_interaction_time = time.time()
 
@@ -88,26 +135,28 @@ def inactivity_monitor():
     logger.info("Inactivity monitor initialized.")
     while True:
         time.sleep(60)
-        global last_interaction_time
-        # Check if the time has passed
-        if time.time() - last_interaction_time > 60:
-            logger.info("Inactivity limit reached (5m). Hard locking device...")
+        global last_interaction_time, emulator_is_sleeping
 
+        inactive_time = time.time() - last_interaction_time
+
+        # 1. Deep Sleep at 1 hour (3600 seconds)
+        if inactive_time > DEEP_SLEEP_TIME and not emulator_is_sleeping:
+            logger.info("Deep sleep threshold reached (1h). Shutting down emulator to free RAM...")
             with emulator_lock:
-                # 1. Force stop the app
+                # The 'emu kill' command safely powers down the QEMU virtual machine
+                execute_adb(["emu", "kill"])
+                emulator_is_sleeping = True
+
+        # 2. Soft Lock at 5 minutes (300 seconds)
+        elif (
+            inactive_time > SOFT_SLEEP_TIME and inactive_time < int(1.2 * SOFT_SLEEP_TIME) and not emulator_is_sleeping
+        ):
+            logger.info("Inactivity limit reached (5m). Hard locking device...")
+            with emulator_lock:
                 execute_adb(["shell", "am", "force-stop", APP_NAME])
-
-                # 2. Go Home (clears the UI state from the screen)
                 execute_adb(["shell", "input", "keyevent", "3"])
-
-                # 3. Turn screen off / Lock device (KEYCODE_POWER)
-                # This ensures the screen is dark and the app isn't active.
                 execute_adb(["shell", "input", "keyevent", "26"])
-
                 logger.info("Inactivity lock sequence executed.")
-
-            # Reset timer
-            last_interaction_time = time.time()
 
 
 def is_admin(message):
@@ -142,13 +191,14 @@ def execute_adb(args, delay=0.5, silent=False):
 def keep_app_awake():
     logger.info("Hardware key keep-alive initialized.")
     while True:
-        try:
-            time.sleep(random.uniform(20.0, 45.0))
-            execute_adb(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)
-            execute_adb(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)
-        except Exception as e:
-            logger.exception("Keep-alive error!")
-            time.sleep(5)
+        if not emulator_is_sleeping:
+            try:
+                execute_adb(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)
+                execute_adb(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)
+            except Exception as e:
+                logger.error(f"Keep-alive error: {e}")
+
+        time.sleep(random.uniform(20.0, 45.0))
 
 
 def get_window_geometry(title_keyword):
@@ -253,6 +303,9 @@ def process_automated_screenshot(chat_id):
     bot.send_message(chat_id, "🔍 Checking app status...")
 
     with emulator_lock:
+        # WAKE UP CHECK MUST HAPPEN FIRST
+        wake_emulator_if_needed(chat_id)
+
         # Wake up device (1.0s is safe to ensure the screen powers on)
         execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=1.0)
         state = check_app_state()
@@ -414,6 +467,9 @@ def handle_close_app(message):
     with emulator_lock:
         update_activity()
 
+        chat_id = message.chat.id
+        wake_emulator_if_needed(chat_id)
+
         logger.info("Admin requested to close the app.")
         bot.send_message(message.chat.id, "🧹 Closing the app...")
         if execute_adb(["shell", "am", "force-stop", APP_NAME], delay=1.0):
@@ -429,6 +485,9 @@ def handle_open_app(message):
     with emulator_lock:
         update_activity()
 
+        chat_id = message.chat.id
+        wake_emulator_if_needed(chat_id)
+
         logger.info("Admin requested to open the app.")
         bot.send_message(message.chat.id, "🚀 Opening the app...")
         if execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=2.0):
@@ -443,6 +502,9 @@ def handle_open_app(message):
 def handle_unlock(message):
     with emulator_lock:
         update_activity()
+
+        chat_id = message.chat.id
+        wake_emulator_if_needed(chat_id)
 
         logger.info("Admin requested to unlock the app.")
         bot.send_message(message.chat.id, "🔐 Unlocking...")
@@ -466,6 +528,9 @@ def handle_just_qr(message):
     with emulator_lock:
         update_activity()
 
+        chat_id = message.chat.id
+        wake_emulator_if_needed(chat_id)
+
         logger.info("Admin requested to navigate to QR code.")
         bot.send_message(message.chat.id, "🧭 Navigating directly to QR code...")
 
@@ -484,6 +549,9 @@ def handle_just_qr(message):
 def handle_screenshot_command(message):
     with emulator_lock:
         update_activity()
+
+        chat_id = message.chat.id
+        wake_emulator_if_needed(chat_id)
 
         logger.info("Admin requested a manual screenshot.")
         bot.send_message(message.chat.id, "🔍 Capturing screen...")
