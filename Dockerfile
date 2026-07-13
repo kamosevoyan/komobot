@@ -34,7 +34,7 @@ WORKDIR /app
 COPY main.py .
 COPY .env .
 # Install your Python libraries
-RUN pip3 install telebot mss python-dotenv
+RUN pip3 install telebot mss python-dotenv Pillow opencv-python-headless
 
 COPY start.sh .
 RUN chmod +x start.sh

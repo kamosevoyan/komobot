@@ -7,10 +7,12 @@ import subprocess
 import threading
 import time
 
+import cv2
 import mss
 import mss.tools
 import telebot
 from dotenv import load_dotenv
+from PIL import Image
 from telebot import types
 
 # --- LOGGING SETUP ---
@@ -38,11 +40,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 EMULATOR_TITLE = "Android Emulator"
 APP_NAME = "ru.deltapay.puntopago.telcell"
-
-OFFSET_X = 10
-OFFSET_Y = 40
-CROP_WIDTH = 20
-CROP_HEIGHT = 50
 
 PIN_COORDS = {
     "1": ("77", "438"),
@@ -216,45 +213,58 @@ def get_window_geometry(title_keyword):
     return None
 
 
-def capture_screenshot_logic():
-    logger.info("Initiating screenshot capture logic.")
+def capture_debug_screenshot():
+    """Captures the full emulator window for admin troubleshooting."""
+    logger.info("Capturing full emulator window for debugging.")
     monitor = get_window_geometry(EMULATOR_TITLE)
     if not monitor:
-        logger.error("Could not find emulator window geometry for screenshot.")
         return None
 
-    try:
-        subprocess.run(["wmctrl", "-ia", monitor["id"]])
-        time.sleep(0.5)
-    except Exception as e:
-        logger.error(f"Failed to focus window: {e}")
+    screenshot_path = "debug_screenshot.png"
+    with mss.MSS() as sct:
+        # Capture the raw window directly
+        sct_img = sct.grab(monitor)
+        mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
 
-    safe_monitor = {
-        "left": max(0, monitor["left"] + OFFSET_X),
-        "top": max(0, monitor["top"] + OFFSET_Y),
-        "width": max(100, monitor["width"] - CROP_WIDTH),
-        "height": max(100, monitor["height"] - CROP_HEIGHT),
-    }
+    return screenshot_path
 
-    screenshot_path = "emu_screenshot.png"
+
+def capture_qr_screenshot():
+    """Captures, detects, and extracts only the QR code."""
+    logger.info("Initiating QR detection and extraction.")
+    monitor = get_window_geometry(EMULATOR_TITLE)
+    if not monitor:
+        return None
+
+    screenshot_path = "qr_screenshot.png"
     try:
+        # 1. Capture full window
         with mss.MSS() as sct:
-            primary_monitor = sct.monitors[1]
-            clamped_right = min(safe_monitor["left"] + safe_monitor["width"], primary_monitor["width"])
-            clamped_bottom = min(safe_monitor["top"] + safe_monitor["height"], primary_monitor["height"])
-
-            final_monitor = {
-                "left": safe_monitor["left"],
-                "top": safe_monitor["top"],
-                "width": clamped_right - safe_monitor["left"],
-                "height": clamped_bottom - safe_monitor["top"],
-            }
-            sct_img = sct.grab(final_monitor)
+            sct_img = sct.grab(monitor)
             mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
-            logger.info("Screenshot successfully generated.")
+
+        # 2. Use OpenCV for QR Detection
+        img = cv2.imread(screenshot_path)
+        detector = cv2.QRCodeDetector()
+        data, bbox, straight_qrcode = detector.detectAndDecode(img)
+
+        if bbox is not None:
+            # Calculate coordinates with padding
+            pts = bbox[0].astype(int)
+            x_min = max(0, min(pts[:, 0]) - 20)
+            y_min = max(0, min(pts[:, 1]) - 20)
+            x_max = min(img.shape[1], max(pts[:, 0]) + 20)
+            y_max = min(img.shape[0], max(pts[:, 1]) + 20)
+
+            # 3. Crop and overwrite
+            cropped_img = img[y_min:y_max, x_min:x_max]
+            cv2.imwrite(screenshot_path, cropped_img)
             return screenshot_path
+
+        logger.warning("No QR code detected.")
+        return None
     except Exception as e:
-        logger.exception("Failed to grab screenshot via mss.")
+        logger.exception("Failed to extract QR code.")
         return None
 
 
@@ -342,7 +352,7 @@ def process_automated_screenshot(chat_id):
 
         if state == "qr_section":
             bot.send_message(chat_id, "📸 Capturing...")
-            img_path = capture_screenshot_logic()
+            img_path = capture_qr_screenshot()
 
             if img_path and os.path.exists(img_path):
                 with open(img_path, "rb") as photo:
@@ -555,7 +565,7 @@ def handle_screenshot_command(message):
 
         logger.info("Admin requested a manual screenshot.")
         bot.send_message(message.chat.id, "🔍 Capturing screen...")
-        img_path = capture_screenshot_logic()
+        img_path = capture_debug_screenshot()
 
         if img_path and os.path.exists(img_path):
             with open(img_path, "rb") as photo:
