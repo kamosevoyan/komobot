@@ -217,67 +217,74 @@ def check_app_state():
     'ready'  - App open and dashboard detected
     'qr_section' - App in the QR section
     """
-    # 1. Check if app is running at all
+    # 1. Fast check for foreground activity
     res = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"], capture_output=True, text=True)
     if APP_NAME not in res.stdout:
         return "closed"
 
-    # NEW: Verify if it is actually the app currently active on screen
     is_foreground = False
-    for line in res.stdout.split("\n"):
-        if "mResumedActivity" in line or "topResumedActivity" in line:
-            if APP_NAME in line:
-                is_foreground = True
+    for line in res.stdout.splitlines():
+        if ("mResumedActivity" in line or "topResumedActivity" in line) and APP_NAME in line:
+            is_foreground = True
             break
 
     if not is_foreground:
         return "minimized"
 
-    # 2. Check UI hierarchy (Safe now, as we know the app is in the foreground)
-    execute_adb(["shell", "uiautomator", "dump", "/sdcard/view.xml"], silent=True)
-    execute_adb(["pull", "/sdcard/view.xml", "view.xml"], silent=True)
+    # 2. Check UI hierarchy directly from stdout (Zero host disk I/O, Zero artificial delay)
+    # This command dumps the UI and prints it directly back to Python in milliseconds.
+    ui_res = subprocess.run(
+        ["adb", "shell", "uiautomator dump /sdcard/view.xml >/dev/null 2>&1 && cat /sdcard/view.xml"],
+        capture_output=True,
+        text=True,
+    )
 
-    with open("view.xml", "r") as f:
-        content = f.read()
-        if "Please enter PIN code" in content:
-            return "locked"
+    content = ui_res.stdout
 
-        if "Buy tickets" in content:
-            return "qr_section"
+    if "Please enter PIN code" in content:
+        return "locked"
+    if "Buy tickets" in content:
+        return "qr_section"
 
-        return "ready"
+    return "ready"
 
 
 def process_automated_screenshot(chat_id):
     bot.send_message(chat_id, "🔍 Checking app status...")
 
     with emulator_lock:
+        # Wake up device (1.0s is safe to ensure the screen powers on)
         execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=1.0)
         state = check_app_state()
 
         if state == "minimized":
             bot.send_message(chat_id, "🔄 App in background. Restoring...")
-            # The monkey command safely brings a background app to the front
-            execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=3.0)
+            # Reduced from 3.0s to 1.5s; restoring an app from RAM is very fast
+            execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=1.5)
             state = check_app_state()
 
         elif state == "closed":
             bot.send_message(chat_id, "🚀 Launching app...")
-            execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=4.0)
+            # Reduced from 4.0s to 3.0s; a warm emulator generally boots apps quickly
+            execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=3.0)
             state = "locked"
 
         if state == "locked":
             bot.send_message(chat_id, "🔐 App locked. Entering PIN...")
             for digit in str(APP_PIN):
                 if digit in PIN_COORDS:
-                    execute_adb(["shell", "input", "tap", PIN_COORDS[digit][0], PIN_COORDS[digit][1]], delay=0.3)
-            time.sleep(2.0)
+                    # Reduced tap delay from 0.3s to 0.2s for faster PIN entry
+                    execute_adb(["shell", "input", "tap", PIN_COORDS[digit][0], PIN_COORDS[digit][1]], delay=0.2)
+
+            # Reduced dashboard load time from 2.0s to 1.5s
+            time.sleep(1.5)
             state = "ready"
 
         if state == "ready":
             bot.send_message(chat_id, "📲 Generating QR...")
-            execute_adb(["shell", "input", "tap", "40", "600"], delay=1.5)
-            execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5)
+            # Reduced UI transition delays from 1.5s to 1.0s per tap
+            execute_adb(["shell", "input", "tap", "40", "600"], delay=1.0)
+            execute_adb(["shell", "input", "tap", "272", "172"], delay=1.0)
             state = "qr_section"
 
         if state == "qr_section":
