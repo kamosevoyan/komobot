@@ -213,61 +213,6 @@ def get_window_geometry(title_keyword):
     return None
 
 
-def capture_debug_screenshot():
-    """Captures the full emulator window for admin troubleshooting."""
-    logger.info("Capturing full emulator window for debugging.")
-    monitor = get_window_geometry(EMULATOR_TITLE)
-    if not monitor:
-        return None
-
-    screenshot_path = "debug_screenshot.png"
-    with mss.MSS() as sct:
-        # Capture the raw window directly
-        sct_img = sct.grab(monitor)
-        mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
-
-    return screenshot_path
-
-
-def capture_qr_screenshot():
-    """Captures, detects, and extracts only the QR code."""
-    logger.info("Initiating QR detection and extraction.")
-    monitor = get_window_geometry(EMULATOR_TITLE)
-    if not monitor:
-        return None
-
-    screenshot_path = "qr_screenshot.png"
-    try:
-        # 1. Capture full window
-        with mss.MSS() as sct:
-            sct_img = sct.grab(monitor)
-            mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
-
-        # 2. Use OpenCV for QR Detection
-        img = cv2.imread(screenshot_path)
-        detector = cv2.QRCodeDetector()
-        data, bbox, straight_qrcode = detector.detectAndDecode(img)
-
-        if bbox is not None:
-            # Calculate coordinates with padding
-            pts = bbox[0].astype(int)
-            x_min = max(0, min(pts[:, 0]) - 20)
-            y_min = max(0, min(pts[:, 1]) - 20)
-            x_max = min(img.shape[1], max(pts[:, 0]) + 20)
-            y_max = min(img.shape[0], max(pts[:, 1]) + 20)
-
-            # 3. Crop and overwrite
-            cropped_img = img[y_min:y_max, x_min:x_max]
-            cv2.imwrite(screenshot_path, cropped_img)
-            return screenshot_path
-
-        logger.warning("No QR code detected.")
-        return None
-    except Exception as e:
-        logger.exception("Failed to extract QR code.")
-        return None
-
-
 def check_app_state():
     """
     Returns:
@@ -307,6 +252,52 @@ def check_app_state():
         return "qr_section"
 
     return "ready"
+
+
+def capture_screenshot(mode="qr"):
+    """
+    Captures the screen.
+    mode='qr' -> Detects and crops QR. Returns QR path or None if failed.
+    mode='full' -> Returns the full raw window capture.
+    """
+    logger.info(f"Initiating screenshot capture in '{mode}' mode.")
+    monitor = get_window_geometry(EMULATOR_TITLE)
+    if not monitor:
+        return None
+
+    screenshot_path = "emu_screenshot.png"
+
+    # 1. Capture the raw window
+    with mss.MSS() as sct:
+        sct_img = sct.grab(monitor)
+        mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
+
+    # 2. If full mode, just return the raw image
+    if mode == "full":
+        return screenshot_path
+
+    # 3. If qr mode, apply OpenCV detection
+    try:
+        img = cv2.imread(screenshot_path)
+        detector = cv2.QRCodeDetector()
+        data, bbox, straight_qrcode = detector.detectAndDecode(img)
+
+        if bbox is not None:
+            pts = bbox[0].astype(int)
+            x_min = max(0, min(pts[:, 0]) - 20)
+            y_min = max(0, min(pts[:, 1]) - 20)
+            x_max = min(img.shape[1], max(pts[:, 0]) + 20)
+            y_max = min(img.shape[0], max(pts[:, 1]) + 20)
+
+            cropped_img = img[y_min:y_max, x_min:x_max]
+            cv2.imwrite(screenshot_path, cropped_img)
+            return screenshot_path
+
+        logger.warning("QR Code not detected in screenshot.")
+        return None
+    except Exception as e:
+        logger.exception("Failed to process QR code.")
+        return None
 
 
 def process_automated_screenshot(chat_id):
@@ -352,7 +343,7 @@ def process_automated_screenshot(chat_id):
 
         if state == "qr_section":
             bot.send_message(chat_id, "📸 Capturing...")
-            img_path = capture_qr_screenshot()
+            img_path = capture_screenshot(mode="qr")
 
             if img_path and os.path.exists(img_path):
                 with open(img_path, "rb") as photo:
@@ -394,6 +385,7 @@ def send_welcome(message):
             types.KeyboardButton("🔓 Unlock"),
             types.KeyboardButton("📲 Open QR"),
             types.KeyboardButton("📸 Take Screenshot"),
+            types.KeyboardButton("📸 Take QR Screenshot"),
             types.KeyboardButton("🛑 Toggle Public Access"),
         )
         bot.send_message(
@@ -403,7 +395,7 @@ def send_welcome(message):
         )
     elif is_allowed(message):
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add(types.KeyboardButton("📸 Get Screenshot"))
+        markup.add(types.KeyboardButton("📸 Take QR Screenshot"))
         bot.send_message(chat_id, "Welcome! Press the button below to generate a QR code.", reply_markup=markup)
     else:
         logger.warning(f"Unauthorized access attempt by user: {chat_id}")
@@ -456,7 +448,7 @@ def toggle_access(message):
 
 
 # Regular User Flow
-@bot.message_handler(func=lambda m: m.text == "📸 Get Screenshot" and is_allowed(m))
+@bot.message_handler(func=lambda m: m.text == "📸 Take QR Screenshot" and is_allowed(m))
 def handle_user_screenshot(message):
 
     update_activity()
@@ -559,23 +551,14 @@ def handle_just_qr(message):
 def handle_screenshot_command(message):
     with emulator_lock:
         update_activity()
+        wake_emulator_if_needed(message.chat.id)
 
-        chat_id = message.chat.id
-        wake_emulator_if_needed(chat_id)
-
-        logger.info("Admin requested a manual screenshot.")
-        bot.send_message(message.chat.id, "🔍 Capturing screen...")
-        img_path = capture_debug_screenshot()
+        img_path = capture_screenshot(mode="full")  # Admin gets raw debug view
 
         if img_path and os.path.exists(img_path):
             with open(img_path, "rb") as photo:
                 bot.send_photo(message.chat.id, photo)
             os.remove(img_path)
-            logger.info("Manual screenshot delivered to admin.")
-            bot.send_message(message.chat.id, "✅ Screenshot captured successfully.")
-        else:
-            logger.error("Manual screenshot capture failed.")
-            bot.send_message(message.chat.id, "❌ Capture error. Check logs for details.")
 
 
 if __name__ == "__main__":
