@@ -8,5 +8,5 @@ docker run -d \
 	-e BOOT_MODE=cold \
 	-p 127.0.0.1:5900:5900 \
 	-v emulator-data:/root/.android \
-	-v ~/android_bot_logs:/app/logs \
+	-v ./android_bot_logs:/app/logs \
 	android-bot-image

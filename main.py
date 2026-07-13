@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import queue
 import random
 import subprocess
 import threading
@@ -21,13 +23,14 @@ logging.basicConfig(
     handlers=[logging.FileHandler(f"{LOG_DIR}/bot_activity.log", encoding="utf-8"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
-# ---------------------
 
 load_dotenv(dotenv_path="./.env")
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_PIN = os.getenv("APP_PIN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 EMULATOR_TITLE = "Android Emulator"
@@ -38,7 +41,6 @@ OFFSET_Y = 40
 CROP_WIDTH = 20
 CROP_HEIGHT = 50
 
-# --- PIN PAD COORDINATES ---
 PIN_COORDS = {
     "1": ("77", "438"),
     "4": ("77", "476"),
@@ -51,27 +53,44 @@ PIN_COORDS = {
     "6": ("243", "476"),
     "9": ("243", "514"),
 }
-# ---------------------
+
+# --- ACCESS CONTROL & CONCURRENCY ---
+USERS_FILE = "/root/.android/allowed_users.json"
+allowed_users = set()
+
+if os.path.exists(USERS_FILE):
+    with open(USERS_FILE, "r") as f:
+        allowed_users = set(json.load(f))
 
 
-# --- CORE ADB EXECUTOR ---
+def save_users():
+    with open(USERS_FILE, "w") as f:
+        json.dump(list(allowed_users), f)
+        logger.info(f"User list updated and saved to {USERS_FILE}")
+
+
+state = {"public_access_enabled": True}
+
+emulator_lock = threading.Lock()
+request_queue = queue.Queue()
+
+
+def is_admin(message):
+    return message.chat.id == ADMIN_ID
+
+
+def is_allowed(message):
+    return message.chat.id in allowed_users or message.chat.id == ADMIN_ID
+
+
+# --- CORE SYSTEM FUNCTIONS ---
 def execute_adb(args, delay=0.5, silent=False):
-    """
-    Executes an ADB command safely, logs the output, and applies a mandatory delay.
-    :param args: List of arguments after 'adb' (e.g. ["shell", "input", "tap", "X", "Y"])
-    :param delay: Seconds to wait after execution to allow the UI to catch up.
-    :param silent: If True, suppresses normal logs (useful for spammy keep-alive commands).
-    :return: True if successful, False if the command failed.
-    """
     cmd = ["adb"] + args
     cmd_str = " ".join(cmd)
-
     if not silent:
         logger.debug(f"Executing: {cmd_str}")
-
     try:
-        # capture_output lets us read exactly why ADB failed if it crashes
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         if delay > 0:
             time.sleep(delay)
         return True
@@ -85,160 +104,55 @@ def execute_adb(args, delay=0.5, silent=False):
         return False
 
 
-# -------------------------
-
-
 def keep_app_awake():
     logger.info("Hardware key keep-alive initialized.")
     while True:
         try:
-            sleep_time = random.uniform(20.0, 45.0)
-            time.sleep(sleep_time)
-
-            # Use the new helper function in silent mode so we don't flood the logs
-            execute_adb(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)  # Volume Up
-            execute_adb(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)  # Volume Down
-
+            time.sleep(random.uniform(20.0, 45.0))
+            execute_adb(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)
+            execute_adb(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)
         except Exception as e:
             logger.exception("Keep-alive error!")
             time.sleep(5)
 
 
 def get_window_geometry(title_keyword):
-    """Finds the window managed by Fluxbox on X11."""
     try:
         output = subprocess.check_output(["wmctrl", "-lG"]).decode("utf-8")
         for line in output.splitlines():
             if title_keyword in line:
                 parts = line.split(None, 7)
                 if len(parts) >= 8:
-                    w = int(parts[4])
-                    h = int(parts[5])
-                    if w > 100 and h > 100 and w < 1200:
-                        return {
-                            "id": parts[0],
-                            "left": int(parts[2]),
-                            "top": int(parts[3]),
-                            "width": w,
-                            "height": h,
-                            "title": parts[7].strip(),
-                        }
+                    w, h = int(parts[4]), int(parts[5])
+                    if 100 < w < 1200 and h > 100:
+                        return {"id": parts[0], "left": int(parts[2]), "top": int(parts[3]), "width": w, "height": h}
     except Exception as e:
         logger.error(f"Error reading window geometry: {e}")
     return None
 
 
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
-    chat_id = message.chat.id
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-
-    btn_unlock = types.KeyboardButton("🔓 Unlock")
-    btn_open_qr = types.KeyboardButton("📲 Open QR")
-    btn_screenshot = types.KeyboardButton("📸 Take Screenshot")
-    btn_open_app = types.KeyboardButton("📱 Open the app")
-    btn_close_app = types.KeyboardButton("❌️ Close the app")
-
-    markup.add(btn_open_app, btn_close_app, btn_unlock, btn_open_qr, btn_screenshot)
-    bot.send_message(
-        chat_id,
-        "Welcome to the Automation Controller! 🤖\nChoose an action below to interact with the emulator.",
-        reply_markup=markup,
-    )
-
-
-@bot.message_handler(func=lambda message: message.text == "❌️ Close the app")
-def handle_close_app(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "🧹 Closing the app...")
-
-    if execute_adb(["shell", "am", "force-stop", APP_NAME], delay=1.0):
-        logger.info("App closed successfully.")
-    else:
-        bot.send_message(chat_id, "⚠️ Failed to close the app. Check the logs.")
-
-
-@bot.message_handler(func=lambda message: message.text == "📱 Open the app")
-def handle_open_app(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "🚀 Opening the app...")
-
-    if execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=2.0):
-        logger.info("App launched successfully.")
-    else:
-        bot.send_message(chat_id, "⚠️ Failed to open the app. Check the logs.")
-
-
-@bot.message_handler(commands=["login"])
-@bot.message_handler(func=lambda message: message.text == "🔓 Unlock")
-def handle_login_command(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "🔐 Initiating automated PIN sequence...")
-
-    execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
-
-    if not APP_PIN:
-        bot.send_message(chat_id, "❌ Error: APP_PIN not found in .env file.")
-        logger.error("Unlock failed: Missing APP_PIN.")
-        return
-
-    logger.info("Executing PIN sequence...")
-    success = True
-
-    for digit in str(APP_PIN):
-        if digit in PIN_COORDS:
-            x, y = PIN_COORDS[digit]
-            if not execute_adb(["shell", "input", "tap", x, y], delay=0.3):
-                success = False
-                break
-        else:
-            logger.warning(f"Digit '{digit}' not found in coordinate map. Skipping.")
-
-    if success:
-        bot.send_message(chat_id, "✅ PIN sequence executed successfully.")
-    else:
-        bot.send_message(chat_id, "⚠️ Something went wrong during the PIN sequence. Check logs.")
-
-
-@bot.message_handler(func=lambda message: message.text == "📲 Open QR")
-def handle_just_qr(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "🧭 Navigating directly to QR code...")
-
-    execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
-
-    if execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5):
-        bot.send_message(chat_id, "✅ QR Code is ready! Press '📸 Take Screenshot'.")
-    else:
-        bot.send_message(chat_id, "⚠️ Failed to navigate to QR code.")
-
-
-@bot.message_handler(func=lambda message: message.text == "📸 Take Screenshot")
-def handle_screenshot_command(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "🔍 Locating emulator and capturing screen...")
-
+def capture_screenshot_logic():
+    logger.info("Initiating screenshot capture logic.")
     monitor = get_window_geometry(EMULATOR_TITLE)
     if not monitor:
-        logger.warning("Screenshot requested, but wmctrl could not find window.")
-        bot.send_message(chat_id, "❌ Error: Could not find the emulator window on the host.")
-        return
+        logger.error("Could not find emulator window geometry for screenshot.")
+        return None
 
     try:
         subprocess.run(["wmctrl", "-ia", monitor["id"]])
         time.sleep(0.5)
     except Exception as e:
-        logger.error(f"Could not bring window to front: {e}")
+        logger.error(f"Failed to focus window: {e}")
 
-    safe_left = max(0, monitor["left"] + OFFSET_X)
-    safe_top = max(0, monitor["top"] + OFFSET_Y)
-    safe_width = max(100, monitor["width"] - CROP_WIDTH)
-    safe_height = max(100, monitor["height"] - CROP_HEIGHT)
+    safe_monitor = {
+        "left": max(0, monitor["left"] + OFFSET_X),
+        "top": max(0, monitor["top"] + OFFSET_Y),
+        "width": max(100, monitor["width"] - CROP_WIDTH),
+        "height": max(100, monitor["height"] - CROP_HEIGHT),
+    }
 
-    safe_monitor = {"left": safe_left, "top": safe_top, "width": safe_width, "height": safe_height}
-
+    screenshot_path = "emu_screenshot.png"
     try:
-        screenshot_path = "emu_screenshot.png"
         with mss.MSS() as sct:
             primary_monitor = sct.monitors[1]
             clamped_right = min(safe_monitor["left"] + safe_monitor["width"], primary_monitor["width"])
@@ -250,24 +164,275 @@ def handle_screenshot_command(message):
                 "width": clamped_right - safe_monitor["left"],
                 "height": clamped_bottom - safe_monitor["top"],
             }
-
             sct_img = sct.grab(final_monitor)
             mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
-
-        with open(screenshot_path, "rb") as photo:
-            bot.send_photo(chat_id, photo)
-
-        os.remove(screenshot_path)
-        logger.info("Screenshot successfully taken and sent to Telegram.")
-
+            logger.info("Screenshot successfully generated.")
+            return screenshot_path
     except Exception as e:
-        logger.exception("Screenshot capture failed.")
-        bot.send_message(chat_id, "❌ Capture error. Check the server logs for details.")
+        logger.exception("Failed to grab screenshot via mss.")
+        return None
+
+
+def check_app_state():
+    """
+    Returns:
+    'closed' - App not running
+    'locked' - App open but PIN screen detected
+    'ready'  - App open and dashboard detected
+    'qr_section' - App in the QR section
+    """
+    # 1. Check if app is in foreground
+    res = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"], capture_output=True, text=True)
+    if APP_NAME not in res.stdout:
+        return "closed"
+
+    # 2. Check UI hierarchy
+    execute_adb(["shell", "uiautomator", "dump", "/sdcard/view.xml"], silent=True)
+    execute_adb(["pull", "/sdcard/view.xml", "view.xml"], silent=True)
+
+    with open("view.xml", "r") as f:
+        content = f.read()
+        if "Please enter PIN code" in content:
+            return "locked"
+
+        if "Buy tickets" in content:
+            return "qr_section"
+
+        return "ready"
+
+
+def process_automated_screenshot(chat_id):
+    bot.send_message(chat_id, "🔍 Checking app status...")
+
+    with emulator_lock:
+        execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=1.0)
+        state = check_app_state()
+
+        # LOGIC BASED ON STATE
+        if state == "closed":
+            bot.send_message(chat_id, "🚀 Launching app...")
+            execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=4.0)
+            state = "locked"  # Assume it lands on PIN screen
+
+        if state == "locked":
+            bot.send_message(chat_id, "🔐 App locked. Entering PIN...")
+            for digit in str(APP_PIN):
+                if digit in PIN_COORDS:
+                    execute_adb(["shell", "input", "tap", PIN_COORDS[digit][0], PIN_COORDS[digit][1]], delay=0.3)
+            time.sleep(2.0)
+            state = "ready"
+
+        if state == "ready":
+            bot.send_message(chat_id, "📲 Generating QR...")
+            execute_adb(["shell", "input", "tap", "40", "600"], delay=1.5)
+            execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5)
+
+        if state == "qr_section":
+            bot.send_message(chat_id, "📸 Capturing...")
+            img_path = capture_screenshot_logic()
+
+            if img_path and os.path.exists(img_path):
+                with open(img_path, "rb") as photo:
+                    bot.send_photo(chat_id, photo)
+                os.remove(img_path)
+            else:
+                bot.send_message(chat_id, "❌ Capture error.")
+
+
+def queue_worker():
+    logger.info("Task queue worker initialized.")
+    while True:
+        chat_id = request_queue.get()
+        logger.info(f"Dequeued request for user {chat_id}. Processing...")
+        try:
+            if not state["public_access_enabled"]:
+                logger.info(f"Blocked request for user {chat_id} due to paused public access.")
+                bot.send_message(chat_id, "⚠️ The admin has currently paused bot access. Try again later.")
+            else:
+                process_automated_screenshot(chat_id)
+        except Exception as e:
+            logger.exception(f"Queue worker failed while processing user {chat_id}.")
+            bot.send_message(chat_id, "❌ An internal error occurred processing your request.")
+        finally:
+            request_queue.task_done()
+            logger.info(f"Finished handling request for user {chat_id}.")
+
+
+# --- BOT COMMANDS & HANDLERS ---
+@bot.message_handler(commands=["start"])
+def send_welcome(message):
+    chat_id = message.chat.id
+    logger.info(f"Received /start command from user: {chat_id}")
+    if is_admin(message):
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(
+            types.KeyboardButton("📱 Open the app"),
+            types.KeyboardButton("❌️ Close the app"),
+            types.KeyboardButton("🔓 Unlock"),
+            types.KeyboardButton("📲 Open QR"),
+            types.KeyboardButton("📸 Take Screenshot"),
+            types.KeyboardButton("🛑 Toggle Public Access"),
+        )
+        bot.send_message(
+            chat_id,
+            "👑 Admin Dashboard\nUse /adduser <id>, /listusers or /removeuser <id> to manage access.",
+            reply_markup=markup,
+        )
+    elif is_allowed(message):
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("📸 Get Screenshot"))
+        bot.send_message(chat_id, "Welcome! Press the button below to generate a QR code.", reply_markup=markup)
+    else:
+        logger.warning(f"Unauthorized access attempt by user: {chat_id}")
+        bot.send_message(chat_id, "⛔ Unauthorized.")
+
+
+# Admin User Management Commands
+@bot.message_handler(commands=["adduser"], func=is_admin)
+def add_user(message):
+    try:
+        new_id = int(message.text.split()[1])
+        allowed_users.add(new_id)
+        save_users()
+        logger.info(f"Admin added new user: {new_id}")
+        bot.reply_to(message, f"✅ User {new_id} added.")
+    except Exception as e:
+        logger.error(f"Failed to add user: {e}")
+        bot.reply_to(message, "⚠️ Usage: /adduser <telegram_id>")
+
+
+@bot.message_handler(commands=["listusers"], func=is_admin)
+def list_users(message):
+    logger.info("Admin requested user list.")
+    if not allowed_users:
+        bot.reply_to(message, "👥 The allowed users list is currently empty.")
+        return
+    user_list = "\n".join([f"• {uid}" for uid in allowed_users])
+    bot.reply_to(message, f"👥 Allowed Users ({len(allowed_users)}):\n\n{user_list}")
+
+
+@bot.message_handler(commands=["removeuser"], func=is_admin)
+def remove_user(message):
+    try:
+        rem_id = int(message.text.split()[1])
+        allowed_users.discard(rem_id)
+        save_users()
+        logger.info(f"Admin removed user: {rem_id}")
+        bot.reply_to(message, f"🗑️ User {rem_id} removed.")
+    except Exception as e:
+        logger.error(f"Failed to remove user: {e}")
+        bot.reply_to(message, "⚠️ Usage: /removeuser <telegram_id>")
+
+
+@bot.message_handler(func=lambda m: m.text == "🛑 Toggle Public Access" and is_admin(m))
+def toggle_access(message):
+    state["public_access_enabled"] = not state["public_access_enabled"]
+    status = "🟢 ENABLED" if state["public_access_enabled"] else "🔴 DISABLED"
+    logger.info(f"Admin toggled public access: {status}")
+    bot.reply_to(message, f"Public access is now {status}.")
+
+
+# Regular User Flow
+@bot.message_handler(func=lambda m: m.text == "📸 Get Screenshot" and is_allowed(m))
+def handle_user_screenshot(message):
+    chat_id = message.chat.id
+    logger.info(f"User {chat_id} requested an automated screenshot.")
+    if not state["public_access_enabled"]:
+        logger.info(f"Request from {chat_id} denied; access is disabled.")
+        bot.reply_to(message, "⚠️ The bot is currently locked by the admin.")
+        return
+    bot.reply_to(message, "⏳ Added to the processing queue. Please wait...")
+    request_queue.put(chat_id)
+
+
+# Admin Raw Controls
+@bot.message_handler(func=lambda m: m.text == "❌️ Close the app" and is_admin(m))
+def handle_close_app(message):
+    with emulator_lock:
+        logger.info("Admin requested to close the app.")
+        bot.send_message(message.chat.id, "🧹 Closing the app...")
+        if execute_adb(["shell", "am", "force-stop", APP_NAME], delay=1.0):
+            logger.info("App successfully closed.")
+            bot.send_message(message.chat.id, "✅ App closed successfully.")
+        else:
+            logger.error("Failed to close the app.")
+            bot.send_message(message.chat.id, "❌ Failed to close the app.")
+
+
+@bot.message_handler(func=lambda m: m.text == "📱 Open the app" and is_admin(m))
+def handle_open_app(message):
+    with emulator_lock:
+        logger.info("Admin requested to open the app.")
+        bot.send_message(message.chat.id, "🚀 Opening the app...")
+        if execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=2.0):
+            logger.info("App successfully launched.")
+            bot.send_message(message.chat.id, "✅ App opened successfully.")
+        else:
+            logger.error("Failed to open the app.")
+            bot.send_message(message.chat.id, "❌ Failed to open the app.")
+
+
+@bot.message_handler(func=lambda m: m.text == "🔓 Unlock" and is_admin(m))
+def handle_unlock(message):
+    with emulator_lock:
+        logger.info("Admin requested to unlock the app.")
+        bot.send_message(message.chat.id, "🔐 Unlocking...")
+
+        success = execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
+        for digit in str(APP_PIN):
+            if digit in PIN_COORDS:
+                if not execute_adb(["shell", "input", "tap", PIN_COORDS[digit][0], PIN_COORDS[digit][1]], delay=0.3):
+                    success = False
+
+        if success:
+            logger.info("PIN sequence executed successfully.")
+            bot.send_message(message.chat.id, "✅ App unlocked successfully.")
+        else:
+            logger.error("Failed to execute PIN sequence.")
+            bot.send_message(message.chat.id, "❌ Failed to unlock the app.")
+
+
+@bot.message_handler(func=lambda m: m.text == "📲 Open QR" and is_admin(m))
+def handle_just_qr(message):
+    with emulator_lock:
+        logger.info("Admin requested to navigate to QR code.")
+        bot.send_message(message.chat.id, "🧭 Navigating directly to QR code...")
+
+        step1 = execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
+        step2 = execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5)
+
+        if step1 and step2:
+            logger.info("Navigated to QR code successfully.")
+            bot.send_message(message.chat.id, "✅ QR Code opened successfully.")
+        else:
+            logger.error("Failed to navigate to QR screen.")
+            bot.send_message(message.chat.id, "❌ Failed to open QR code.")
+
+
+@bot.message_handler(func=lambda m: m.text == "📸 Take Screenshot" and is_admin(m))
+def handle_screenshot_command(message):
+    with emulator_lock:
+        logger.info("Admin requested a manual screenshot.")
+        bot.send_message(message.chat.id, "🔍 Capturing screen...")
+        img_path = capture_screenshot_logic()
+
+        if img_path and os.path.exists(img_path):
+            with open(img_path, "rb") as photo:
+                bot.send_photo(message.chat.id, photo)
+            os.remove(img_path)
+            logger.info("Manual screenshot delivered to admin.")
+            bot.send_message(message.chat.id, "✅ Screenshot captured successfully.")
+        else:
+            logger.error("Manual screenshot capture failed.")
+            bot.send_message(message.chat.id, "❌ Capture error. Check logs for details.")
 
 
 if __name__ == "__main__":
     awake_thread = threading.Thread(target=keep_app_awake, daemon=True)
     awake_thread.start()
+
+    worker_thread = threading.Thread(target=queue_worker, daemon=True)
+    worker_thread.start()
 
     logger.info("Bot is starting up and polling Telegram...")
     bot.infinity_polling()
