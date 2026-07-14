@@ -57,7 +57,7 @@ Before running the bot, you must calibrate the touch coordinates for your specif
 ```bash
 docker build -t android-bot-image .
 docker volume create emulator-data
-mkdir ~/android_bot_logs
+mkdir ./android_bot_logs
 ```
 
 ## 🧊 The First Run (Cold Boot & Snapshot Setup)
@@ -67,7 +67,7 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 **1. Start the container in Cold Mode locally:**
 
 ```bash
-./run_cold.sh
+./scripts/run_cold.sh
 ```
 
 **2. Connect via VNC:**
@@ -113,7 +113,7 @@ docker run --rm -v emulator-data:/volume -v $(pwd):/backup ubuntu bash -c "cd /v
 Once your snapshot is saved locally (or unpacked on the cloud server), switch the bot to production mode. This will instantly teleport the emulator back to your logged-in state in milliseconds.
 
 ```bash
-./run_resume.sh
+./scripts/run_resume.sh
 ```
 
 Your bot is now running headlessly in the background! Open Telegram and use the custom keyboard to control the system.
@@ -133,7 +133,8 @@ The bot utilizes a custom Reply Keyboard with the following macros:
 * `main.py` - The core Python Telegram bot, logging setup, and ADB executor.
 * `Dockerfile` - Builds the Ubuntu container with Xvfb, Fluxbox, Android SDK, and VNC.
 * `start.sh` - The internal container entrypoint that manages X11 locks, dual-boot snapshot logic, and launches Python.
-* `run_resume.sh` - Host script to run the container in lightning-fast snapshot mode.
-* `run_cold.sh` - Host script to run the container in raw boot mode for manual maintenance.
-* `soft_restart.sh` - Host script to rebuild the image and safely restart without losing the Android data volume.
-* `hard_restart.sh` - **WARNING:** Wipes the Android data volume for a clean factory reset.
+* `scripts/` - Host management scripts:
+  * `run_resume.sh` - Host script to run the container in lightning-fast snapshot mode.
+  * `run_cold.sh` - Host script to run the container in raw boot mode for manual maintenance.
+  * `soft_restart.sh` - Host script to rebuild the image and safely restart without losing the Android data volume.
+  * `hard_restart.sh` - **WARNING:** Wipes the Android data volume for a clean factory reset.
