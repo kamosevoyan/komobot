@@ -1,0 +1,5 @@
+telebot 
+mss 
+python-dotenv 
+Pillow 
+opencv-python-headless

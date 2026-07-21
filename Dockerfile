@@ -33,8 +33,10 @@ RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;andr
 WORKDIR /app
 COPY main.py .
 COPY .env .
-# Install your Python libraries
-RUN pip3 install telebot mss python-dotenv Pillow opencv-python-headless
+COPY requirements.txt .
+
+# Install Python libraries
+RUN pip3 install -r requirements.txt
 
 COPY start.sh .
 RUN chmod +x start.sh
