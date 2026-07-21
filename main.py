@@ -15,32 +15,25 @@ from dotenv import load_dotenv
 from PIL import Image
 from telebot import types
 
-# --- LOGGING SETUP ---
 LOG_DIR = "./logs"
 os.makedirs(LOG_DIR, exist_ok=True)
-
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s",
     handlers=[logging.FileHandler(f"{LOG_DIR}/bot_activity.log", encoding="utf-8"), logging.StreamHandler()],
 )
+
+
 logger = logging.getLogger(__name__)
-
 load_dotenv(dotenv_path="./.env")
-
-# --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_PIN = os.getenv("APP_PIN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-
 DEEP_SLEEP_TIME = 3600
 SOFT_SLEEP_TIME = 300
-
 bot = telebot.TeleBot(BOT_TOKEN)
-
 EMULATOR_TITLE = "Android Emulator"
 APP_NAME = "ru.deltapay.puntopago.telcell"
-
 PIN_COORDS = {
     "1": ("77", "438"),
     "4": ("77", "476"),
@@ -53,11 +46,10 @@ PIN_COORDS = {
     "6": ("243", "476"),
     "9": ("243", "514"),
 }
-
-# --- ACCESS CONTROL & CONCURRENCY ---
 USERS_FILE = "/root/.android/allowed_users.json"
-allowed_users = set()
 
+
+allowed_users = set()
 if os.path.exists(USERS_FILE):
     with open(USERS_FILE, "r") as f:
         allowed_users = set(json.load(f))
@@ -70,11 +62,8 @@ def save_users():
 
 
 state = {"public_access_enabled": True}
-
 emulator_lock = threading.Lock()
 request_queue = queue.Queue()
-
-# --- SLEEP STATE MANAGEMENT ---
 emulator_is_sleeping = False
 
 
@@ -84,8 +73,6 @@ def wake_emulator_if_needed(chat_id=None):
         if chat_id:
             bot.send_message(chat_id, "🥱 Waking up the emulator from deep sleep. This will take ~15 seconds...")
         logger.info("Waking up emulator from deep sleep...")
-
-        # Launch the emulator process in the background
         subprocess.Popen(
             [
                 "emulator",
@@ -105,25 +92,18 @@ def wake_emulator_if_needed(chat_id=None):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-
-        # Block until the ADB daemon is responsive again
         subprocess.run(["adb", "wait-for-device"], check=True)
-        time.sleep(15)  # Allow the snapshot to fully load into memory
-
-        # Reset any stale ADB connections
+        time.sleep(15)
         subprocess.run(["adb", "kill-server"])
         subprocess.run(["adb", "start-server"])
-
         emulator_is_sleeping = False
         logger.info("Emulator is fully awake.")
 
 
-# --- INACTIVITY TRACKING ---
 last_interaction_time = time.time()
 
 
 def update_activity():
-    """Call this only inside user command handlers."""
     global last_interaction_time
     last_interaction_time = time.time()
 
@@ -133,20 +113,16 @@ def inactivity_monitor():
     while True:
         time.sleep(60)
         global last_interaction_time, emulator_is_sleeping
-
         inactive_time = time.time() - last_interaction_time
-
-        # 1. Deep Sleep at 1 hour (3600 seconds)
-        if inactive_time > DEEP_SLEEP_TIME and not emulator_is_sleeping:
+        if inactive_time > DEEP_SLEEP_TIME and (not emulator_is_sleeping):
             logger.info("Deep sleep threshold reached (1h). Shutting down emulator to free RAM...")
             with emulator_lock:
-                # The 'emu kill' command safely powers down the QEMU virtual machine
                 execute_adb(["emu", "kill"])
                 emulator_is_sleeping = True
-
-        # 2. Soft Lock at 5 minutes (300 seconds)
         elif (
-            inactive_time > SOFT_SLEEP_TIME and inactive_time < int(1.2 * SOFT_SLEEP_TIME) and not emulator_is_sleeping
+            inactive_time > SOFT_SLEEP_TIME
+            and inactive_time < int(1.2 * SOFT_SLEEP_TIME)
+            and (not emulator_is_sleeping)
         ):
             logger.info("Inactivity limit reached (5m). Hard locking device...")
             with emulator_lock:
@@ -164,7 +140,6 @@ def is_allowed(message):
     return message.chat.id in allowed_users or message.chat.id == ADMIN_ID
 
 
-# --- CORE SYSTEM FUNCTIONS ---
 def execute_adb(args, delay=0.5, silent=False):
     cmd = ["adb"] + args
     cmd_str = " ".join(cmd)
@@ -194,7 +169,6 @@ def keep_app_awake():
                 execute_adb(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)
             except Exception as e:
                 logger.error(f"Keep-alive error: {e}")
-
         time.sleep(random.uniform(20.0, 45.0))
 
 
@@ -205,7 +179,7 @@ def get_window_geometry(title_keyword):
             if title_keyword in line:
                 parts = line.split(None, 7)
                 if len(parts) >= 8:
-                    w, h = int(parts[4]), int(parts[5])
+                    w, h = (int(parts[4]), int(parts[5]))
                     if 100 < w < 1200 and h > 100:
                         return {"id": parts[0], "left": int(parts[2]), "top": int(parts[3]), "width": w, "height": h}
     except Exception as e:
@@ -214,85 +188,53 @@ def get_window_geometry(title_keyword):
 
 
 def check_app_state():
-    """
-    Returns:
-    'closed' - App not running
-    'minimized' - App running but in the background
-    'locked' - App open but PIN screen detected
-    'ready'  - App open and dashboard detected
-    'qr_section' - App in the QR section
-    """
-    # 1. Fast check for foreground activity
     res = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"], capture_output=True, text=True)
     if APP_NAME not in res.stdout:
         return "closed"
-
     is_foreground = False
     for line in res.stdout.splitlines():
         if ("mResumedActivity" in line or "topResumedActivity" in line) and APP_NAME in line:
             is_foreground = True
             break
-
     if not is_foreground:
         return "minimized"
-
-    # 2. Check UI hierarchy directly from stdout (Zero host disk I/O, Zero artificial delay)
-    # This command dumps the UI and prints it directly back to Python in milliseconds.
     ui_res = subprocess.run(
         ["adb", "shell", "uiautomator dump /sdcard/view.xml >/dev/null 2>&1 && cat /sdcard/view.xml"],
         capture_output=True,
         text=True,
     )
-
     content = ui_res.stdout
-
     if "Please enter PIN code" in content:
         return "locked"
     if "Buy tickets" in content:
         return "qr_section"
-
     return "ready"
 
 
 def capture_screenshot(mode="qr"):
-    """
-    Captures the screen.
-    mode='qr' -> Detects and crops QR. Returns QR path or None if failed.
-    mode='full' -> Returns the full raw window capture.
-    """
     logger.info(f"Initiating screenshot capture in '{mode}' mode.")
     monitor = get_window_geometry(EMULATOR_TITLE)
     if not monitor:
         return None
-
     screenshot_path = "emu_screenshot.png"
-
-    # 1. Capture the raw window
     with mss.MSS() as sct:
         sct_img = sct.grab(monitor)
         mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
-
-    # 2. If full mode, just return the raw image
     if mode == "full":
         return screenshot_path
-
-    # 3. If qr mode, apply OpenCV detection
     try:
         img = cv2.imread(screenshot_path)
         detector = cv2.QRCodeDetector()
         data, bbox, straight_qrcode = detector.detectAndDecode(img)
-
         if bbox is not None:
             pts = bbox[0].astype(int)
             x_min = max(0, min(pts[:, 0]) - 20)
             y_min = max(0, min(pts[:, 1]) - 20)
             x_max = min(img.shape[1], max(pts[:, 0]) + 20)
             y_max = min(img.shape[0], max(pts[:, 1]) + 20)
-
             cropped_img = img[y_min:y_max, x_min:x_max]
             cv2.imwrite(screenshot_path, cropped_img)
             return screenshot_path
-
         logger.warning("QR Code not detected in screenshot.")
         return None
     except Exception as e:
@@ -302,49 +244,33 @@ def capture_screenshot(mode="qr"):
 
 def process_automated_screenshot(chat_id):
     bot.send_message(chat_id, "🔍 Checking app status...")
-
     with emulator_lock:
-        # WAKE UP CHECK MUST HAPPEN FIRST
         wake_emulator_if_needed(chat_id)
-
-        # Wake up device (1.0s is safe to ensure the screen powers on)
         execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=1.0)
         state = check_app_state()
-
         if state == "minimized":
             bot.send_message(chat_id, "🔄 App in background. Restoring...")
-            # Reduced from 3.0s to 1.5s; restoring an app from RAM is very fast
             execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=1.5)
             state = check_app_state()
-
         elif state == "closed":
             bot.send_message(chat_id, "🚀 Launching app...")
-            # Reduced from 4.0s to 3.0s; a warm emulator generally boots apps quickly
             execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=3.0)
             state = "locked"
-
         if state == "locked":
             bot.send_message(chat_id, "🔐 App locked. Entering PIN...")
             for digit in str(APP_PIN):
                 if digit in PIN_COORDS:
-                    # Reduced tap delay from 0.3s to 0.2s for faster PIN entry
                     execute_adb(["shell", "input", "tap", PIN_COORDS[digit][0], PIN_COORDS[digit][1]], delay=0.2)
-
-            # Reduced dashboard load time from 2.0s to 1.5s
             time.sleep(1.5)
             state = "ready"
-
         if state == "ready":
             bot.send_message(chat_id, "📲 Generating QR...")
-            # Reduced UI transition delays from 1.5s to 1.0s per tap
             execute_adb(["shell", "input", "tap", "40", "600"], delay=1.0)
             execute_adb(["shell", "input", "tap", "272", "172"], delay=1.0)
             state = "qr_section"
-
         if state == "qr_section":
             bot.send_message(chat_id, "📸 Capturing...")
             img_path = capture_screenshot(mode="qr")
-
             if img_path and os.path.exists(img_path):
                 with open(img_path, "rb") as photo:
                     bot.send_photo(chat_id, photo)
@@ -372,7 +298,6 @@ def queue_worker():
             logger.info(f"Finished handling request for user {chat_id}.")
 
 
-# --- BOT COMMANDS & HANDLERS ---
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
     chat_id = message.chat.id
@@ -402,7 +327,6 @@ def send_welcome(message):
         bot.send_message(chat_id, "⛔ Unauthorized.")
 
 
-# Admin User Management Commands
 @bot.message_handler(commands=["adduser"], func=is_admin)
 def add_user(message):
     try:
@@ -447,12 +371,9 @@ def toggle_access(message):
     bot.reply_to(message, f"Public access is now {status}.")
 
 
-# Regular User Flow
 @bot.message_handler(func=lambda m: m.text == "📸 Take QR Screenshot" and is_allowed(m))
 def handle_user_screenshot(message):
-
     update_activity()
-
     chat_id = message.chat.id
     logger.info(f"User {chat_id} requested an automated screenshot.")
     if not state["public_access_enabled"]:
@@ -463,15 +384,12 @@ def handle_user_screenshot(message):
     request_queue.put(chat_id)
 
 
-# Admin Raw Controls
 @bot.message_handler(func=lambda m: m.text == "❌️ Close the app" and is_admin(m))
 def handle_close_app(message):
     with emulator_lock:
         update_activity()
-
         chat_id = message.chat.id
         wake_emulator_if_needed(chat_id)
-
         logger.info("Admin requested to close the app.")
         bot.send_message(message.chat.id, "🧹 Closing the app...")
         if execute_adb(["shell", "am", "force-stop", APP_NAME], delay=1.0):
@@ -486,10 +404,8 @@ def handle_close_app(message):
 def handle_open_app(message):
     with emulator_lock:
         update_activity()
-
         chat_id = message.chat.id
         wake_emulator_if_needed(chat_id)
-
         logger.info("Admin requested to open the app.")
         bot.send_message(message.chat.id, "🚀 Opening the app...")
         if execute_adb(["shell", "monkey", "-p", APP_NAME, "1"], delay=2.0):
@@ -504,19 +420,15 @@ def handle_open_app(message):
 def handle_unlock(message):
     with emulator_lock:
         update_activity()
-
         chat_id = message.chat.id
         wake_emulator_if_needed(chat_id)
-
         logger.info("Admin requested to unlock the app.")
         bot.send_message(message.chat.id, "🔐 Unlocking...")
-
         success = execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
         for digit in str(APP_PIN):
             if digit in PIN_COORDS:
                 if not execute_adb(["shell", "input", "tap", PIN_COORDS[digit][0], PIN_COORDS[digit][1]], delay=0.3):
                     success = False
-
         if success:
             logger.info("PIN sequence executed successfully.")
             bot.send_message(message.chat.id, "✅ App unlocked successfully.")
@@ -529,16 +441,12 @@ def handle_unlock(message):
 def handle_just_qr(message):
     with emulator_lock:
         update_activity()
-
         chat_id = message.chat.id
         wake_emulator_if_needed(chat_id)
-
         logger.info("Admin requested to navigate to QR code.")
         bot.send_message(message.chat.id, "🧭 Navigating directly to QR code...")
-
         step1 = execute_adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5)
         step2 = execute_adb(["shell", "input", "tap", "272", "172"], delay=1.5)
-
         if step1 and step2:
             logger.info("Navigated to QR code successfully.")
             bot.send_message(message.chat.id, "✅ QR Code opened successfully.")
@@ -552,9 +460,7 @@ def handle_screenshot_command(message):
     with emulator_lock:
         update_activity()
         wake_emulator_if_needed(message.chat.id)
-
-        img_path = capture_screenshot(mode="full")  # Admin gets raw debug view
-
+        img_path = capture_screenshot(mode="full")
         if img_path and os.path.exists(img_path):
             with open(img_path, "rb") as photo:
                 bot.send_photo(message.chat.id, photo)
@@ -564,12 +470,9 @@ def handle_screenshot_command(message):
 if __name__ == "__main__":
     awake_thread = threading.Thread(target=keep_app_awake, daemon=True)
     awake_thread.start()
-
     activity_thread = threading.Thread(target=inactivity_monitor, daemon=True)
     activity_thread.start()
-
     worker_thread = threading.Thread(target=queue_worker, daemon=True)
     worker_thread.start()
-
     logger.info("Bot is starting up and polling Telegram...")
     bot.infinity_polling()
