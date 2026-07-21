@@ -11,7 +11,6 @@ import cv2
 import mss
 import mss.tools
 import telebot
-from dotenv import load_dotenv
 from PIL import Image
 from telebot import types
 
@@ -25,7 +24,6 @@ logging.basicConfig(
 
 
 logger = logging.getLogger(__name__)
-load_dotenv(dotenv_path="./.env")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_PIN = os.getenv("APP_PIN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))

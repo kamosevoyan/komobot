@@ -32,7 +32,6 @@ RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;andr
 
 WORKDIR /app
 COPY main.py .
-COPY .env .
 COPY requirements.txt .
 
 # Install Python libraries
