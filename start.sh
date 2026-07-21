@@ -37,6 +37,11 @@ if [ "$BOOT_MODE" = "cold" ]; then
 	echo "Android is fully booted!"
 	sleep 10
 
+	echo "Disabling UI animations..."
+	adb shell settings put global window_animation_scale 0
+	adb shell settings put global transition_animation_scale 0
+	adb shell settings put global animator_duration_scale 0
+
 else
 	echo "🚀 RESUME START MODE INITIATED..."
 	# Added -memory flag to limit Android VM memory[cite: 8]
