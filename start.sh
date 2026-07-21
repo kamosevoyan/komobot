@@ -37,11 +37,6 @@ if [ "$BOOT_MODE" = "cold" ]; then
 	echo "Android is fully booted!"
 	sleep 10
 
-	echo "Disabling UI animations..."
-	adb shell settings put global window_animation_scale 0
-	adb shell settings put global transition_animation_scale 0
-	adb shell settings put global animator_duration_scale 0
-
 else
 	echo "🚀 RESUME START MODE INITIATED..."
 	# Added -memory flag to limit Android VM memory[cite: 8]
@@ -49,7 +44,7 @@ else
 		-memory 2048 \
 		-no-audio -gpu \
 		swiftshader_indirect \
-		-snapshot telcell_ready -no-snapshot-save \
+		-snapshot smart_snapshot -no-snapshot-save \
 		-dns-server 8.8.8.8,8.8.4.4 \
 		-no-boot-anim \
 		-prop dalvik.vm.heapsize=256m \
@@ -59,6 +54,11 @@ else
 	echo "Waiting 15 seconds for Snapshot to resume..."
 	sleep 15
 fi
+
+echo "Disabling UI animations..."
+adb shell settings put global window_animation_scale 0
+adb shell settings put global transition_animation_scale 0
+adb shell settings put global animator_duration_scale 0
 
 echo "Starting Telegram Bot..."
 exec python3 main.py

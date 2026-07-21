@@ -82,7 +82,7 @@ def wake_emulator_if_needed(chat_id=None):
                 "-gpu",
                 "swiftshader_indirect",
                 "-snapshot",
-                "telcell_ready",
+                "smart_snapshot",
                 "-no-snapshot-save",
                 "-dns-server",
                 "8.8.8.8,8.8.4.4",
@@ -90,10 +90,13 @@ def wake_emulator_if_needed(chat_id=None):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        subprocess.run(["adb", "wait-for-device"], check=True)
+        try:
+            subprocess.run(["adb", "wait-for-device"], check=True)
+        except subprocess.CalledProcessError:
+            logger.error("Failed to wait for device")
         time.sleep(15)
-        subprocess.run(["adb", "kill-server"])
-        subprocess.run(["adb", "start-server"])
+        execute_adb(["kill-server"], silent=True)
+        execute_adb(["start-server"], silent=True)
         emulator_is_sleeping = False
         logger.info("Emulator is fully awake.")
 
@@ -138,24 +141,26 @@ def is_allowed(message):
     return message.chat.id in allowed_users or message.chat.id == ADMIN_ID
 
 
-def execute_adb(args, delay=0.5, silent=False):
+def execute_adb(args, delay=0.5, silent=False, capture_output=False):
     cmd = ["adb"] + args
     cmd_str = " ".join(cmd)
     if not silent:
         logger.debug(f"Executing: {cmd_str}")
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         if delay > 0:
             time.sleep(delay)
+        if capture_output:
+            return result.stdout
         return True
     except subprocess.CalledProcessError as e:
         if not silent:
             logger.error(f"ADB command failed: {cmd_str} | Error: {e.stderr.strip()}")
-        return False
+        return None if capture_output else False
     except Exception as e:
         if not silent:
             logger.exception(f"Unexpected error running ADB: {cmd_str}")
-        return False
+        return None if capture_output else False
 
 
 def keep_app_awake():
@@ -186,22 +191,22 @@ def get_window_geometry(title_keyword):
 
 
 def check_app_state():
-    res = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"], capture_output=True, text=True)
-    if APP_NAME not in res.stdout:
+    res = execute_adb(["shell", "dumpsys", "activity", "activities"], capture_output=True, silent=True)
+    if not res or APP_NAME not in res:
         return "closed"
     is_foreground = False
-    for line in res.stdout.splitlines():
+    for line in res.splitlines():
         if ("mResumedActivity" in line or "topResumedActivity" in line) and APP_NAME in line:
             is_foreground = True
             break
     if not is_foreground:
         return "minimized"
-    ui_res = subprocess.run(
-        ["adb", "shell", "uiautomator dump /sdcard/view.xml >/dev/null 2>&1 && cat /sdcard/view.xml"],
+    ui_res = execute_adb(
+        ["shell", "uiautomator dump /sdcard/view.xml >/dev/null 2>&1 && cat /sdcard/view.xml"],
         capture_output=True,
-        text=True,
+        silent=True,
     )
-    content = ui_res.stdout
+    content = ui_res if ui_res else ""
     if "Please enter PIN code" in content:
         return "locked"
     if "Buy tickets" in content:

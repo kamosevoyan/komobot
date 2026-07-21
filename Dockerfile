@@ -29,6 +29,7 @@ RUN yes | sdkmanager --licenses && \
 
 # Create the virtual device
 RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;android-33;google_apis_playstore;x86_64"
+RUN echo "hw.keyboard=yes" >> /root/.android/avd/Pixel_Automation.avd/config.ini
 
 WORKDIR /app
 COPY main.py .
