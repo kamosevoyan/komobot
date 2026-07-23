@@ -42,7 +42,8 @@ Clone this repository and create a `.env` file in the root directory:
 
 ```text
 BOT_TOKEN=your_telegram_bot_token_here
-APP_PIN=1234
+APP_PIN=666
+ADMIN_ID=666666666666666666
 ```
 
 ### 2. Calibrate Coordinates (Important!)
@@ -55,9 +56,9 @@ Before running the bot, you must calibrate the touch coordinates for your specif
 ### 3. Build & Initialize Storage
 
 ```bash
-docker build -t android-bot-image .
-docker volume create emulator-data
-mkdir ./android_bot_logs
+docker build -t codex-gigas .
+docker volume create gehenna
+mkdir ./gomorrah
 ```
 
 ## 🧊 The First Run (Cold Boot & Snapshot Setup)
@@ -84,7 +85,7 @@ Because financial apps require phone number verification and SMS OTPs, you must 
    * Close your VNC viewer and stop the container.
 2. Shell version
    ```bash
-   docker exec <container_name_or_id> adb emu avd snapshot save smart_snapshot
+   docker exec infernal-suffering adb emu avd snapshot save smart_snapshot
    ```
 
 ## ☁️ Cloud Deployment (Golden Volume Migration)
@@ -92,10 +93,10 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 If you are deploying to a remote cloud server, setting up via VNC over the internet is slow and insecure. Instead, transfer your perfectly set up local volume to the cloud using the **Golden Volume** method.
 
 **1. Compress the Local Volume:**
-On your local machine, zip up the `emulator-data` volume containing your saved snapshot:
+On your local machine, zip up the `gehenna` volume containing your saved snapshot:
 
 ```bash
-docker run --rm -v emulator-data:/volume -v $(pwd):/backup ubuntu tar cvzf /backup/emulator-backup.tar.gz -C /volume .
+docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu tar cvzf /backup/emulator-backup.tar.gz -C /volume .
 ```
 
 **2. Send to the Cloud:**
@@ -109,8 +110,8 @@ scp emulator-backup.tar.gz root@YOUR_CLOUD_IP:~/
 SSH into your cloud server, build the Docker image, and unpack the data directly into the cloud's Docker volume:
 
 ```bash
-docker volume create emulator-data
-docker run --rm -v emulator-data:/volume -v $(pwd):/backup ubuntu bash -c "cd /volume && tar xvf /backup/emulator-backup.tar.gz"
+docker volume create gehenna
+docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu bash -c "cd /volume && tar xvf /backup/emulator-backup.tar.gz"
 ```
 
 ## 🚀 Production Mode (Resume Boot)

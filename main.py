@@ -14,7 +14,7 @@ import telebot
 from PIL import Image
 from telebot import types
 
-LOG_DIR = "./logs"
+LOG_DIR = "./sodom"
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.DEBUG,
@@ -78,6 +78,8 @@ def wake_emulator_if_needed(chat_id=None):
                 "Pixel_Automation",
                 "-memory",
                 "2048",
+                "-cores",
+                "2",
                 "-no-audio",
                 "-gpu",
                 "swiftshader_indirect",
