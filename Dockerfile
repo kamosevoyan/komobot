@@ -23,12 +23,12 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm /tmp/tools.zip
 
-# Accept licenses and install the PLAY STORE emulator image
+# Accept licenses and install the PLAY STORE emulator image (API 28)
 RUN yes | sdkmanager --licenses && \
-    sdkmanager "platform-tools" "platforms;android-33" "system-images;android-33;google_apis_playstore;x86_64" "emulator"
+    sdkmanager "platform-tools" "platforms;android-28" "system-images;android-28;google_apis_playstore;x86_64" "emulator"
 
 # Create the virtual device
-RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;android-33;google_apis_playstore;x86_64"
+RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;android-28;google_apis_playstore;x86_64"
 RUN echo "hw.keyboard=yes" >> /root/.android/avd/Pixel_Automation.avd/config.ini
 
 WORKDIR /app

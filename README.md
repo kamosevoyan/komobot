@@ -80,11 +80,11 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 1. GUI version
    * In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
    * Navigate to **Snapshots**, and click **Take Snapshot**.
-   * Name it exactly: `telcell_ready`.
+   * Name it exactly: `smart_snapshot`.
    * Close your VNC viewer and stop the container.
 2. Shell version
    ```bash
-   docker exec <container_name_or_id> adb emu avd snapshot save telcell_ready
+   docker exec <container_name_or_id> adb emu avd snapshot save smart_snapshot
    ```
 
 ## ☁️ Cloud Deployment (Golden Volume Migration)

@@ -27,9 +27,16 @@ fi
 if [ "$BOOT_MODE" = "cold" ]; then
 	echo "🧊 COLD START MODE INITIATED..."
 	# Added -memory flag to limit Android VM memory[cite: 8]
-	emulator -avd Pixel_Automation -memory 2048 -no-audio -gpu swiftshader_indirect -no-snapshot-load -dns-server 8.8.8.8,8.8.4.4 &
+	emulator -avd Pixel_Automation \
+		-memory 2048 \
+		-cores 2 \
+		-no-audio \
+		-gpu swiftshader_indirect \
+		-no-snapshot-load \
+		-cores 2 \
+		-dns-server 8.8.8.8,8.8.4.4 &
 
-	echo "Waiting for Android OS to boot..."
+	echo "Waiting for Android OS to b oot..."
 	adb wait-for-device
 	while [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != "1" ]; do
 		sleep 2
@@ -42,10 +49,12 @@ else
 	# Added -memory flag to limit Android VM memory[cite: 8]
 	emulator -avd Pixel_Automation \
 		-memory 2048 \
-		-no-audio -gpu \
-		swiftshader_indirect \
-		-snapshot smart_snapshot -no-snapshot-save \
+		-cores 2 \
+		-no-audio \
+		-gpu swiftshader_indirect \
+		-no-snapshot-save \
 		-dns-server 8.8.8.8,8.8.4.4 \
+		-snapshot smart_snapshot \
 		-no-boot-anim \
 		-prop dalvik.vm.heapsize=256m \
 		-prop qemu.sf.lcd_density=160 \
