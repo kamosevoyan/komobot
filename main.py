@@ -475,8 +475,13 @@ def handle_screenshot_command(message):
 if __name__ == "__main__":
     awake_thread = threading.Thread(target=keep_app_awake, daemon=True)
     awake_thread.start()
-    activity_thread = threading.Thread(target=inactivity_monitor, daemon=True)
-    activity_thread.start()
+
+    if os.getenv("BOOT_MODE") != "cold":
+        activity_thread = threading.Thread(target=inactivity_monitor, daemon=True)
+        activity_thread.start()
+    else:
+        logger.info("🧊 Cold start mode: Inactivity monitor (sleeps) disabled.")
+
     worker_thread = threading.Thread(target=queue_worker, daemon=True)
     worker_thread.start()
     logger.info("Bot is starting up and polling Telegram...")
