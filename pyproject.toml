@@ -1,0 +1,16 @@
+[project]
+name = "komobot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mss>=10.2.0",
+    "opencv-python-headless>=5.0.0.93",
+    "pillow>=12.3.0",
+    "ruff>=0.16.0",
+    "telebot>=0.0.5",
+]
