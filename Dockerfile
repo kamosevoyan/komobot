@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
+ARG ANDROID_SKD_VERSION=28
+
 ENV DISPLAY=:99
 
 # Install core dependencies, Xvfb, Fluxbox (Window Manager), VNC, and KVM tools
@@ -25,10 +26,10 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
 
 # Accept licenses and install the PLAY STORE emulator image (API 28)
 RUN yes | sdkmanager --licenses && \
-    sdkmanager "platform-tools" "platforms;android-28" "system-images;android-28;google_apis_playstore;x86_64" "emulator"
+    sdkmanager "platform-tools" "platforms;android-${ANDROID_SKD_VERSION}" "system-images;android-${ANDROID_SKD_VERSION};google_apis_playstore;x86_64" "emulator"
 
 # Create the virtual device
-RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;android-28;google_apis_playstore;x86_64"
+RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;android-${ANDROID_SKD_VERSION};google_apis_playstore;x86_64"
 RUN echo "hw.keyboard=yes" >> /root/.android/avd/Pixel_Automation.avd/config.ini
 
 WORKDIR /app
