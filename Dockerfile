@@ -24,7 +24,7 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm /tmp/tools.zip
 
-# Accept licenses and install the PLAY STORE emulator image (API 28)
+# Accept licenses and install the PLAY STORE emulator image
 RUN yes | sdkmanager --licenses && \
     sdkmanager "platform-tools" "platforms;android-${ANDROID_SKD_VERSION}" "system-images;android-${ANDROID_SKD_VERSION};google_apis_playstore;x86_64" "emulator"
 

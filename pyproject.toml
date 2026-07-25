@@ -12,5 +12,6 @@ dev = [
     "opencv-python-headless>=5.0.0.93",
     "pillow>=12.3.0",
     "ruff>=0.16.0",
+    "shfmt-py>=4.0.0",
     "telebot>=0.0.5",
 ]
