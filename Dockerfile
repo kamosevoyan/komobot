@@ -1,7 +1,6 @@
 FROM ubuntu:22.04
 
-ARG ANDROID_SKD_VERSION=28
-
+ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 
 # Install core dependencies, Xvfb, Fluxbox (Window Manager), VNC, and KVM tools
@@ -24,6 +23,8 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm /tmp/tools.zip
 
+ARG ANDROID_SKD_VERSION=28
+
 # Accept licenses and install the PLAY STORE emulator image
 RUN yes | sdkmanager --licenses && \
     sdkmanager "platform-tools" "platforms;android-${ANDROID_SKD_VERSION}" "system-images;android-${ANDROID_SKD_VERSION};google_apis_playstore;x86_64" "emulator"
@@ -36,13 +37,11 @@ WORKDIR /app
 COPY main.py .
 COPY requirements.txt .
 
-# Install Python libraries
 RUN pip3 install -r requirements.txt
 
 COPY start.sh .
 RUN chmod +x start.sh
 
-# Expose VNC port
 EXPOSE 5900
 
 CMD ["./start.sh"]

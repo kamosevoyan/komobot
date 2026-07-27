@@ -17,7 +17,7 @@ sleep 2
 fluxbox &
 sleep 1
 
-# Only start VNC if not in production mode to save resources[cite: 8]
+# Only start VNC if not in production mode to save resources
 if [ "$BOOT_MODE" != "prod" ]; then
     echo "Starting VNC Server on port 5900..."
     x11vnc -display :99 -nopw -forever -bg -quiet
@@ -26,7 +26,7 @@ fi
 # --- DUAL BOOT LOGIC ---
 if [ "$BOOT_MODE" = "cold" ]; then
     echo "🧊 COLD START MODE INITIATED..."
-    # Added -memory flag to limit Android VM memory[cite: 8]
+    # Added -memory flag to limit Android VM memory
     emulator -avd Pixel_Automation \
         -memory 2048 \
         -cores 2 \
@@ -46,7 +46,7 @@ if [ "$BOOT_MODE" = "cold" ]; then
 
 else
     echo "🚀 RESUME START MODE INITIATED..."
-    # Added -memory flag to limit Android VM memory[cite: 8]
+    # Added -memory flag to limit Android VM memory
     emulator -avd Pixel_Automation \
         -memory 2048 \
         -cores 2 \
