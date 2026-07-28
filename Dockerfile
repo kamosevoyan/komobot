@@ -34,9 +34,8 @@ RUN echo "no" | avdmanager create avd -n Pixel_Automation -k "system-images;andr
 RUN echo "hw.keyboard=yes" >> /root/.android/avd/Pixel_Automation.avd/config.ini
 
 WORKDIR /app
-COPY main.py .
-COPY requirements.txt .
 
+COPY requirements.txt .
 RUN pip3 install -r requirements.txt
 
 COPY start.sh .
@@ -44,4 +43,5 @@ RUN chmod +x start.sh
 
 EXPOSE 5900
 
+COPY main.py .
 CMD ["./start.sh"]

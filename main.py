@@ -14,21 +14,11 @@ import telebot
 from telebot import types
 
 LOG_DIR = "./sodom"
-os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s",
-    handlers=[logging.FileHandler(f"{LOG_DIR}/bot_activity.log", encoding="utf-8"), logging.StreamHandler()],
-)
-
-
-logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_PIN = os.getenv("APP_PIN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 DEEP_SLEEP_TIME = 3600
 SOFT_SLEEP_TIME = 300
-bot = telebot.TeleBot(BOT_TOKEN)
 EMULATOR_TITLE = "Android Emulator"
 APP_NAME = "ru.deltapay.puntopago.telcell"
 PIN_COORDS = {
@@ -45,6 +35,15 @@ PIN_COORDS = {
 }
 USERS_FILE = "/root/.android/allowed_users.json"
 
+bot = telebot.TeleBot(BOT_TOKEN)
+logger = logging.getLogger(__name__)
+
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s",
+    handlers=[logging.FileHandler(f"{LOG_DIR}/bot_activity.log", encoding="utf-8"), logging.StreamHandler()],
+)
 
 allowed_users = set()
 if os.path.exists(USERS_FILE):
