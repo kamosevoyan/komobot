@@ -1,7 +1,6 @@
 #!/bin/bash
 
 echo "🧹 Cleaning up stale system locks..."
-# This is the magic fix: Deletes old X11 locks and resets the ADB server
 rm -rf /tmp/.X* /tmp/.X11-unix/*
 adb kill-server
 sleep 1
@@ -9,7 +8,6 @@ sleep 1
 find /root/.android/avd/ -name "*.lock" -delete
 sleep 1
 
-# Reduce resolution and color depth for lower memory usage
 echo "Starting Virtual Display and Window Manager..."
 Xvfb :99 -screen 0 1280x1024x24 &
 sleep 2
@@ -17,16 +15,13 @@ sleep 2
 fluxbox &
 sleep 1
 
-# Only start VNC if not in production mode to save resources
 if [ "$BOOT_MODE" != "prod" ]; then
     echo "Starting VNC Server on port 5900..."
     x11vnc -display :99 -nopw -forever -bg -quiet
 fi
 
-# --- DUAL BOOT LOGIC ---
 if [ "$BOOT_MODE" = "cold" ]; then
     echo "🧊 COLD START MODE INITIATED..."
-    # Added -memory flag to limit Android VM memory
     emulator -avd Pixel_Automation \
         -memory 2048 \
         -cores 2 \
@@ -46,7 +41,6 @@ if [ "$BOOT_MODE" = "cold" ]; then
 
 else
     echo "🚀 RESUME START MODE INITIATED..."
-    # Added -memory flag to limit Android VM memory
     emulator -avd Pixel_Automation \
         -memory 2048 \
         -cores 2 \

@@ -11,7 +11,6 @@ import cv2
 import mss
 import mss.tools
 import telebot
-from PIL import Image
 from telebot import types
 
 LOG_DIR = "./sodom"
