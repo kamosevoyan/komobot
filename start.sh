@@ -28,7 +28,6 @@ if [ "$BOOT_MODE" = "cold" ]; then
         -no-audio \
         -gpu swiftshader_indirect \
         -no-snapshot-load \
-        -cores 2 \
         -dns-server 8.8.8.8,8.8.4.4 &
 
     echo "Waiting for Android OS to b oot..."

@@ -5,13 +5,9 @@ A highly robust, headless Android automation system encapsulated entirely within
 ## ✨ Key Features
 
 * **FLAG_SECURE Bypass:** Instead of rooting the device or using `adb screencap` (which yields black screens for secure apps), this system runs Android inside a virtual X11 framebuffer (`Xvfb`) and uses `mss` and `wmctrl` to securely capture the host-level window buffer.
-
 * **Snapshot State Teleportation:** Utilizes Android Emulator RAM snapshots to instantly resume the phone's state. This bypasses financial app "Cold Boot" security triggers and preserves SMS OTP authentication permanently.
-
 * **Anti-Timeout & Anti-Fraud:** Bypasses aggressive idle-timeouts by simulating physical hardware volume key presses in the background, keeping the app awake without triggering heuristic touch-fraud sensors.
-
 * **Custom In-App PIN Bypass:** Maps and executes touch events sequentially to bypass randomized or custom in-app PIN pads that block standard ADB keyboard input.
-
 * **Fully Dockerized & Headless:** Runs completely invisibly in the background using nested KVM virtualization, a lightweight `fluxbox` window manager, and `x11vnc` for secure remote debugging.
 
 ## 🏗️ Architecture Stack
@@ -22,17 +18,26 @@ A highly robust, headless Android automation system encapsulated entirely within
 * **Display Server:** `Xvfb` (Virtual Framebuffer) + `fluxbox` (Window Manager).
 * **Automation:** Python 3, `telebot` (Telegram), `mss` (Screenshot), `subprocess` (ADB).
 
-## 🛠️ Prerequisites
+## 📂 Project Structure
 
-1. A Linux machine (preferably Ubuntu) with an Intel/AMD CPU. Cloud servers *must* support Nested Virtualization (Bare Metal or specific instance types).
-2. Hardware virtualization enabled:
-
-```bash
-   sudo apt install cpu-checker
-   kvm-ok # Must output: "KVM acceleration can be used"
-```
-
-3. Docker installed and running.
+* `src/`
+  * `core/` - Global classes.
+    * `config.py` - Contains `AppConfig` for dependency injection.
+    * `emulator.py` - Contains `EmulatorController` for ADB wrapper and locks.
+    * `monitor.py` - Contains `SystemMonitor` for background keep-alive daemons.
+  * `vision/` 
+    * `engine.py` - Contains `VisionEngine` abstracting buffer geometry and OpenCV cropping.
+  * `bot/` 
+    * `automator.py` - Contains `AppAutomator` for orchestrating multi-step UI taps.
+    * `controller.py` - Contains `BotController` for the Telebot hooks and user session states.
+* `main.py` - Bootstraps the objects and injects dependencies.
+* `Dockerfile` - Builds the Ubuntu container with Xvfb, Fluxbox, Android SDK, and VNC.
+* `start.sh` - The internal container entrypoint that manages X11 locks, dual-boot snapshot logic, and launches Python.
+* `scripts/` - Host management scripts:
+  * `run_resume.sh` - Host script to run the container in lightning-fast snapshot mode.
+  * `run_cold.sh` - Host script to run the container in raw boot mode for manual maintenance.
+  * `soft_restart.sh` - Host script to rebuild the image and safely restart without losing the Android data volume.
+  * `hard_restart.sh` - **WARNING:** Wipes the Android data volume for a clean factory reset.
 
 ## 🚀 Local Installation & Setup
 
@@ -41,17 +46,17 @@ A highly robust, headless Android automation system encapsulated entirely within
 Clone this repository and create a `.env` file in the root directory:
 
 ```text
-BOT_TOKEN=your_telegram_bot_token_here
-APP_PIN=666
-ADMIN_ID=666666666666666666
+BOT_TOKEN=---
+ADMIN_ID=---
+APP_PIN=---
 ```
 
 ### 2. Calibrate Coordinates (Important!)
 
 Before running the bot, you must calibrate the touch coordinates for your specific app using Android's **Pointer Location** developer tool.
 
-* Open `main.py` and update the `PIN_COORDS` dictionary with the exact X/Y coordinates of your app's PIN pad.
-* Update the `X` and `Y` tap coordinates in `main.py` to match your app's UI flow.
+* Open `core/config.py` and update the `PIN_COORDS` dictionary with the exact X/Y coordinates of your app's PIN pad.
+* Update the `X` and `Y` tap coordinates in `bot/automator.py` to match your app's UI flow.
 
 ### 3. Build & Initialize Storage
 
@@ -79,14 +84,17 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 **3. Save the RAM Snapshot:**
 
 1. GUI version
-   * In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
-   * Navigate to **Snapshots**, and click **Take Snapshot**.
-   * Name it exactly: `smart_snapshot`.
-   * Close your VNC viewer and stop the container.
+
+    * In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
+    * Navigate to **Snapshots**, and click **Take Snapshot**.
+    * Name it exactly: `smart_snapshot`.
+    * Close your VNC viewer and stop the container.
+
+
 2. Shell version
-   ```bash
-   docker exec infernal-suffering adb emu avd snapshot save smart_snapshot
-   ```
+    ```bash
+    docker exec infernal-suffering adb emu avd snapshot save smart_snapshot
+    ```
 
 ## ☁️ Cloud Deployment (Golden Volume Migration)
 
@@ -99,20 +107,31 @@ On your local machine, zip up the `gehenna` volume containing your saved snapsho
 docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu tar cvzf /backup/emulator-backup.tar.gz -C /volume .
 ```
 
-**2. Send to the Cloud:**
+**2. Send to the Cloud & Prepare the Codebase:**
 Securely copy the zipped file to your cloud server:
 
 ```bash
 scp emulator-backup.tar.gz root@YOUR_CLOUD_IP:~/
 ```
 
+Then, SSH into your cloud server and ensure you have the project repository cloned:
+
+```bash
+ssh root@YOUR_CLOUD_IP
+git clone <your-repo-url> my-bot
+mv emulator-backup.tar.gz my-bot/
+cd my-bot
+```
+
 **3. Unpack on the Cloud:**
-SSH into your cloud server, build the Docker image, and unpack the data directly into the cloud's Docker volume:
+Now that you are in your project directory with the backup file present, create the volume and unpack the data:
 
 ```bash
 docker volume create gehenna
-docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu bash -c "cd /volume && tar xvf /backup/emulator-backup.tar.gz"
+docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu bash -c "cd /volume && tar xvzf /backup/emulator-backup.tar.gz"
 ```
+
+*(Note: Don't forget to build your project's Docker image here if you haven't already by running `docker build -t codex-gigas .`)*
 
 ## 🚀 Production Mode (Resume Boot)
 
@@ -133,14 +152,3 @@ The bot utilizes a custom Reply Keyboard with the following macros:
 * **🔓 Unlock:** Wakes the device, enters the custom 4-digit PIN via coordinate tapping, and prepares the dashboard.
 * **📲 Open QR:** Navigates directly to the target QR code screen (assumes the app is already unlocked).
 * **📸 Take Screenshot:** Uses `wmctrl` to focus the window and `mss` to capture a perfectly cropped, secure PNG of the internal framebuffer, bypassing Android UI security.
-
-## 📂 Project Structure
-
-* `main.py` - The core Python Telegram bot, logging setup, and ADB executor.
-* `Dockerfile` - Builds the Ubuntu container with Xvfb, Fluxbox, Android SDK, and VNC.
-* `start.sh` - The internal container entrypoint that manages X11 locks, dual-boot snapshot logic, and launches Python.
-* `scripts/` - Host management scripts:
-  * `run_resume.sh` - Host script to run the container in lightning-fast snapshot mode.
-  * `run_cold.sh` - Host script to run the container in raw boot mode for manual maintenance.
-  * `soft_restart.sh` - Host script to rebuild the image and safely restart without losing the Android data volume.
-  * `hard_restart.sh` - **WARNING:** Wipes the Android data volume for a clean factory reset.

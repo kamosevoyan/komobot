@@ -43,5 +43,7 @@ RUN chmod +x start.sh
 
 EXPOSE 5900
 
+COPY src src
 COPY main.py .
+
 CMD ["./start.sh"]
