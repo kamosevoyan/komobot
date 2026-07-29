@@ -20,18 +20,7 @@ if [ "$BOOT_MODE" != "prod" ]; then
 	x11vnc -display :99 -nopw -forever -bg -quiet
 fi
 
-EMU_ARGS=(
-	-avd Pixel_Automation
-	-memory 2048
-	-cores 2
-	-no-audio
-	-gpu swiftshader_indirect
-	-dns-server 8.8.8.8,8.8.4.4
-	-no-boot-anim
-	-prop dalvik.vm.heapsize=256m
-	-prop qemu.sf.lcd_density=160
-	-prop dalvik.vm.heaptargetutilization=0.9
-)
+EMU_ARGS=($(<src/core/emu_args.txt))
 
 if [ "$BOOT_MODE" = "cold" ]; then
 	echo "🧊 COLD START MODE INITIATED..."

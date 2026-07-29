@@ -36,24 +36,12 @@ class EmulatorController:
             if notify_callback:
                 notify_callback("🥱 Waking up the emulator from deep sleep. This will take ~15 seconds...")
             self.logger.info("Waking up emulator from deep sleep...")
+
+            with open(self.config.emu_args_path, "r") as handler:
+                args = handler.read().splitlines()
+
             subprocess.Popen(
-                [
-                    "emulator",
-                    "-avd",
-                    "Pixel_Automation",
-                    "-memory",
-                    "2048",
-                    "-cores",
-                    "3",
-                    "-no-audio",
-                    "-gpu",
-                    "swiftshader_indirect",
-                    "-snapshot",
-                    "smart_snapshot",
-                    "-no-snapshot-save",
-                    "-dns-server",
-                    "8.8.8.8,8.8.4.4",
-                ],
+                ["emulator", *args, "-no-snapshot-save", "-snapshot smart_snapshot"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

@@ -14,6 +14,7 @@ class AppConfig:
         self.emulator_title = "Android Emulator"
         self.app_name = "ru.deltapay.puntopago.telcell"
         self.users_file = "/root/.android/allowed_users.json"
+        self.emu_args_path = "src/core/emu_args.txt"
 
         self.pin_coords = {
             "1": ("77", "438"),
