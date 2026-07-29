@@ -16,51 +16,47 @@ fluxbox &
 sleep 1
 
 if [ "$BOOT_MODE" != "prod" ]; then
-    echo "Starting VNC Server on port 5900..."
-    x11vnc -display :99 -nopw -forever -bg -quiet
+	echo "Starting VNC Server on port 5900..."
+	x11vnc -display :99 -nopw -forever -bg -quiet
 fi
 
-if [ "$BOOT_MODE" = "cold" ]; then
-    echo "🧊 COLD START MODE INITIATED..."
-    emulator -avd Pixel_Automation \
-        -memory 2048 \
-        -cores 2 \
-        -no-audio \
-        -gpu swiftshader_indirect \
-        -no-snapshot-load \
-        -dns-server 8.8.8.8,8.8.4.4 &
+EMU_ARGS=(
+	-avd Pixel_Automation
+	-memory 2048
+	-cores 2
+	-no-audio
+	-gpu swiftshader_indirect
+	-dns-server 8.8.8.8,8.8.4.4
+	-no-boot-anim
+	-prop dalvik.vm.heapsize=256m
+	-prop qemu.sf.lcd_density=160
+	-prop dalvik.vm.heaptargetutilization=0.9
+)
 
-    echo "Waiting for Android OS to b oot..."
-    adb wait-for-device
-    while [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != "1" ]; do
-        sleep 2
-    done
-    echo "Android is fully booted!"
-    sleep 10
+if [ "$BOOT_MODE" = "cold" ]; then
+	echo "🧊 COLD START MODE INITIATED..."
+	emulator "${EMU_ARGS[@]}" -no-snapshot-load &
+
+	echo "Waiting for Android OS to boot..."
+	adb wait-for-device
+	while [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != "1" ]; do
+		sleep 2
+	done
+	echo "Android is fully booted!"
+	sleep 10
 
 else
-    echo "🚀 RESUME START MODE INITIATED..."
-    emulator -avd Pixel_Automation \
-        -memory 2048 \
-        -cores 2 \
-        -no-audio \
-        -gpu swiftshader_indirect \
-        -no-snapshot-save \
-        -dns-server 8.8.8.8,8.8.4.4 \
-        -snapshot smart_snapshot \
-        -no-boot-anim \
-        -prop dalvik.vm.heapsize=256m \
-        -prop qemu.sf.lcd_density=160 \
-        -prop dalvik.vm.heaptargetutilization=0.9 &
+	echo "🚀 RESUME START MODE INITIATED..."
+	emulator "${EMU_ARGS[@]}" -no-snapshot-save -snapshot smart_snapshot &
 
-    echo "Waiting 15 seconds for Snapshot to resume..."
-    sleep 15
+	echo "Waiting 15 seconds for Snapshot to resume..."
+	sleep 15
 fi
 
 echo "Disabling UI animations..."
-adb shell settings put global window_animation_scale 0
-adb shell settings put global transition_animation_scale 0
-adb shell settings put global animator_duration_scale 0
+for animation_setting in window_animation_scale transition_animation_scale animator_duration_scale; do
+	adb shell settings put global "$animation_setting" 0
+done
 
 echo "Starting Telegram Bot..."
 exec python3 main.py
