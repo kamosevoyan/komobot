@@ -23,7 +23,7 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm /tmp/tools.zip
 
-ARG ANDROID_SKD_VERSION=28
+ARG ANDROID_SKD_VERSION=29
 
 # Accept licenses and install the PLAY STORE emulator image
 RUN yes | sdkmanager --licenses && \

@@ -8,7 +8,7 @@ class EmulatorController:
         self.config = config
         self.logger = config.logger
         self.lock = threading.Lock()
-        self.is_sleeping = False
+        self.is_deep_sleeping = False
 
     def execute(self, args, delay=0.5, silent=False, capture_output=False):
         cmd = ["adb"] + args
@@ -32,27 +32,25 @@ class EmulatorController:
             return None if capture_output else False
 
     def wake_if_needed(self, notify_callback=None):
-        if self.is_sleeping:
+        if self.is_deep_sleeping:
             if notify_callback:
                 notify_callback("🥱 Waking up the emulator from deep sleep. This will take ~15 seconds...")
             self.logger.info("Waking up emulator from deep sleep...")
 
             with open(self.config.emu_args_path, "r") as handler:
-                args = handler.read().splitlines()
+                args = (" ".join(handler.read().splitlines())).split()
 
-            subprocess.Popen(
-                ["emulator", *args, "-no-snapshot-save", "-snapshot smart_snapshot"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            args = ["emulator", "-no-snapshot-save", "-snapshot", "smart_snapshot", *args]
+
+            subprocess.Popen(args)
             try:
                 subprocess.run(["adb", "wait-for-device"], check=True)
             except subprocess.CalledProcessError:
                 self.logger.error("Failed to wait for device")
-            time.sleep(15)
+
             self.execute(["kill-server"], silent=True)
             self.execute(["start-server"], silent=True)
-            self.is_sleeping = False
+            self.is_deep_sleeping = False
             self.logger.info("Emulator is fully awake.")
 
     def check_app_state(self):

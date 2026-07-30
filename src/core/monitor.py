@@ -19,27 +19,22 @@ class SystemMonitor:
             time.sleep(60)
             inactive_time = time.time() - self.last_interaction_time
 
-            if inactive_time > self.config.deep_sleep_time and not self.emulator.is_sleeping:
-                self.logger.info("Deep sleep threshold reached (1h). Shutting down emulator to free RAM...")
+            if inactive_time > self.config.deep_sleep_time and not self.emulator.is_deep_sleeping:
+                self.logger.info("Deep sleep threshold reached. Shutting down emulator to free RAM...")
                 with self.emulator.lock:
                     self.emulator.execute(["emu", "kill"])
-                    self.emulator.is_sleeping = True
-            elif (
-                inactive_time > self.config.soft_sleep_time
-                and inactive_time < int(1.2 * self.config.soft_sleep_time)
-                and not self.emulator.is_sleeping
-            ):
-                self.logger.info("Inactivity limit reached (5m). Hard locking device...")
+                    self.emulator.is_deep_sleeping = True
+            elif inactive_time > self.config.soft_sleep_time and not self.emulator.is_deep_sleeping:
+                self.logger.info("Inactivity limit reached. Hard locking device...")
                 with self.emulator.lock:
                     self.emulator.execute(["shell", "am", "force-stop", self.config.app_name])
                     self.emulator.execute(["shell", "input", "keyevent", "3"])
-                    self.emulator.execute(["shell", "input", "keyevent", "26"])
                     self.logger.info("Inactivity lock sequence executed.")
 
     def _keep_alive_loop(self):
         self.logger.info("Hardware key keep-alive initialized.")
         while True:
-            if not self.emulator.is_sleeping:
+            if not self.emulator.is_deep_sleeping:
                 try:
                     self.emulator.execute(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)
                     self.emulator.execute(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)
