@@ -21,23 +21,23 @@ A highly robust, headless Android automation system encapsulated entirely within
 ## 📂 Project Structure
 
 * `src/`
-  * `core/` - Global classes.
-    * `config.py` - Contains `AppConfig` for dependency injection.
-    * `emulator.py` - Contains `EmulatorController` for ADB wrapper and locks.
-    * `monitor.py` - Contains `SystemMonitor` for background keep-alive daemons.
-  * `vision/` 
-    * `engine.py` - Contains `VisionEngine` abstracting buffer geometry and OpenCV cropping.
-  * `bot/` 
-    * `automator.py` - Contains `AppAutomator` for orchestrating multi-step UI taps.
-    * `controller.py` - Contains `BotController` for the Telebot hooks and user session states.
+	* `core/` - Global classes.
+		* `config.py` - Contains `AppConfig` for dependency injection.
+		* `emulator.py` - Contains `EmulatorController` for ADB wrapper and locks.
+		* `monitor.py` - Contains `SystemMonitor` for background keep-alive daemons.
+	* `vision/`
+		* `engine.py` - Contains `VisionEngine` abstracting buffer geometry and OpenCV cropping.
+	* `bot/`
+		* `automator.py` - Contains `AppAutomator` for orchestrating multi-step UI taps.
+		* `controller.py` - Contains `BotController` for the Telebot hooks and user session states.
 * `main.py` - Bootstraps the objects and injects dependencies.
 * `Dockerfile` - Builds the Ubuntu container with Xvfb, Fluxbox, Android SDK, and VNC.
 * `start.sh` - The internal container entrypoint that manages X11 locks, dual-boot snapshot logic, and launches Python.
-* `scripts/` - Host management scripts:
-  * `run_resume.sh` - Host script to run the container in lightning-fast snapshot mode.
-  * `run_cold.sh` - Host script to run the container in raw boot mode for manual maintenance.
-  * `soft_restart.sh` - Host script to rebuild the image and safely restart without losing the Android data volume.
-  * `hard_restart.sh` - **WARNING:** Wipes the Android data volume for a clean factory reset.
+* `manage.sh` - Host management script with `argument`:
+	* `resume` - Run the container in lightning-fast snapshot mode.
+	* `cold` - Run the container in raw boot mode for manual maintenance.
+	* `soft-restart` - Rebuild the image and safely restart without losing the Android data volume.
+	* `hard-restart` - **WARNING:** Wipes the Android data volume for a clean factory reset.
 
 ## 🚀 Local Installation & Setup
 
@@ -73,7 +73,7 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 **1. Start the container in Cold Mode locally:**
 
 ```bash
-./scripts/run_cold.sh
+./manage.sh cold
 ```
 
 **2. Connect via VNC:**
@@ -85,16 +85,17 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 
 1. GUI version
 
-    * In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
-    * Navigate to **Snapshots**, and click **Take Snapshot**.
-    * Name it exactly: `smart_snapshot`.
-    * Close your VNC viewer and stop the container.
+	* In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
+	* Navigate to **Snapshots**, and click **Take Snapshot**.
+	* Name it exactly: `smart_snapshot`.
+	* Close your VNC viewer and stop the container.
 
 
 2. Shell version
-    ```bash
-    docker exec infernal-suffering adb emu avd snapshot save smart_snapshot
-    ```
+
+	```bash
+	docker exec infernal-suffering adb emu avd snapshot save smart_snapshot
+	```
 
 ## ☁️ Cloud Deployment (Golden Volume Migration)
 
@@ -138,7 +139,7 @@ docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu bash -c "cd /volume 
 Once your snapshot is saved locally (or unpacked on the cloud server), switch the bot to production mode. This will instantly teleport the emulator back to your logged-in state in milliseconds.
 
 ```bash
-./scripts/run_resume.sh
+./manage.sh resume
 ```
 
 Your bot is now running headlessly in the background! Open Telegram and use the custom keyboard to control the system.
