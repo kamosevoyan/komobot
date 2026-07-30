@@ -94,10 +94,12 @@ class BotController:
         def remove_user(message):
             try:
                 rem_id = int(message.text.split()[1])
-                self.allowed_users.discard(rem_id)
+                self.allowed_users.remove(rem_id)
                 self.save_users()
                 self.logger.info(f"Admin removed user: {rem_id}")
                 self.bot.reply_to(message, f"🗑️ User {rem_id} removed.")
+            except KeyError as key_error:
+                self.bot.reply_to(message, f"🛑 User {rem_id} does not exist in the allowed users list.")
             except Exception:
                 self.bot.reply_to(message, "⚠️ Usage: /removeuser <telegram_id>")
 
