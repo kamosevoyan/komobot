@@ -14,7 +14,7 @@ A highly robust, headless Android automation system encapsulated entirely within
 
 * **Host Requirement:** Ubuntu Linux with Hardware Virtualization (`/dev/kvm`) enabled. Cloud environments *must* support Nested Virtualization.
 * **Container OS:** Ubuntu 22.04 LTS
-* **Android OS:** x86_64 Android API 33 (Google APIs Playstore image for ARM-translation layer / libhoudini).
+* **Android OS:** x86_64 Android API 29 (Google APIs Playstore image for ARM-translation layer / libhoudini).
 * **Display Server:** `Xvfb` (Virtual Framebuffer) + `fluxbox` (Window Manager).
 * **Automation:** Python 3, `telebot` (Telegram), `mss` (Screenshot), `subprocess` (ADB).
 
