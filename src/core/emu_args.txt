@@ -8,3 +8,6 @@
 -prop dalvik.vm.heapsize=256m
 -prop qemu.sf.lcd_density=160
 -prop dalvik.vm.heaptargetutilization=0.9
+-camera-back none
+-camera-front none
+-no-metrics

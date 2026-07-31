@@ -47,5 +47,12 @@ for animation_setting in window_animation_scale transition_animation_scale anima
 	adb shell settings put global "$animation_setting" 0
 done
 
+adb shell pm disable-user --user 0 com.android.chrome
+adb shell pm disable-user --user 0 com.google.android.youtube
+adb shell pm disable-user --user 0 com.google.android.gm
+adb shell pm disable-user --user 0 com.google.android.apps.photos
+adb shell settings put global auto_time 0
+adb shell settings put secure location_mode 0
+
 echo "Starting Telegram Bot..."
 exec python3 main.py
