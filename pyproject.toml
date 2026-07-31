@@ -8,10 +8,10 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-    "mss>=10.2.0",
-    "opencv-python-headless>=5.0.0.93",
-    "pillow>=12.3.0",
-    "ruff>=0.16.0",
-    "shfmt-py>=4.0.0",
-    "telebot>=0.0.5",
+    "mss==10.2.0",
+    "opencv-python-headless==5.0.0.93",
+    "pillow==12.3.0",
+    "pytelegrambotapi==4.36.0",
+    "pyzbar==0.1.9",
+    "ruff>=0.16.1",
 ]
