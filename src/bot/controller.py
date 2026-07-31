@@ -20,6 +20,7 @@ class BotController:
         self.allowed_users = set()
         self.public_access = True
         self.request_queue = queue.Queue()
+        self.users_lock = threading.Lock()
 
         self.load_users()
         self._register_handlers()
@@ -75,8 +76,9 @@ class BotController:
         def add_user(message):
             try:
                 new_id = int(message.text.split()[1])
-                self.allowed_users.add(new_id)
-                self.save_users()
+                with self.users_lock:
+                    self.allowed_users.add(new_id)
+                    self.save_users()
                 self.logger.info(f"Admin added new user: {new_id}")
                 self.bot.reply_to(message, f"✅ User {new_id} added.")
             except Exception:
@@ -92,13 +94,15 @@ class BotController:
 
         @self.bot.message_handler(commands=["removeuser"], func=self.is_admin)
         def remove_user(message):
+            rem_id = None
             try:
                 rem_id = int(message.text.split()[1])
-                self.allowed_users.remove(rem_id)
-                self.save_users()
+                with self.users_lock:
+                    self.allowed_users.remove(rem_id)
+                    self.save_users()
                 self.logger.info(f"Admin removed user: {rem_id}")
                 self.bot.reply_to(message, f"🗑️ User {rem_id} removed.")
-            except KeyError as key_error:
+            except KeyError:
                 self.bot.reply_to(message, f"🛑 User {rem_id} does not exist in the allowed users list.")
             except Exception:
                 self.bot.reply_to(message, "⚠️ Usage: /removeuser <telegram_id>")

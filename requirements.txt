@@ -1,4 +1,5 @@
-pyTelegramBotAPI 
-mss 
-Pillow 
-opencv-python-headless
+pyTelegramBotAPI==4.36.0
+mss==10.2.0
+Pillow==12.3.0
+opencv-python-headless==5.0.0.93
+pyzbar==0.1.9

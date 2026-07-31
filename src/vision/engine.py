@@ -1,9 +1,16 @@
 import subprocess
 import tempfile
+import uuid
 
 import cv2
 import mss
 import mss.tools
+import numpy as np
+
+try:
+    from pyzbar.pyzbar import decode as zbar_decode
+except ImportError:
+    zbar_decode = None
 
 
 class VisionEngine:
@@ -27,8 +34,8 @@ class VisionEngine:
                                 "width": w,
                                 "height": h,
                             }
-        except Exception as e:
-            self.logger.error(f"Error reading window geometry: {e}")
+        except Exception:
+            self.logger.exception("Error reading window geometry")
         return None
 
     def capture_screenshot(self, mode="qr"):
@@ -37,32 +44,48 @@ class VisionEngine:
         if not monitor:
             return None
 
-        with mss.MSS() as sct, tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+        screenshot_path = f"{tempfile.gettempdir()}/emu_screenshot_{uuid.uuid4().hex}.png"
+        with mss.MSS() as sct:
             sct_img = sct.grab(monitor)
-            image_path = temp_file.name
-            mss.tools.to_png(sct_img.rgb, sct_img.size, output=image_path)
-            self.logger.info(f"Saving the screenshot at path {image_path}")
+            mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
 
         if mode == "full":
-            return image_path
+            return screenshot_path
 
         try:
-            img = cv2.imread(image_path)
-            detector = cv2.QRCodeDetector()
-            data, bbox, straight_qrcode = detector.detectAndDecode(img)
+            img = cv2.imread(screenshot_path)
+            bbox = self._locate_qr(img)
 
             if bbox is not None:
-                pts = bbox[0].astype(int)
-                x_min = max(0, min(pts[:, 0]) - 20)
-                y_min = max(0, min(pts[:, 1]) - 20)
-                x_max = min(img.shape[1], max(pts[:, 0]) + 20)
-                y_max = min(img.shape[0], max(pts[:, 1]) + 20)
+                x_min = max(0, min(bbox[:, 0]) - 20)
+                y_min = max(0, min(bbox[:, 1]) - 20)
+                x_max = min(img.shape[1], max(bbox[:, 0]) + 20)
+                y_max = min(img.shape[0], max(bbox[:, 1]) + 20)
                 cropped_img = img[y_min:y_max, x_min:x_max]
-                cv2.imwrite(image_path, cropped_img)
-                return image_path
+                cv2.imwrite(screenshot_path, cropped_img)
+                return screenshot_path
 
             self.logger.warning("QR Code not detected in screenshot.")
             return None
-        except Exception as e:
+        except Exception:
             self.logger.exception("Failed to process QR code.")
             return None
+
+    def _locate_qr(self, img):
+        if zbar_decode is not None:
+            results = zbar_decode(img)
+            if results:
+                rect = results[0].rect
+                pts = [
+                    (rect.left, rect.top),
+                    (rect.left + rect.width, rect.top),
+                    (rect.left + rect.width, rect.top + rect.height),
+                    (rect.left, rect.top + rect.height),
+                ]
+                return cv2.convexHull(np.array(pts)).reshape(-1, 2)
+
+        detector = cv2.QRCodeDetector()
+        data, bbox, straight_qrcode = detector.detectAndDecode(img)
+        if bbox is not None:
+            return bbox[0].astype(int)
+        return None

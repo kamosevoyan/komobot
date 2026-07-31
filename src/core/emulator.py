@@ -26,7 +26,7 @@ class EmulatorController:
             if not silent:
                 self.logger.error(f"ADB command failed: {cmd_str} | Error: {e.stderr.strip()}")
             return None if capture_output else False
-        except Exception as e:
+        except Exception:
             if not silent:
                 self.logger.exception(f"Unexpected error running ADB: {cmd_str}")
             return None if capture_output else False

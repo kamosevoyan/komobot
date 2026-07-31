@@ -42,9 +42,20 @@ run_container() {
 		"$IMAGE_NAME"
 }
 
+confirm_wipe() {
+	echo "⚠️  This will PERMANENTLY DELETE the '$VOLUME_NAME' volume, including your"
+	echo "    saved Android snapshot and logged-in app session."
+	read -r -p "Type YES to confirm: " reply
+	if [ "$reply" != "YES" ]; then
+		echo "Aborted. Nothing was deleted."
+		exit 1
+	fi
+}
+
 case "$1" in
 "hard-restart")
 	echo "🔥 INITIATING HARD RESTART"
+	confirm_wipe
 	remove_container
 	echo "🗑️ Wiping Android data volume..."
 	docker volume rm "$VOLUME_NAME" 2>/dev/null || true
