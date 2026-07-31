@@ -152,7 +152,7 @@ class BotController:
                 for digit in str(self.config.app_pin):
                     if digit in self.config.pin_coords:
                         x, y = self.config.pin_coords[digit]
-                        if not self.emulator.execute(["shell", "input", "tap", x, y], delay=0.3):
+                        if not self.emulator.execute(["shell", "input", "tap", x, y], delay=0.3, silent=True):
                             success = False
                 if success:
                     self.bot.send_message(message.chat.id, "✅ App unlocked successfully.")

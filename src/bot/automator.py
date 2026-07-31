@@ -31,7 +31,7 @@ class AppAutomator:
                 for digit in str(self.config.app_pin):
                     if digit in self.config.pin_coords:
                         x, y = self.config.pin_coords[digit]
-                        self.emulator.execute(["shell", "input", "tap", x, y], delay=0.2)
+                        self.emulator.execute(["shell", "input", "tap", x, y], delay=0.2, silent=True)
                 time.sleep(1.5)
                 state = "ready"
 
