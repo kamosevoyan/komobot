@@ -22,8 +22,13 @@ class SystemMonitor:
             inactive_time = time.time() - self.last_interaction_time
 
             with self.emulator.lock:
-                if inactive_time > self.config.deep_sleep_time and not self.emulator.is_deep_sleeping:
-                    self.logger.info("Deep sleep threshold reached. Shutting down emulator to free RAM...")
+                if (
+                    inactive_time > self.config.deep_sleep_time
+                    and not self.emulator.is_deep_sleeping
+                ):
+                    self.logger.info(
+                        "Deep sleep threshold reached. Shutting down emulator to free RAM..."
+                    )
                     self.emulator.execute(["emu", "kill"])
                     self.emulator.is_deep_sleeping = True
                 elif (
@@ -32,7 +37,9 @@ class SystemMonitor:
                     and self.emulator.check_app_state() != "closed"
                 ):
                     self.logger.info("Inactivity limit reached. Closing the app...")
-                    self.emulator.execute(["shell", "am", "force-stop", self.config.app_name])
+                    self.emulator.execute(
+                        ["shell", "am", "force-stop", self.config.app_name]
+                    )
                     self.emulator.execute(["shell", "input", "keyevent", "3"])
 
     def _keep_alive_loop(self):
@@ -40,8 +47,12 @@ class SystemMonitor:
         while True:
             if not self.emulator.is_deep_sleeping:
                 try:
-                    self.emulator.execute(["shell", "input", "keyevent", "24"], delay=0.5, silent=True)
-                    self.emulator.execute(["shell", "input", "keyevent", "25"], delay=0.0, silent=True)
+                    self.emulator.execute(
+                        ["shell", "input", "keyevent", "24"], delay=0.5, silent=True
+                    )
+                    self.emulator.execute(
+                        ["shell", "input", "keyevent", "25"], delay=0.0, silent=True
+                    )
                 except Exception as e:
                     self.logger.error(f"Keep-alive error: {e}")
             time.sleep(random.uniform(20.0, 45.0))
@@ -51,4 +62,6 @@ class SystemMonitor:
             threading.Thread(target=self._keep_alive_loop, daemon=True).start()
             threading.Thread(target=self._inactivity_loop, daemon=True).start()
         else:
-            self.logger.info("🧊 Cold start mode: Inactivity monitor (sleeps) and keep-alive are disabled.")
+            self.logger.info(
+                "🧊 Cold start mode: Inactivity monitor (sleeps) and keep-alive are disabled."
+            )

@@ -34,7 +34,9 @@ class AppConfig:
             level=logging.DEBUG,
             format="%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(message)s",
             handlers=[
-                logging.FileHandler(f"{self.log_dir}/bot_activity.log", encoding="utf-8"),
+                logging.FileHandler(
+                    f"{self.log_dir}/bot_activity.log", encoding="utf-8"
+                ),
                 logging.StreamHandler(),
             ],
         )

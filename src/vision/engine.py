@@ -44,7 +44,9 @@ class VisionEngine:
         if not monitor:
             return None
 
-        screenshot_path = f"{tempfile.gettempdir()}/emu_screenshot_{uuid.uuid4().hex}.png"
+        screenshot_path = (
+            f"{tempfile.gettempdir()}/emu_screenshot_{uuid.uuid4().hex}.png"
+        )
         with mss.MSS() as sct:
             sct_img = sct.grab(monitor)
             mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)

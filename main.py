@@ -1,4 +1,11 @@
-from src import AppAutomator, AppConfig, BotController, EmulatorController, SystemMonitor, VisionEngine
+from src import (
+    AppAutomator,
+    AppConfig,
+    BotController,
+    EmulatorController,
+    SystemMonitor,
+    VisionEngine,
+)
 
 if __name__ == "__main__":
     config = AppConfig()
