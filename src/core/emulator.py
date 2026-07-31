@@ -38,7 +38,7 @@ class EmulatorController:
             self.logger.info("Waking up emulator from deep sleep...")
 
             with open(self.config.emu_args_path, "r") as handler:
-                args = (" ".join(handler.read().splitlines())).split()
+                args = handler.read().split()
 
             args = ["emulator", "-no-snapshot-save", "-snapshot", "smart_snapshot", *args]
 
