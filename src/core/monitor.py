@@ -24,12 +24,15 @@ class SystemMonitor:
                 with self.emulator.lock:
                     self.emulator.execute(["emu", "kill"])
                     self.emulator.is_deep_sleeping = True
-            elif inactive_time > self.config.soft_sleep_time and not self.emulator.is_deep_sleeping:
-                self.logger.info("Inactivity limit reached. Hard locking device...")
+            elif (
+                inactive_time > self.config.soft_sleep_time
+                and not self.emulator.is_deep_sleeping
+                and self.emulator.check_app_state() != "closed"
+            ):
+                self.logger.info("Inactivity limit reached. Closing the app...")
                 with self.emulator.lock:
                     self.emulator.execute(["shell", "am", "force-stop", self.config.app_name])
                     self.emulator.execute(["shell", "input", "keyevent", "3"])
-                    self.logger.info("Inactivity lock sequence executed.")
 
     def _keep_alive_loop(self):
         self.logger.info("Hardware key keep-alive initialized.")

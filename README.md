@@ -49,6 +49,7 @@ Clone this repository and create a `.env` file in the root directory:
 BOT_TOKEN=---
 ADMIN_ID=---
 APP_PIN=---
+APP_NAME=---
 ```
 
 ### 2. Calibrate Coordinates (Important!)

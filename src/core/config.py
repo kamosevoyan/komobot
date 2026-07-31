@@ -4,15 +4,15 @@ import os
 
 class AppConfig:
     def __init__(self):
-        self.log_dir = "./sodom"
         self.bot_token = os.getenv("BOT_TOKEN")
         self.app_pin = os.getenv("APP_PIN")
         self.admin_id = int(os.getenv("ADMIN_ID", 0))
         self.boot_mode = os.getenv("BOOT_MODE", "prod")
+        self.app_name = os.getenv("APP_NAME")
+        self.log_dir = "./sodom"
         self.deep_sleep_time = 3600
         self.soft_sleep_time = 300
         self.emulator_title = "Android Emulator"
-        self.app_name = "ru.deltapay.puntopago.telcell"
         self.users_file = "/root/.android/allowed_users.json"
         self.emu_args_path = "src/core/emu_args.txt"
 
