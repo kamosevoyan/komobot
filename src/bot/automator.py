@@ -19,11 +19,11 @@ class AppAutomator:
 
             if state == "minimized":
                 notify_callback("🔄 App in background. Restoring...")
-                self.emulator.execute(["shell", "monkey", "-p", self.config.app_name, "1"], delay=1.5)
+                self.emulator.execute(["shell", "monkey", "-p", self.config.app_name, "1"], delay=1.0)
                 state = self.emulator.check_app_state()
             elif state == "closed":
                 notify_callback("🚀 Launching app...")
-                self.emulator.execute(["shell", "monkey", "-p", self.config.app_name, "1"], delay=3.0)
+                self.emulator.execute(["shell", "monkey", "-p", self.config.app_name, "1"], delay=1.0)
                 state = "locked"
 
             if state == "locked":

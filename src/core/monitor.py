@@ -15,8 +15,10 @@ class SystemMonitor:
 
     def _inactivity_loop(self):
         self.logger.info("Inactivity monitor initialized.")
+        wait_delta = self.config.soft_sleep_time / 10
+
         while True:
-            time.sleep(60)
+            time.sleep(wait_delta)
             inactive_time = time.time() - self.last_interaction_time
 
             if inactive_time > self.config.deep_sleep_time and not self.emulator.is_deep_sleeping:
