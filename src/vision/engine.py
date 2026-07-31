@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 
 import cv2
 import mss
@@ -36,16 +37,17 @@ class VisionEngine:
         if not monitor:
             return None
 
-        screenshot_path = "emu_screenshot.png"
-        with mss.MSS() as sct:
+        with mss.MSS() as sct, tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
             sct_img = sct.grab(monitor)
-            mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
+            image_path = temp_file.name
+            mss.tools.to_png(sct_img.rgb, sct_img.size, output=image_path)
+            self.logger.info(f"Saving the screenshot at path {image_path}")
 
         if mode == "full":
-            return screenshot_path
+            return image_path
 
         try:
-            img = cv2.imread(screenshot_path)
+            img = cv2.imread(image_path)
             detector = cv2.QRCodeDetector()
             data, bbox, straight_qrcode = detector.detectAndDecode(img)
 
@@ -56,8 +58,8 @@ class VisionEngine:
                 x_max = min(img.shape[1], max(pts[:, 0]) + 20)
                 y_max = min(img.shape[0], max(pts[:, 1]) + 20)
                 cropped_img = img[y_min:y_max, x_min:x_max]
-                cv2.imwrite(screenshot_path, cropped_img)
-                return screenshot_path
+                cv2.imwrite(image_path, cropped_img)
+                return image_path
 
             self.logger.warning("QR Code not detected in screenshot.")
             return None
