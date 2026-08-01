@@ -1,16 +1,25 @@
 import subprocess
 import threading
 import time
+from typing import Callable
+
+from ..core import AppConfig
 
 
 class EmulatorController:
-    def __init__(self, config):
+    def __init__(self, config: AppConfig):
         self.config = config
         self.logger = config.logger
         self.lock = threading.Lock()
         self.is_deep_sleeping = False
 
-    def execute(self, args, delay=0.5, silent=False, capture_output=False):
+    def execute(
+        self,
+        args: list[str],
+        delay: float = 0.5,
+        silent: bool = False,
+        capture_output: bool = False,
+    ):
         cmd = ["adb"] + args
         cmd_str = " ".join(cmd)
         if not silent:
@@ -33,7 +42,7 @@ class EmulatorController:
                 self.logger.exception(f"Unexpected error running ADB: {cmd_str}")
             return None if capture_output else False
 
-    def wake_if_needed(self, notify_callback=None):
+    def wake_if_needed(self, notify_callback: Callable[[str], None] = None):
         if self.is_deep_sleeping:
             if notify_callback:
                 notify_callback(

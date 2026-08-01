@@ -2,9 +2,11 @@ import random
 import threading
 import time
 
+from ..core import AppConfig, EmulatorController
+
 
 class SystemMonitor:
-    def __init__(self, config, emulator):
+    def __init__(self, config: AppConfig, emulator: EmulatorController):
         self.config = config
         self.emulator = emulator
         self.logger = config.logger

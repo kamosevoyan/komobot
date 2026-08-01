@@ -1,15 +1,25 @@
 import os
 import time
+from typing import Callable
+
+from ..core import AppConfig, EmulatorController
+from ..vision import VisionEngine
 
 
 class AppAutomator:
-    def __init__(self, config, emulator, vision):
+    def __init__(
+        self, config: AppConfig, emulator: EmulatorController, vision: VisionEngine
+    ):
         self.config = config
         self.emulator = emulator
         self.vision = vision
         self.logger = config.logger
 
-    def process_screenshot_request(self, notify_callback, send_photo_callback):
+    def process_screenshot_request(
+        self,
+        notify_callback: Callable[[str], None],
+        send_photo_callback: Callable[[str], None],
+    ) -> None:
         notify_callback("🔍 Checking app status...")
         with self.emulator.lock:
             self.emulator.wake_if_needed(notify_callback)

@@ -6,9 +6,20 @@ import threading
 import telebot
 from telebot import types
 
+from ..bot import AppAutomator
+from ..core import AppConfig, EmulatorController, SystemMonitor
+from ..vision import VisionEngine
+
 
 class BotController:
-    def __init__(self, config, automator, monitor, emulator, vision):
+    def __init__(
+        self,
+        config: AppConfig,
+        automator: AppAutomator,
+        monitor: SystemMonitor,
+        emulator: EmulatorController,
+        vision: VisionEngine,
+    ):
         self.config = config
         self.logger = config.logger
         self.automator = automator
@@ -35,15 +46,15 @@ class BotController:
             json.dump(list(self.allowed_users), f)
             self.logger.info(f"User list updated and saved to {self.config.users_file}")
 
-    def is_admin(self, message):
+    def is_admin(self, message: str):
         return message.chat.id == self.config.admin_id
 
-    def is_allowed(self, message):
+    def is_allowed(self, message: str):
         return message.chat.id in self.allowed_users or self.is_admin(message)
 
     def _register_handlers(self):
         @self.bot.message_handler(commands=["start"])
-        def send_welcome(message):
+        def send_welcome(message: str):
             chat_id = message.chat.id
             self.logger.info(f"Received /start command from user: {chat_id}")
             if self.is_admin(message):
@@ -75,7 +86,7 @@ class BotController:
                 self.bot.send_message(chat_id, "⛔ Unauthorized.")
 
         @self.bot.message_handler(commands=["adduser"], func=self.is_admin)
-        def add_user(message):
+        def add_user(message: str):
             try:
                 new_id = int(message.text.split()[1])
                 with self.users_lock:
@@ -87,7 +98,7 @@ class BotController:
                 self.bot.reply_to(message, "⚠️ Usage: /adduser <telegram_id>")
 
         @self.bot.message_handler(commands=["listusers"], func=self.is_admin)
-        def list_users(message):
+        def list_users(message: str):
             if not self.allowed_users:
                 self.bot.reply_to(
                     message, "👥 The allowed users list is currently empty."
@@ -99,7 +110,7 @@ class BotController:
             )
 
         @self.bot.message_handler(commands=["removeuser"], func=self.is_admin)
-        def remove_user(message):
+        def remove_user(message: str):
             rem_id = None
             try:
                 rem_id = int(message.text.split()[1])
@@ -119,7 +130,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "🛑 Toggle Public Access" and self.is_admin(m)
         )
-        def toggle_access(message):
+        def toggle_access(message: str):
             self.public_access = not self.public_access
             status = "🟢 ENABLED" if self.public_access else "🔴 DISABLED"
             self.logger.info(f"Admin toggled public access: {status}")
@@ -128,7 +139,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "📸 Take QR Screenshot" and self.is_allowed(m)
         )
-        def handle_user_screenshot(message):
+        def handle_user_screenshot(message: str):
             self.monitor.update_activity()
             chat_id = message.chat.id
             if not self.public_access:
@@ -144,7 +155,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "❌️ Close the app" and self.is_admin(m)
         )
-        def handle_close_app(message):
+        def handle_close_app(message: str):
             with self.emulator.lock:
                 self.monitor.update_activity()
                 self.emulator.wake_if_needed(
@@ -165,7 +176,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "📱 Open the app" and self.is_admin(m)
         )
-        def handle_open_app(message):
+        def handle_open_app(message: str):
             with self.emulator.lock:
                 self.monitor.update_activity()
                 self.emulator.wake_if_needed(
@@ -184,7 +195,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "🔓 Unlock" and self.is_admin(m)
         )
-        def handle_unlock(message):
+        def handle_unlock(message: str):
             with self.emulator.lock:
                 self.monitor.update_activity()
                 self.emulator.wake_if_needed(
@@ -213,7 +224,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "📲 Open QR" and self.is_admin(m)
         )
-        def handle_just_qr(message):
+        def handle_just_qr(message: str):
             with self.emulator.lock:
                 self.monitor.update_activity()
                 self.emulator.wake_if_needed(
@@ -238,7 +249,7 @@ class BotController:
         @self.bot.message_handler(
             func=lambda m: m.text == "📸 Take Screenshot" and self.is_admin(m)
         )
-        def handle_screenshot_command(message):
+        def handle_screenshot_command(message: str):
             with self.emulator.lock:
                 self.monitor.update_activity()
                 self.emulator.wake_if_needed(

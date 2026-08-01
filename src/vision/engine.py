@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import uuid
+from typing import Literal
 
 import cv2
 import mss
@@ -38,7 +39,7 @@ class VisionEngine:
             self.logger.exception("Error reading window geometry")
         return None
 
-    def capture_screenshot(self, mode="qr"):
+    def capture_screenshot(self, mode: Literal["qr", "full"] = "qr"):
         self.logger.info(f"Initiating screenshot capture in '{mode}' mode.")
         monitor = self.get_window_geometry()
         if not monitor:
@@ -73,7 +74,7 @@ class VisionEngine:
             self.logger.exception("Failed to process QR code.")
             return None
 
-    def _locate_qr(self, img):
+    def _locate_qr(self, img: np.ndarray):
         if zbar_decode is not None:
             results = zbar_decode(img)
             if results:
