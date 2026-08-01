@@ -47,10 +47,11 @@ for animation_setting in window_animation_scale transition_animation_scale anima
 	adb shell settings put global "$animation_setting" 0
 done
 
-adb shell pm disable-user --user 0 com.android.chrome
-adb shell pm disable-user --user 0 com.google.android.youtube
-adb shell pm disable-user --user 0 com.google.android.gm
-adb shell pm disable-user --user 0 com.google.android.apps.photos
+echo "Disabling Apps..."
+for app in com.android.chrome com.google.android.youtube com.google.android.gm com.google.android.apps.photos; do
+	adb shell pm disable-user --user 0 app
+done
+
 adb shell settings put global auto_time 0
 adb shell settings put secure location_mode 0
 
