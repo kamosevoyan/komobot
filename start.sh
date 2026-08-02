@@ -49,7 +49,7 @@ done
 
 echo "Disabling Apps..."
 for app in com.android.chrome com.google.android.youtube com.google.android.gm com.google.android.apps.photos; do
-	adb shell pm disable-user --user 0 app
+	adb shell pm disable-user --user 0 "$app"
 done
 
 adb shell settings put global auto_time 0
