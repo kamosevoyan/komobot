@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
 
 [dependency-groups]
 dev = [
@@ -14,4 +13,5 @@ dev = [
     "pytelegrambotapi==4.36.0",
     "pyzbar==0.1.9",
     "ruff>=0.16.1",
+    "shfmt-py==4.0.0"
 ]

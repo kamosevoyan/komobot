@@ -53,34 +53,34 @@ confirm_wipe() {
 }
 
 case "$1" in
-"hard-restart")
-	echo "🔥 INITIATING HARD RESTART"
-	confirm_wipe
-	remove_container
-	echo "🗑️ Wiping Android data volume..."
-	docker volume rm "$VOLUME_NAME" 2>/dev/null || true
-	docker volume create "$VOLUME_NAME"
-	build_image
-	run_container "cold"
-	;;
-"soft-restart")
-	echo "🔄 INITIATING SOFT RESTART"
-	remove_container
-	build_image
-	run_container "prod"
-	;;
-"cold")
-	echo "🧊 INITIATING COLD BOOT"
-	remove_container
-	run_container "cold"
-	;;
-"resume" | "")
-	echo "⚡ INITIATING RESUME BOOT"
-	remove_container
-	run_container "prod"
-	;;
-"help" | *)
-	show_help
-	exit 1
-	;;
+	"hard-restart")
+		echo "🔥 INITIATING HARD RESTART"
+		confirm_wipe
+		remove_container
+		echo "🗑️ Wiping Android data volume..."
+		docker volume rm "$VOLUME_NAME" 2>/dev/null || true
+		docker volume create "$VOLUME_NAME"
+		build_image
+		run_container "cold"
+		;;
+	"soft-restart")
+		echo "🔄 INITIATING SOFT RESTART"
+		remove_container
+		build_image
+		run_container "prod"
+		;;
+	"cold")
+		echo "🧊 INITIATING COLD BOOT"
+		remove_container
+		run_container "cold"
+		;;
+	"resume" | "")
+		echo "⚡ INITIATING RESUME BOOT"
+		remove_container
+		run_container "prod"
+		;;
+	"help" | *)
+		show_help
+		exit 1
+		;;
 esac
