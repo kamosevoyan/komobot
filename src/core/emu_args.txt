@@ -1,6 +1,6 @@
 -avd Pixel_Automation
--memory 2048
--cores 2
+-memory 4096
+-cores 7
 -no-audio
 -gpu swiftshader_indirect
 -dns-server 8.8.8.8,8.8.4.4

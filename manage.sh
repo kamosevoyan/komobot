@@ -34,8 +34,8 @@ run_container() {
 		-e BOOT_MODE="$boot_mode" \
 		--name "$CONTAINER_NAME" \
 		--device /dev/kvm \
-		--memory="3g" \
-		--cpus="3" \
+		--memory="5g" \
+		--cpus="8" \
 		-p 127.0.0.1:5900:5900 \
 		-v "$VOLUME_NAME:/root/.android" \
 		-v ./gomorrah:/app/sodom \

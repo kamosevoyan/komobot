@@ -37,7 +37,7 @@ class AppAutomator:
             elif state == "closed":
                 notify_callback("🚀 Launching app...")
                 self.emulator.execute(
-                    ["shell", "monkey", "-p", self.config.app_name, "1"], delay=1.0
+                    ["shell", "monkey", "-p", self.config.app_name, "1"], delay=2.0
                 )
                 state = "locked"
 
@@ -47,16 +47,15 @@ class AppAutomator:
                     if digit in self.config.pin_coords:
                         x, y = self.config.pin_coords[digit]
                         self.emulator.execute(
-                            ["shell", "input", "tap", x, y], delay=0.2, silent=True
+                            ["shell", "input", "tap", x, y], delay=0.1, silent=True
                         )
-                time.sleep(1.5)
                 state = "ready"
 
             if state == "ready":
                 notify_callback("📲 Generating QR...")
                 self.emulator.execute(["shell", "input", "tap", "40", "600"], delay=1.0)
                 self.emulator.execute(
-                    ["shell", "input", "tap", "272", "172"], delay=1.0
+                    ["shell", "input", "tap", "272", "142"], delay=1.0
                 )
                 state = "qr_section"
 
