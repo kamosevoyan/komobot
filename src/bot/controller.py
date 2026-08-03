@@ -5,7 +5,6 @@ import queue
 import threading
 import time
 
-import numpy as np
 import telebot
 from telebot import types
 
