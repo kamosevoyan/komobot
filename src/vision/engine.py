@@ -1,11 +1,9 @@
+import io
 import subprocess
-import tempfile
-import uuid
 from typing import Literal
 
 import cv2
 import mss
-import mss.tools
 import numpy as np
 
 try:
@@ -19,7 +17,7 @@ class VisionEngine:
         self.config = config
         self.logger = config.logger
 
-    def get_window_geometry(self):
+    def get_window_geometry(self) -> dict[str, int] | None:
         try:
             output = subprocess.check_output(["wmctrl", "-lG"]).decode("utf-8")
             for line in output.splitlines():
@@ -39,24 +37,25 @@ class VisionEngine:
             self.logger.exception("Error reading window geometry")
         return None
 
-    def capture_screenshot(self, mode: Literal["qr", "full"] = "qr"):
+    def capture_screenshot(
+        self, mode: Literal["qr", "full"] = "qr"
+    ) -> io.BytesIO | None:
         self.logger.info(f"Initiating screenshot capture in '{mode}' mode.")
         monitor = self.get_window_geometry()
         if not monitor:
             return None
 
-        screenshot_path = (
-            f"{tempfile.gettempdir()}/emu_screenshot_{uuid.uuid4().hex}.png"
-        )
         with mss.MSS() as sct:
             sct_img = sct.grab(monitor)
-            mss.tools.to_png(sct_img.rgb, sct_img.size, output=screenshot_path)
+            img = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape(
+                sct_img.height, sct_img.width, 4
+            )
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
         if mode == "full":
-            return screenshot_path
+            return self._encode_png(img)
 
         try:
-            img = cv2.imread(screenshot_path)
             bbox = self._locate_qr(img)
 
             if bbox is not None:
@@ -65,8 +64,7 @@ class VisionEngine:
                 x_max = min(img.shape[1], max(bbox[:, 0]) + 20)
                 y_max = min(img.shape[0], max(bbox[:, 1]) + 20)
                 cropped_img = img[y_min:y_max, x_min:x_max]
-                cv2.imwrite(screenshot_path, cropped_img)
-                return screenshot_path
+                return self._encode_png(cropped_img)
 
             self.logger.warning("QR Code not detected in screenshot.")
             return None
@@ -74,7 +72,14 @@ class VisionEngine:
             self.logger.exception("Failed to process QR code.")
             return None
 
-    def _locate_qr(self, img: np.ndarray):
+    def _encode_png(self, img: np.ndarray) -> io.BytesIO | None:
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:
+            self.logger.error("Failed to encode screenshot to PNG.")
+            return None
+        return io.BytesIO(buf.tobytes())
+
+    def _locate_qr(self, img: np.ndarray) -> np.ndarray | None:
         if zbar_decode is not None:
             results = zbar_decode(img)
             if results:

@@ -12,10 +12,10 @@ class SystemMonitor:
         self.logger = config.logger
         self.last_interaction_time = time.time()
 
-    def update_activity(self):
+    def update_activity(self) -> None:
         self.last_interaction_time = time.time()
 
-    def _inactivity_loop(self):
+    def _inactivity_loop(self) -> None:
         self.logger.info("Inactivity monitor initialized.")
         wait_delta = self.config.soft_sleep_time / 10
 
@@ -44,7 +44,7 @@ class SystemMonitor:
                     )
                     self.emulator.execute(["shell", "input", "keyevent", "3"])
 
-    def _keep_alive_loop(self):
+    def _keep_alive_loop(self) -> None:
         self.logger.info("Hardware key keep-alive initialized.")
         while True:
             if not self.emulator.is_deep_sleeping:
@@ -59,7 +59,7 @@ class SystemMonitor:
                     self.logger.error(f"Keep-alive error: {e}")
             time.sleep(random.uniform(20.0, 45.0))
 
-    def start(self):
+    def start(self) -> None:
         if self.config.boot_mode != "cold":
             threading.Thread(target=self._keep_alive_loop, daemon=True).start()
             threading.Thread(target=self._inactivity_loop, daemon=True).start()

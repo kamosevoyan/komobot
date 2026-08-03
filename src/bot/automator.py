@@ -63,9 +63,8 @@ class AppAutomator:
 
             if state == "qr_section":
                 notify_callback("📸 Capturing...")
-                img_path = self.vision.capture_screenshot(mode="qr")
-                if img_path and os.path.exists(img_path):
-                    send_photo_callback(img_path)
-                    os.remove(img_path)
+                photo_data = self.vision.capture_screenshot(mode="qr")
+                if photo_data:
+                    send_photo_callback(photo_data)
                 else:
                     notify_callback("❌ Capture error.")
