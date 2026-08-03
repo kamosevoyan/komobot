@@ -16,6 +16,8 @@ class AppConfig:
         self.emulator_title = "Android Emulator"
         self.users_file = "/root/.android/allowed_users.json"
         self.emu_args_path = "src/core/emu_args.txt"
+        self.enable_inactivity_monitor = True
+        self.enable_keep_alive = False
 
         self.pin_coords = {
             "1": ("77", "438"),

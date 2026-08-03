@@ -61,8 +61,12 @@ class SystemMonitor:
 
     def start(self) -> None:
         if self.config.boot_mode != "cold":
-            threading.Thread(target=self._keep_alive_loop, daemon=True).start()
-            threading.Thread(target=self._inactivity_loop, daemon=True).start()
+            if self.config.enable_keep_alive:
+                threading.Thread(target=self._keep_alive_loop, daemon=True).start()
+                self.logger.info("Keep alive is enabled.")
+            if self.config.enable_inactivity_monitor:
+                self.logger.info("Inactivity monitor (sleeps) is enabled.")
+                threading.Thread(target=self._inactivity_loop, daemon=True).start()
         else:
             self.logger.info(
                 "🧊 Cold start mode: Inactivity monitor (sleeps) and keep-alive are disabled."
