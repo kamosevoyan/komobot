@@ -62,7 +62,10 @@ class AppAutomator:
             if state == "qr_section":
                 notify_callback("📸 Capturing...")
                 photo_data = self.vision.capture_screenshot(mode="qr")
-                if photo_data:
-                    send_photo_callback(photo_data)
-                else:
+                if not photo_data:
                     notify_callback("❌ Capture error.")
+                else:
+                    send_photo_callback(photo_data)
+                    self.emulator.execute(
+                        ["shell", "am", "force-stop", self.config.app_name]
+                    )
