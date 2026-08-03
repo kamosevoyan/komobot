@@ -50,6 +50,7 @@ BOT_TOKEN=---
 ADMIN_ID=---
 APP_PIN=---
 APP_NAME=---
+SNAPSHOT_NAME---
 ```
 
 ### 2. Calibrate Coordinates (Important!)
@@ -88,7 +89,7 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 
 	* In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
 	* Navigate to **Snapshots**, and click **Take Snapshot**.
-	* Name it exactly: `smart_snapshot`.
+	* Name it exactly: `lilith`.
 	* Close your VNC viewer and stop the container.
 
 
@@ -106,23 +107,23 @@ If you are deploying to a remote cloud server, setting up via VNC over the inter
 On your local machine, zip up the `gehenna` volume containing your saved snapshot:
 
 ```bash
-docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu tar cvzf /backup/emulator-backup.tar.gz -C /volume .
+docker run --rm -v gehenna:/sheol -v $(pwd):/tartarus ubuntu tar cvzf /tartarus/gnosis.tar.gz -C /sheol .
 ```
 
 **2. Send to the Cloud & Prepare the Codebase:**
 Securely copy the zipped file to your cloud server:
 
 ```bash
-scp emulator-backup.tar.gz root@YOUR_CLOUD_IP:~/
+scp gnosis.tar.gz root@YOUR_CLOUD_IP:~/
 ```
 
 Then, SSH into your cloud server and ensure you have the project repository cloned:
 
 ```bash
 ssh root@YOUR_CLOUD_IP
-git clone <your-repo-url> my-bot
-mv emulator-backup.tar.gz my-bot/
-cd my-bot
+git clone <repo-url>
+mv gnosis.tar.gz komobot/
+cd komobot
 ```
 
 **3. Unpack on the Cloud:**
@@ -130,7 +131,7 @@ Now that you are in your project directory with the backup file present, create 
 
 ```bash
 docker volume create gehenna
-docker run --rm -v gehenna:/volume -v $(pwd):/backup ubuntu bash -c "cd /volume && tar xvzf /backup/emulator-backup.tar.gz"
+docker run --rm -v gehenna:/sheol -v $(pwd):/tartarus ubuntu bash -c "cd /sheol && tar xvzf /tartarus/gnosis.tar.gz"
 ```
 
 *(Note: Don't forget to build your project's Docker image here if you haven't already by running `docker build -t codex-gigas .`)*
