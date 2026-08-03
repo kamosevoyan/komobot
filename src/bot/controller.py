@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import threading
+import time
 
 import numpy as np
 import telebot
@@ -280,7 +281,14 @@ class BotController:
                     def send_photo(photo_data: io.BytesIO):
                         self.bot.send_photo(chat_id, photo_data)
 
+                    start_time = time.perf_counter()
                     self.automator.process_screenshot_request(notify, send_photo)
+                    finish_time = time.perf_counter()
+                    duration = finish_time - start_time
+                    self.logger.info(
+                        f"Request for user {chat_id} completed in {duration:.2f} seconds."
+                    )
+
             except Exception:
                 self.logger.exception(
                     f"Queue worker failed while processing user {chat_id}."
