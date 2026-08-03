@@ -9,6 +9,7 @@ class AppConfig:
         self.admin_id = int(os.getenv("ADMIN_ID", 0))
         self.boot_mode = os.getenv("BOOT_MODE", "prod")
         self.app_name = os.getenv("APP_NAME")
+        self.snapshot_name = os.getenv("SNAPSHOT_NAME")
         self.log_dir = "./sodom"
         self.deep_sleep_time = 3600
         self.soft_sleep_time = 300

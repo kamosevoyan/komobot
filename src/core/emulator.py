@@ -57,7 +57,7 @@ class EmulatorController:
                 "emulator",
                 "-no-snapshot-save",
                 "-snapshot",
-                "smart_snapshot",
+                self.config.snapshot_name,
                 *args,
             ]
 

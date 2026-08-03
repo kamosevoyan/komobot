@@ -95,7 +95,7 @@ Because financial apps require phone number verification and SMS OTPs, you must 
 2. Shell version
 
 	```bash
-	docker exec infernal-suffering adb emu avd snapshot save smart_snapshot
+	docker exec infernal-suffering bash -c "adb emu avd snapshot save $SNAPSHOT_NAME"
 	```
 
 ## ☁️ Cloud Deployment (Golden Volume Migration)

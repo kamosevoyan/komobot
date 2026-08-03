@@ -36,7 +36,7 @@ if [ "$BOOT_MODE" = "cold" ]; then
 
 else
 	echo "🚀 RESUME START MODE INITIATED..."
-	emulator "${EMU_ARGS[@]}" -no-snapshot-save -snapshot smart_snapshot &
+	emulator "${EMU_ARGS[@]}" -no-snapshot-save -snapshot $SNAPSHOT_NAME &
 
 	echo "Waiting 15 seconds for Snapshot to resume..."
 	sleep 15
