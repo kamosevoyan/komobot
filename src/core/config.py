@@ -19,19 +19,6 @@ class AppConfig:
         self.enable_inactivity_monitor = True
         self.enable_keep_alive = False
 
-        self.pin_coords = {
-            "1": ("77", "438"),
-            "4": ("77", "476"),
-            "7": ("77", "514"),
-            "2": ("160", "438"),
-            "5": ("160", "476"),
-            "8": ("160", "514"),
-            "0": ("160", "552"),
-            "3": ("243", "438"),
-            "6": ("243", "476"),
-            "9": ("243", "514"),
-        }
-
         os.makedirs(self.log_dir, exist_ok=True)
         logging.basicConfig(
             level=logging.DEBUG,

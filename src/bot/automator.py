@@ -1,4 +1,3 @@
-import time
 from typing import Callable
 
 from ..core import AppConfig, EmulatorController
@@ -44,24 +43,26 @@ class AppAutomator:
             if state == "locked":
                 notify_callback("🔐 App locked. Entering PIN...")
                 for digit in str(self.config.app_pin):
-                    if digit in self.config.pin_coords:
-                        x, y = self.config.pin_coords[digit]
-                        self.emulator.execute(
-                            ["shell", "input", "tap", x, y], delay=0.1, silent=True
-                        )
+                    self.emulator.click_by_resource_id(
+                        f"ru.deltapay.puntopago.telcell:id/number_{digit}"
+                    )
+
                 state = "ready"
 
             if state == "ready":
                 notify_callback("📲 Generating QR...")
-                self.emulator.execute(["shell", "input", "tap", "40", "600"], delay=1.0)
-                self.emulator.execute(
-                    ["shell", "input", "tap", "272", "142"], delay=1.0
+                self.emulator.click_by_resource_id(
+                    "ru.deltapay.puntopago.telcell:id/ticket_label"
                 )
+
                 state = "qr_section"
 
             if state == "qr_section":
                 notify_callback("📸 Capturing...")
+
+                self.emulator.wait_for_qr_gap()
                 photo_data = self.vision.capture_screenshot(mode="qr")
+
                 if not photo_data:
                     notify_callback("❌ Capture error.")
                 else:

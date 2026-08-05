@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y \
     wget unzip \
     openjdk-17-jre cpu-checker qemu-kvm \
     android-tools-adb \
-    libzbar0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up Android SDK paths

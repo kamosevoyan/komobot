@@ -49,28 +49,19 @@ class VisionEngine:
             sct_img = sct.grab(monitor)
             img = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape(
                 sct_img.height, sct_img.width, 4
-            )
+            )[5:-25, ...]
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
         if mode == "full":
             return self._encode_png(img)
 
-        try:
-            bbox = self._locate_qr(img)
+        x_min = 60
+        y_min = 180 - 25
+        x_max = 260
+        y_max = 370 - 25
 
-            if bbox is not None:
-                x_min = max(0, min(bbox[:, 0]) - 20)
-                y_min = max(0, min(bbox[:, 1]) - 20)
-                x_max = min(img.shape[1], max(bbox[:, 0]) + 20)
-                y_max = min(img.shape[0], max(bbox[:, 1]) + 20)
-                cropped_img = img[y_min:y_max, x_min:x_max]
-                return self._encode_png(cropped_img)
-
-            self.logger.warning("QR Code not detected in screenshot.")
-            return None
-        except Exception:
-            self.logger.exception("Failed to process QR code.")
-            return None
+        cropped_img = img[y_min:y_max, x_min:x_max]
+        return self._encode_png(cropped_img)
 
     def _encode_png(self, img: np.ndarray) -> io.BytesIO | None:
         ok, buf = cv2.imencode(".png", img)
@@ -78,22 +69,3 @@ class VisionEngine:
             self.logger.error("Failed to encode screenshot to PNG.")
             return None
         return io.BytesIO(buf.tobytes())
-
-    def _locate_qr(self, img: np.ndarray) -> np.ndarray | None:
-        if zbar_decode is not None:
-            results = zbar_decode(img)
-            if results:
-                rect = results[0].rect
-                pts = [
-                    (rect.left, rect.top),
-                    (rect.left + rect.width, rect.top),
-                    (rect.left + rect.width, rect.top + rect.height),
-                    (rect.left, rect.top + rect.height),
-                ]
-                return cv2.convexHull(np.array(pts)).reshape(-1, 2)
-
-        detector = cv2.QRCodeDetector()
-        data, bbox, straight_qrcode = detector.detectAndDecode(img)
-        if bbox is not None:
-            return bbox[0].astype(int)
-        return None

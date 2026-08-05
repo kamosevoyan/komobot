@@ -207,13 +207,12 @@ class BotController:
                 success = self.emulator.execute(
                     ["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5
                 )
+
+                success = True
                 for digit in str(self.config.app_pin):
-                    if digit in self.config.pin_coords:
-                        x, y = self.config.pin_coords[digit]
-                        if not self.emulator.execute(
-                            ["shell", "input", "tap", x, y], delay=0.3, silent=True
-                        ):
-                            success = False
+                    success &= self.emulator.click_by_resource_id(
+                        f"ru.deltapay.puntopago.telcell:id/number_{digit}"
+                    )
                 if success:
                     self.bot.send_message(
                         message.chat.id, "✅ App unlocked successfully."
@@ -235,13 +234,10 @@ class BotController:
                 self.bot.send_message(
                     message.chat.id, "🧭 Navigating directly to QR code..."
                 )
-                step1 = self.emulator.execute(
-                    ["shell", "input", "keyevent", "KEYCODE_WAKEUP"], delay=0.5
+                status = self.emulator.click_by_resource_id(
+                    "ru.deltapay.puntopago.telcell:id/ticket_label"
                 )
-                step2 = self.emulator.execute(
-                    ["shell", "input", "tap", "272", "172"], delay=1.5
-                )
-                if step1 and step2:
+                if status:
                     self.bot.send_message(
                         message.chat.id, "✅ QR Code opened successfully."
                     )
