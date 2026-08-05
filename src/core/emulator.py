@@ -133,8 +133,10 @@ class EmulatorController:
 
         return False
 
-    def click_by_resource_id(self, resource_id: str, timeout: float = 5) -> bool:
-        element = self.daemon(resourceId=resource_id)
+    def click_by_resource_id(
+        self, resource_id: str, index: int = 0, timeout: float = 5
+    ) -> bool:
+        element = self.daemon(resourceId=resource_id)[index]
 
         if not element.wait(timeout):
             return False

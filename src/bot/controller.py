@@ -234,9 +234,16 @@ class BotController:
                 self.bot.send_message(
                     message.chat.id, "🧭 Navigating directly to QR code..."
                 )
-                status = self.emulator.click_by_resource_id(
-                    "ru.deltapay.puntopago.telcell:id/ticket_label"
+
+                status = True
+
+                status &= self.emulator.click_by_resource_id(
+                    "ru.deltapay.puntopago.telcell:id/serviceTitle", index=1
                 )
+                status &= self.emulator.click_by_resource_id(
+                    "ru.deltapay.puntopago.telcell:id/ticket_name"
+                )
+
                 if status:
                     self.bot.send_message(
                         message.chat.id, "✅ QR Code opened successfully."

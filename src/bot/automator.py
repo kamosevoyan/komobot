@@ -1,3 +1,4 @@
+import random
 from typing import Callable
 
 from ..core import AppConfig, EmulatorController
@@ -51,9 +52,18 @@ class AppAutomator:
 
             if state == "ready":
                 notify_callback("📲 Generating QR...")
-                self.emulator.click_by_resource_id(
-                    "ru.deltapay.puntopago.telcell:id/ticket_label"
-                )
+
+                if random.random() < 0.5:
+                    self.emulator.click_by_resource_id(
+                        "ru.deltapay.puntopago.telcell:id/ticket_label"
+                    )
+                else:
+                    self.emulator.click_by_resource_id(
+                        "ru.deltapay.puntopago.telcell:id/serviceTitle", index=1
+                    )
+                    self.emulator.click_by_resource_id(
+                        "ru.deltapay.puntopago.telcell:id/ticket_name"
+                    )
 
                 state = "qr_section"
 
