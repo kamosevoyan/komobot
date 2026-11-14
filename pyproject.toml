@@ -1,17 +1,12 @@
 [project]
 name = "komobot"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Standalone Android QR automation controller via MacroDroid, Virtual Master, and Telegram Webhooks"
 readme = "README.md"
 requires-python = ">=3.10"
 
 [dependency-groups]
 dev = [
-    "mss==10.2.0",
-    "opencv-python-headless==5.0.0.93",
-    "pillow==12.3.0",
-    "pytelegrambotapi==4.36.0",
-    "pyzbar==0.1.9",
     "ruff>=0.16.1",
-    "shfmt-py==4.0.0"
+    "shfmt-py==4.0.0",
 ]

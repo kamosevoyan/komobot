@@ -1,3 +1,4 @@
 .env
 gomorrah/
 *.pyc
+*.macro

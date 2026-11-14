@@ -1,157 +1,259 @@
-# 🤖 Android Automation & FLAG_SECURE Bypass Bot
+# Komobot — Standalone Android QR Automation Controller
 
-A highly robust, headless Android automation system encapsulated entirely within Docker. This project provides a Telegram Bot interface to control, navigate, and securely capture screenshots of high-security Android financial applications that enforce `FLAG_SECURE` (which normally blocks native Android screenshots).
+Komobot is a serverless, on-device Android automation pipeline that turns a physical `720x1600` Android phone into a self-contained Telegram QR code responder for **Telcell Wallet** (`ru.deltapay.puntopago.telcell`) running inside **Virtual Master** (`com.clone.android.dual.space`).
 
-## ✨ Key Features
+Once deployed via ADB, there is **no PC, Docker container, or external backend server** required at runtime: Telegram sends updates directly to a MacroDroid cloud webhook trigger on the phone, and all routing, access control, queueing, host-level screen capture, pixel-based UI navigation, QR cropping, and Telegram photo uploads execute locally inside **MacroDroid**.
 
-* **FLAG_SECURE Bypass:** Instead of rooting the device or using `adb screencap` (which yields black screens for secure apps), this system runs Android inside a virtual X11 framebuffer (`Xvfb`) and uses `mss` and `wmctrl` to securely capture the host-level window buffer.
-* **Snapshot State Teleportation:** Utilizes Android Emulator RAM snapshots to instantly resume the phone's state. This bypasses financial app "Cold Boot" security triggers and preserves SMS OTP authentication permanently.
-* **Anti-Timeout & Anti-Fraud:** Bypasses aggressive idle-timeouts by simulating physical hardware volume key presses in the background, keeping the app awake without triggering heuristic touch-fraud sensors.
-* **Custom In-App PIN Bypass:** Maps and executes touch events sequentially to bypass randomized or custom in-app PIN pads that block standard ADB keyboard input.
-* **Fully Dockerized & Headless:** Runs completely invisibly in the background using nested KVM virtualization, a lightweight `fluxbox` window manager, and `x11vnc` for secure remote debugging.
+---
 
-## 🏗️ Architecture Stack
+## Key Capabilities & Architectural Design
 
-* **Host Requirement:** Ubuntu Linux with Hardware Virtualization (`/dev/kvm`) enabled. Cloud environments *must* support Nested Virtualization.
-* **Container OS:** Ubuntu 22.04 LTS
-* **Android OS:** x86_64 Android API 29 (Google APIs Playstore image for ARM-translation layer / libhoudini).
-* **Display Server:** `Xvfb` (Virtual Framebuffer) + `fluxbox` (Window Manager).
-* **Automation:** Python 3, `telebot` (Telegram), `mss` (Screenshot), `subprocess` (ADB).
+* **Standalone On-Device Execution:** Generated via [`generate_macro.py`](generate_macro.py) (`210` MacroDroid actions, `3` BeanShell `JavaAction` scripts) and deployed over ADB with [`deploy_macro.sh`](deploy_macro.sh). All runtime state lives in `/storage/emulated/0/Download/komobot_config.json`.
+* **`FLAG_SECURE` Bypass Without Root:** Financial apps block `adb screencap` and native screenshots when run directly on the host OS. Running the target app inside **Virtual Master** renders the guest OS inside a Virtual Master host surface, letting MacroDroid's host-level `TakeScreenshotAction` capture every screen—including the PIN pad and QR modal—without root.
+* **Serverless Telegram Webhook Trigger:** Telegram Bot API updates arrive via a MacroDroid `WebHookTrigger` (`identifier: "komobotv2"`, body stored in `{lv=webhook_body}`).
+* **Multi-User Access Control & In-Loop FIFO Queueing:** Authorized users share access through `/storage/emulated/0/Download/komobot_config.json`. Concurrent requests are serialized by a time-bounded `busy_until` lease and an in-memory/disk FIFO `queue` so burst requests from multiple users execute back-to-back in a single phone wake cycle.
+* **Stale Ticket & Stale QR Protection:** Navigates through the dashboard **`Услуги` → `Транспорт` → `Доступно`** ticket list rather than quick shortcuts (which can open an expired/stale ticket). Automatically switches tabs if `Купить билет` opens instead of `Доступно`, and rejects/refreshes a QR modal if one was already open on `step_count == 1`.
+* **Deep Doze & Extended Inactivity Resilience:** [`deploy_macro.sh`](deploy_macro.sh) disables Android Doze (`dumpsys deviceidle disable`), app standby, Wi-Fi power saving/sleep, host lockscreen, Virtual Master toast windows, and Samsung Smart Capture toolbars. After sending the QR, the macro returns Virtual Master to its VM desktop and puts the screen to sleep via `ScreenOnAction(screen_off=True)` **without switching away to the host launcher**, preventing Android from killing or background-throttling the VM after 20–30+ minutes of inactivity.
 
-## 📂 Project Structure
+---
 
-* `src/`
-	* `core/` - Global classes.
-		* `config.py` - Contains `AppConfig` for dependency injection.
-		* `emulator.py` - Contains `EmulatorController` for ADB wrapper and locks.
-		* `monitor.py` - Contains `SystemMonitor` for background keep-alive daemons.
-	* `vision/`
-		* `engine.py` - Contains `VisionEngine` abstracting buffer geometry and OpenCV cropping.
-	* `bot/`
-		* `automator.py` - Contains `AppAutomator` for orchestrating multi-step UI taps.
-		* `controller.py` - Contains `BotController` for the Telebot hooks and user session states.
-* `main.py` - Bootstraps the objects and injects dependencies.
-* `Dockerfile` - Builds the Ubuntu container with Xvfb, Fluxbox, Android SDK, and VNC.
-* `start.sh` - The internal container entrypoint that manages X11 locks, dual-boot snapshot logic, and launches Python.
-* `manage.sh` - Host management script with `argument`:
-	* `resume` - Run the container in lightning-fast snapshot mode.
-	* `cold` - Run the container in raw boot mode for manual maintenance.
-	* `soft-restart` - Rebuild the image and safely restart without losing the Android data volume.
-	* `hard-restart` - **WARNING:** Wipes the Android data volume for a clean factory reset.
+## Full Pipeline Architecture
 
-## 🚀 Local Installation & Setup
+The generated macro (**Komobot Controller**, `210` actions) processes every incoming Telegram update through five sequential stages:
 
-### 1. Clone & Configure
+```mermaid
+flowchart TD
+    TG["Telegram Bot Webhook -> MacroDroid Trigger (komobotv2)"] --> S1
+    S1["Stage 1: Extract update_id, chat_id, msg_text"] --> S2
+    S2["Stage 2: JavaAction #1 Router, Auth & Queue Manager"]
 
-Clone this repository and create a `.env` file in the root directory:
+    S2 -->|"IGNORE (duplicate uid / unauthorized / admin cmd)"| END1["Stop (reply already sent if applicable)"]
+    S2 -->|"QUEUE (busy_until > now, other user)"| END2["Append to cfg.queue + Extend busy_until (+30s) + Notify"]
+    S2 -->|"RUN (lease claimed: busy_until = now + 45s)"| S3
+
+    S3["Stage 3: Screen On + Launch Virtual Master + Pause 1.2s"] --> S4
+    S4["Stage 4: Vision State Loop (Repeat up to 24x)"]
+
+    S4 --> CAP["ScreenOn + TakeScreenshotAction + Cleanup"]
+    CAP --> VA["JavaAction #2 Vision Pixel Classifier (step_cmd)"]
+
+    VA -->|"VM_LAUNCHER / VM_POPUP / VM_HOME"| ACT1["Click Enter / Dismiss Menu / Tap Telcell Icon"]
+    VA -->|"PIN_PAD"| PIN["Extract pin_d1..d4 & Tap Calibrated PIN_COORDS"]
+    VA -->|"DASHBOARD_LOW / DASHBOARD_HIGH"| TR["Tap Услуги -> Транспорт"]
+    VA -->|"BUY_TICKET_TAB"| TAB["Tap Доступно Tab (277, 200)"]
+    VA -->|"TICKET_LIST"| ROW["Tap Ticket Row (360, 400)"]
+    VA -->|"STALE_QR (step 1)"| CLOSE["Close Modal (626, 121) to Force Refresh"]
+    VA -->|"Loading / OTHER"| REC["Wait 1s / Back (183, 1553) / VM Home (373, 1553)"]
+
+    ACT1 --> S4
+    PIN --> S4
+    TR --> S4
+    TAB --> S4
+    ROW --> S4
+    CLOSE --> S4
+    REC --> S4
+
+    VA -->|"QR Valid"| CROP["Crop [130,445]..[590,905] & sendPhoto (PNG)"]
+    CROP -->|"Queue non-empty"| POP["Pop Next User (NEXT_IN_QUEUE) & Close Modal"]
+    POP --> S4
+    CROP -->|"Queue empty"| DONE["Set QR_SENT, busy_until=0 -> Close + Back + VM Home + BreakLoop"]
+    VA -->|"mode == reset"| RST["Close + Back + VM Home + BreakLoop"]
+
+    DONE --> S5["Stage 5: JavaAction #3 Timeout/Reset Guard + Screen Off"]
+    RST --> S5
+    S4 -->|"24 iterations exhausted"| S5
+```
+
+### Stage 1: Webhook Ingestion & Field Extraction
+
+Triggered by MacroDroid's `WebHookTrigger` (`identifier: "komobotv2"`), three `TextManipulationAction` (`ExtractTextManipulation`) steps extract values from `{lv=webhook_body}` with safe default suffixes so missing JSON fields never abort the macro:
+
+| Local Variable | Regex Pattern | Fallback Source Suffix |
+| :--- | :--- | :--- |
+| `update_id` | `"update_id":\s*(\d+)` | `"update_id":0` |
+| `chat_id` | `"chat":\s*\{\s*"id":\s*(-?\d+)` | `"chat":{"id":0` |
+| `msg_text` | `"text":\s*"([^"]{0,200})"` | `"text":""` |
+
+### Stage 2: Router, Auth, Command Handler & Queue Manager (`JavaAction #1`)
+
+`build_router_script()` runs synchronously under `synchronized (System.class)` to keep `komobot_config.json` consistent across concurrent webhook invocations:
+
+1. **Deduplication & Diagnostics:** Drops any non-zero `uid <= last_update_id` (`return "IGNORE"`). Updates with `update_id: 0` bypass deduplication and never advance `last_update_id`, making synthetic diagnostics safe. Every non-duplicate update records `last_chat_id` and `last_msg_text` in `komobot_config.json`.
+2. **Authorization:** Compares `chat_id` against `admin_id` (seeded from `{lv=admin_id}`) and `allowed_users`. Unauthorized users receive `⛔ Unauthorized. Your ID: <cid>`.
+3. **Access & Admin Commands:** Handles `/start` (role-specific Reply Keyboard), `/adduser <id>`, `/removeuser <id>`, `/listusers` / `👥 List Users`, and `/toggle` / `🛑 Toggle Public Access`. When `public_access` is `false`, non-admin allowed users receive `⚠️ The bot is currently locked by the admin.`.
+4. **Concurrency Lock & Queue Insertion:**
+   * If `now < busy_until`:
+     * Same `active_chat_id` (after `>= 3s`): replies `⏳ Your request is already in progress.` without enqueueing a duplicate.
+     * Another allowed user not yet in `queue`: appends `{"chat_id": cid, "status_message_id": 0}`, extends `busy_until` by `+30000ms`, sends `⏳ Queued (#N) — waiting for current request to finish...`, and patches the saved `status_message_id` into the matching queue entry.
+     * Another user already in `queue`: replies `⏳ You are already in the queue (#N).`.
+   * If idle (`now >= busy_until`): initializes a new run (`busy_until = now + 45000`, `active_chat_id = cid`, `capture_mode = "qr"` or `"reset"`, `queue = []`, `qr_was_closed = false`, `step_count = 0`, `other_count = 0`, `last_state = "INIT"`, `run_start_ms = now`), sends `🔍 Waking phone & checking Virtual Master...`, stores `status_message_id`, and returns `bot_action = "RUN"`.
+
+### Stage 3: Screen Wake & Virtual Master Foregrounding
+
+When `{lv=bot_action}` equals `"RUN"`:
+1. `ScreenOnAction(screen_off=False)` wakes the display (lockscreen is disabled at provisioning time by `deploy_macro.sh`).
+2. `LaunchActivityAction` brings **Virtual Master** (`com.clone.android.dual.space`) to the foreground.
+3. `PauseAction` waits `1.2s` for the surface to settle.
+
+### Stage 4: Vision-Guided State Machine Loop (`Repeat 24×`, `JavaAction #2`)
+
+Each iteration wakes/keeps the screen on (`ScreenOnAction`), captures a host screenshot (`TakeScreenshotAction`), and runs `build_vision_script()` (`response_var="step_cmd"`):
+
+1. **Fresh Screenshot Polling & Cleanup:**
+   * Polls `/storage/emulated/0/DCIM/Screenshots` and `/storage/emulated/0/Pictures/Screenshots` for up to `3.8s` (at `150ms` intervals) for a `Screenshot*` file `> 5KB` with `lastModified >= run_start_ms - 2500` newer than `(last_ss_name, last_ss_mtime)`.
+   * Decodes via `BitmapFactory.decodeFile` (up to `5` attempts) and normalizes `(x, y)` coordinates from the `720x1600` reference layout (`px(x) = x * w / 720`, `py(y) = y * h / 1600`).
+   * In its `finally` block, recycles the `Bitmap` and calls `cleanScreenshots()` (waits up to `1s` after capture so Samsung/MediaStore finishes writing thumbnails, then deletes the temporary screenshot, `thumbnail_<latest>`, and any `.trashed-*Virtual Master*` / `thumbnail_*Virtual*` artifacts).
+
+2. **State Classification & UI Dispatch Branches:**
+
+| Detected Screen (`last_state`) | Visual Heuristic (`720x1600`) | Dispatched `step_cmd` & MacroDroid Actions |
+| :--- | :--- | :--- |
+| `NO_SCREENSHOT` / `DECODE_ERR` | No new screenshot within `3.8s` or unreadable file | `WAIT` -> Pause `1s` |
+| `VM_LAUNCHER` | Dark VM card with bright `Enter` button `(595..670, 235..265)` | `CLICK_ENTER` -> Click text `"Enter"` + Click `(627, 250)` + Pause `2s` |
+| `VM_LOADING` | Dark VM boot background without `Enter` button | `WAIT` -> Pause `1s` |
+| `VM_POPUP` | Dark 3×3 Virtual Master quick-menu corners `(130/590, 590/1050)` | `DISMISS_POPUP` -> Click `(100, 200)` + Pause `500ms` |
+| `RESET` (`capture_mode == "reset"`) | Any screen while running admin Reset command | `DONE_RESET` -> Close `(626, 121)` + `300ms` + VM Back `(183, 1553)` + `300ms` + VM Home `(373, 1553)` + `BreakFromLoopAction` |
+| `STALE_QR` | QR modal present on `step_count == 1` with `qr_was_closed == false` | `CLOSE_MODAL` -> Click `(626, 121)` + Pause `800ms` (forces fresh ticket open) |
+| QR Valid -> `NEXT_IN_QUEUE` / `QR_SENT` | Darkened backdrop, white modal card, `>= 100` dark & `>= 100` light QR modules in `(200..520, 510..830)` | Crops `[130, 445]..[590, 905]` (`460x460`), encodes lossless PNG, uploads via `multipart/form-data` `sendPhoto` (`🎫 QR Code`), deletes progress message on HTTP `200`. Dispatches `CLOSE_MODAL` if `queue` has another user, else `DONE`. |
+| `QR_LOADING` | White modal card without QR modules yet | `WAIT` -> Pause `1s` |
+| `VM_HOME_1` / `VM_HOME_2` | Dark VM wallpaper with orange Telcell icon at row `(80..120, 360..400)` or `(80..120, 120..165)` | `LAUNCH_1` `(97, 382)` or `LAUNCH_2` `(97, 142)` + Pause `2.5s` |
+| `PIN_SPINNER` | Gray PIN background with orange spinner at `(330..390, 680..715)` | `WAIT` -> Pause `1s` |
+| `PIN_PAD` | Gray PIN screen `(100, 500)` & `(360, 1372)` | `ENTER_PIN` -> 4× `ExtractTextManipulation` split `app_pin` into `pin_d1..pin_d4`; `IfConditionAction` branches tap calibrated `PIN_COORDS` (`250ms` inter-digit pause, `2s` post-PIN pause) |
+| `DASH_LOADING` | Dashboard nav visible while white skeleton covers content | `WAIT` -> Pause `1s` |
+| `DASHBOARD_LOW` / `DASHBOARD_HIGH` | Dashboard bottom nav bar orange/white; scans `Услуги` orange icon offsets (`1045..1105` vs `785..845`) | `CLICK_TRANSPORT_LOW` `(360, 1100)` or `CLICK_TRANSPORT_HIGH` `(360, 840)` + Pause `1.5s` |
+| `BUY_TICKET_TAB` | `Проездной билет` opened on `Купить билет` tab (orange underline at `x=100, y=235` or buy card button `(550, 485)`) | `CLICK_AVAILABLE_TAB` -> Click `Доступно` `(277, 200)` + Pause `1.5s` |
+| `TICKET_LOADING` | `Доступно` tab active on gray list background, ticket card still loading | `WAIT` -> Pause `1s` |
+| `TICKET_LIST` | `Проездной билет -> Доступно` (`buyBtnOrange` or `availTabOrange`) with bright white ticket card at `(360, 400)` | `CLICK_TICKET_ROW` -> Click `(360, 400)` + Pause `1.2s` |
+| `WHITE_LOADING` | Pure white transition screen across all 5 probe points | `WAIT` -> Pause `1s` |
+| `OTHER` | Unrecognized transition/overlay screen (`other_count`) | `1` or `3` -> `WAIT` (`1s`); `2` -> `CLICK_BACK` `(183, 1553)` + `800ms`; `>= 4` -> `RESET_TO_HOME` `(373, 1553)` + `800ms` (resets `other_count = 0`) |
+
+3. **Clean Exit vs. Queue Handoff:**
+   * **Queue Non-Empty (`NEXT_IN_QUEUE`):** Pops `queue[0]`, sets `active_chat_id` and `status_message_id` to the queued user, sets `step_count = 2`, `qr_was_closed = true`, `busy_until = now + 45000`, edits their message to `🔄 Generating QR code for your request...`, and returns `CLOSE_MODAL` (`(626, 121)`) so the next iteration immediately lands back on `TICKET_LIST` and opens a fresh QR for the next user.
+   * **Queue Empty (`DONE`):** Sets `last_state = "QR_SENT"`, `busy_until = 0`, clicks Close `(626, 121)` -> `500ms` -> VM Back `(183, 1553)` -> `500ms` -> VM Home `(373, 1553)` -> `BreakFromLoopAction`. Exiting back to the VM desktop guarantees the next request starts from a clean state without stale QR modals or open `Купить билет` tabs.
+
+### Stage 5: Post-Loop Guard (`JavaAction #3`) & Screen Sleep
+
+After exiting the `24×` loop, `build_timeout_script()` checks whether `busy_until > 0` or `step_cmd == "DONE_RESET"`:
+* Resets `busy_until = 0` and `queue = []`.
+* Edits the active (and any remaining queued) status messages with `✅ VM app reset complete.` or `❌ Timed out waiting for QR screen (last state: <last_state>). Please try again.`
+* Finally executes `ScreenOnAction(screen_off=True)` to put the display to sleep (`mWakefulness=Dozing`) with Virtual Master still in the host foreground.
+
+---
+
+## Project Structure
 
 ```text
-BOT_TOKEN=---
-ADMIN_ID=---
-APP_PIN=---
-APP_NAME=---
-SNAPSHOT_NAME---
+komobot/
+├── generate_macro.py   # MacroDroid JSON compiler + embedded BeanShell router, vision & guard scripts
+├── deploy_macro.sh     # ADB provisioning, Doze/power/lockscreen tuning & automated MacroDroid import
+├── pyproject.toml      # Project metadata & dev tooling (ruff, shfmt-py)
+├── ruff.toml           # Ruff formatting/linting configuration
+├── .python-version     # Python version pin (3.10)
+├── .gitignore          # Ignores .env, gomorrah/, *.pyc, *.macro
+└── .env                # Local secrets & device app config (not committed)
 ```
 
-### 2. Calibrate Coordinates (Important!)
+Generated artifacts:
+* `Komobot_Controller.macro` (ignored by git via `*.macro`): Created by `generate_macro.py` with local variables (`bot_token`, `admin_id`, `app_pin`, `app_name`) populated during deployment and removed from `/storage/emulated/0/Download/` after import.
 
-Before running the bot, you must calibrate the touch coordinates for your specific app using Android's **Pointer Location** developer tool.
+---
 
-* Open `core/config.py` and update the `PIN_COORDS` dictionary with the exact X/Y coordinates of your app's PIN pad.
-* Update the `X` and `Y` tap coordinates in `bot/automator.py` to match your app's UI flow.
+## Setup & Deployment
 
-### 3. Build & Initialize Storage
+### Prerequisites
+
+1. **Target Android Phone (`720x1600`, tested on Samsung Galaxy A06 `SM-A065F`):**
+   * **USB Debugging** enabled and authorized via `adb devices`.
+   * **MacroDroid** (`com.arlosoft.macrodroid`) installed with Accessibility / UI Interaction enabled, plus **MacroDroid Helper** (optional/recommended) and cloud Webhook Trigger active (`https://trigger.macrodroid.com/<device_uuid>/komobotv2`).
+   * **Virtual Master** (`com.clone.android.dual.space`) installed with the guest VM configured (`720x1600`) and **Telcell Wallet** (`ru.deltapay.puntopago.telcell`) installed and **already logged in** inside the VM.
+     > **Important:** Keep the target app logged in inside Virtual Master—never log out of the Telcell Wallet account during maintenance or testing.
+2. **Host Machine (for deployment):** Python `>= 3.10` and `adb` (`android-sdk-platform-tools`).
+
+### 1. Configure `.env`
+
+Create `.env` in the repository root:
+
+```dotenv
+BOT_TOKEN="<your_telegram_bot_token>"
+ADMIN_ID="<your_numeric_telegram_user_id>"
+APP_PIN="<4_digit_telcell_pin>"
+APP_NAME="ru.deltapay.puntopago.telcell"
+```
+
+### 2. Deploy to the Phone
+
+Connect the phone over USB and run:
 
 ```bash
-docker build -t codex-gigas .
-docker volume create gehenna
-mkdir ./gomorrah
+./deploy_macro.sh
 ```
 
-## 🧊 The First Run (Cold Boot & Snapshot Setup)
+`deploy_macro.sh` will:
+1. Read defaults from `.env` (or prompt interactively if unset).
+2. Generate `Komobot_Controller.macro` via `generate_macro.py`.
+3. Grant `WRITE_SECURE_SETTINGS`, `WRITE_GLOBAL_SETTINGS`, `READ_LOGS`, `DUMP`, `MANAGE_EXTERNAL_STORAGE`, and `SYSTEM_ALERT_WINDOW` to MacroDroid.
+4. Whitelist `com.arlosoft.macrodroid` and `com.clone.android.dual.space` in `deviceidle`, grant `RUN_IN_BACKGROUND`, `RUN_ANY_IN_BACKGROUND`, and `WAKE_LOCK`, disable Doze/app standby/Wi-Fi sleep/lockscreen/Samsung Smart Capture, and deny Virtual Master `TOAST_WINDOW` overlays.
+5. Seed `/storage/emulated/0/Download/komobot_config.json` if absent (preserving existing device config across upgrades).
+6. Push `Komobot_Controller.macro`, wake the screen, launch MacroDroid's importer, tap `acceptButton`, and confirm `OVERWRITE` via `uiautomator` node lookup (with coordinate fallbacks).
 
-Because financial apps require phone number verification and SMS OTPs, you must perform a manual "Cold Boot" setup once. It is highly recommended to do this on your **local machine** first.
+### 3. Register the Telegram Webhook
 
-**1. Start the container in Cold Mode locally:**
+Point your Telegram bot's webhook to your phone's MacroDroid Webhook Trigger URL (displayed inside MacroDroid's Webhook trigger configuration):
 
 ```bash
-./manage.sh cold
+curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+  -d "url=https://trigger.macrodroid.com/<device_uuid>/komobotv2"
 ```
 
-**2. Connect via VNC:**
+Verify with `getWebhookInfo` that `pending_update_count` is `0` and `last_error_message` is empty.
 
-* Open a VNC Viewer and connect to `localhost:5900`.
-* Log into the Google Play Store, download your target app, and log into the app completely.
+---
 
-**3. Save the RAM Snapshot:**
+## Telegram Commands & Reply Keyboard
 
-1. GUI version
+| Command / Button | Access | Behavior |
+| :--- | :--- | :--- |
+| `/start` | Allowed users & Admin | Sends custom Reply Keyboard (`📸 Take QR Screenshot` for users; also `👥 List Users`, `🛑 Toggle Public Access`, `🧹 Reset VM App` for Admin). |
+| `/qr`, `qr`, `📸 Take QR Screenshot` | Allowed users (`public_access` enabled) & Admin | Triggers the full wake -> Virtual Master -> Telcell PIN -> `Услуги -> Транспорт -> Доступно` -> QR crop/upload pipeline (case-insensitive; also matches messages containing `qr` or `screenshot`). |
+| `/listusers` or `👥 List Users` | Admin only | Lists all Telegram IDs in `allowed_users`. |
+| `/adduser <id>` | Admin only | Adds `<id>` to `allowed_users`. |
+| `/removeuser <id>` | Admin only | Removes `<id>` from `allowed_users`. |
+| `/toggle` or `🛑 Toggle Public Access` | Admin only | Toggles `public_access` (`true`/`false`) for non-admin allowed users. |
+| `🧹 Reset VM App` | Admin only | Enters `reset` mode (`DONE_RESET`): closes any open modal, taps VM Back & VM Home, clears `busy_until`, and sleeps the screen. |
 
-	* In the VNC window, click the **Three Dots (...)** next to the emulator to open Extended Controls.
-	* Navigate to **Snapshots**, and click **Take Snapshot**.
-	* Name it exactly: `lilith`.
-	* Close your VNC viewer and stop the container.
+---
 
+## Runtime State & Diagnostics (`/storage/emulated/0/Download/komobot_config.json`)
 
-2. Shell version
+| Field | Purpose |
+| :--- | :--- |
+| `admin_id`, `allowed_users`, `public_access` | Access-control policy managed at runtime via Telegram admin commands. |
+| `last_update_id` | Highest non-zero Telegram `update_id` processed (used to ignore duplicate retries). |
+| `last_chat_id`, `last_msg_text` | Most recent non-duplicate sender ID and extracted message text for debugging webhook parsing. |
+| `busy_until`, `queue` | Concurrency lock epoch (`ms`) and FIFO array of waiting `{"chat_id", "status_message_id"}` entries. |
+| `active_chat_id`, `status_message_id`, `capture_mode`, `run_start_ms` | Active run ownership, progress message ID for `editMessageText`, mode (`"qr"`/`"reset"`), and run start timestamp. |
+| `qr_was_closed`, `step_count`, `other_count`, `last_state` | State-machine progress flags, total vision iterations (`1..24`), recovery counter, and last classified screen state (e.g., `QR_SENT`, `STALE_QR`, `BUY_TICKET_TAB`, `TICKET_LIST`). |
+| `last_ss_name`, `last_ss_mtime`, `app_name` | Last processed host screenshot identity (prevents re-reading stale screenshots) and configured package name. |
 
-	```bash
-	docker exec infernal-suffering bash -c 'adb emu avd snapshot save $SNAPSHOT_NAME'
-	```
+### Safe Synthetic Webhook Testing
 
-## ☁️ Cloud Deployment (Golden Volume Migration)
-
-If you are deploying to a remote cloud server, setting up via VNC over the internet is slow and insecure. Instead, transfer your perfectly set up local volume to the cloud using the **Golden Volume** method.
-
-**1. Compress the Local Volume:**
-On your local machine, zip up the `gehenna` volume containing your saved snapshot:
+When testing the MacroDroid webhook directly with `curl`, **always pass `"update_id": 0`** so `last_update_id` on the phone is never pushed ahead of Telegram's real update counter:
 
 ```bash
-docker run --rm -v gehenna:/sheol -v $(pwd):/tartarus ubuntu tar cvzf /tartarus/gnosis.tar.gz -C /sheol .
+curl -4 -sS -X POST "https://trigger.macrodroid.com/<device_uuid>/komobotv2" \
+  -H "Content-Type: application/json" \
+  -d "{\"update_id\":0,\"message\":{\"message_id\":9999,\"chat\":{\"id\":${ADMIN_ID}},\"text\":\"\\ud83d\\udcf8 Take QR Screenshot\"}}"
 ```
 
-**2. Send to the Cloud & Prepare the Codebase:**
-Securely copy the zipped file to your cloud server:
+---
+
+## Development Linting & Formatting
 
 ```bash
-scp gnosis.tar.gz root@YOUR_CLOUD_IP:~/
+# Lint & format macro generator (requires .venv)
+.venv/bin/ruff format generate_macro.py
+.venv/bin/ruff check generate_macro.py
+
+# Format deployment script
+.venv/bin/shfmt -w deploy_macro.sh
 ```
-
-Then, SSH into your cloud server and ensure you have the project repository cloned:
-
-```bash
-ssh root@YOUR_CLOUD_IP
-git clone <repo-url>
-mv gnosis.tar.gz komobot/
-cd komobot
-```
-
-**3. Unpack on the Cloud:**
-Now that you are in your project directory with the backup file present, create the volume and unpack the data:
-
-```bash
-docker volume create gehenna
-docker run --rm -v gehenna:/sheol -v $(pwd):/tartarus ubuntu bash -c "cd /sheol && tar xvzf /tartarus/gnosis.tar.gz"
-```
-
-*(Note: Don't forget to build your project's Docker image here if you haven't already by running `docker build -t codex-gigas .`)*
-
-## 🚀 Production Mode (Resume Boot)
-
-Once your snapshot is saved locally (or unpacked on the cloud server), switch the bot to production mode. This will instantly teleport the emulator back to your logged-in state in milliseconds.
-
-```bash
-./manage.sh resume
-```
-
-Your bot is now running headlessly in the background! Open Telegram and use the custom keyboard to control the system.
-
-## 📱 Telegram Bot Commands
-
-The bot utilizes a custom Reply Keyboard with the following macros:
-
-* **📱 Open the app:** Force-launches the application if it was closed.
-* **❌️ Close the app:** Force-stops the application to clear the screen state.
-* **🔓 Unlock:** Wakes the device, enters the custom 4-digit PIN via coordinate tapping, and prepares the dashboard.
-* **📲 Open QR:** Navigates directly to the target QR code screen (assumes the app is already unlocked).
-* **📸 Take Screenshot:** Uses `wmctrl` to focus the window and `mss` to capture a perfectly cropped, secure PNG of the internal framebuffer, bypassing Android UI security.
