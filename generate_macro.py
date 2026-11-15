@@ -107,8 +107,10 @@ def make_java_action(
     return action
 
 
-def make_if_var_equals(sg: SiguidGen, var_name: str, expected: str) -> dict:
-    """Build an IfConditionAction checking string equality on a local variable."""
+def _make_if_var_string(
+    sg: SiguidGen, var_name: str, expected: str, *, equals: bool = True
+) -> dict:
+    """Build an IfConditionAction checking string equality or inequality on a local var."""
     return {
         "childrenCollapsed": False,
         "dontLogIfConditionIsFalse": False,
@@ -130,7 +132,7 @@ def make_if_var_equals(sg: SiguidGen, var_name: str, expected: str) -> dict:
                 "m_intNotEqual": False,
                 "m_intValue": 0,
                 "m_stringComparisonType": 0,
-                "m_stringEqual": True,
+                "m_stringEqual": equals,
                 "m_stringValue": expected,
                 "m_variable": make_var(var_name),
                 "disableLogging": False,
@@ -145,6 +147,16 @@ def make_if_var_equals(sg: SiguidGen, var_name: str, expected: str) -> dict:
         "m_isDisabled": False,
         "m_isOrCondition": False,
     }
+
+
+def make_if_var_equals(sg: SiguidGen, var_name: str, expected: str) -> dict:
+    """Build an IfConditionAction checking string equality on a local variable."""
+    return _make_if_var_string(sg, var_name, expected, equals=True)
+
+
+def make_if_var_not_equals(sg: SiguidGen, var_name: str, unexpected: str) -> dict:
+    """Build an IfConditionAction checking string inequality on a local variable."""
+    return _make_if_var_string(sg, var_name, unexpected, equals=False)
 
 
 def make_end_if(sg: SiguidGen) -> dict:
@@ -253,10 +265,26 @@ def make_pause(
     }
 
 
-def make_click_xy(sg: SiguidGen, x: int, y: int) -> dict:
+def _make_ui_interaction(sg: SiguidGen, ui_config: dict) -> dict:
+    """Wrap a MacroDroid Accessibility UIInteractionAction payload."""
     return {
         "action": 0,
-        "uiInteractionConfiguration": {
+        "uiInteractionConfiguration": ui_config,
+        "disableLogging": False,
+        "m_SIGUID": sg.next_id(),
+        "m_classType": "UIInteractionAction",
+        "m_comment": "",
+        "m_constraintList": [],
+        "m_isDisabled": False,
+        "m_isOrCondition": False,
+    }
+
+
+def make_click_xy(sg: SiguidGen, x: int, y: int) -> dict:
+    """Perform an Accessibility tap at fixed screen pixel coordinates."""
+    return _make_ui_interaction(
+        sg,
+        {
             "blocking": False,
             "checkOverlays": False,
             "clickOption": 2,
@@ -273,14 +301,37 @@ def make_click_xy(sg: SiguidGen, x: int, y: int) -> dict:
             "xyPoint": {"x": x, "y": y},
             "type": "Click",
         },
-        "disableLogging": False,
-        "m_SIGUID": sg.next_id(),
-        "m_classType": "UIInteractionAction",
-        "m_comment": "",
-        "m_constraintList": [],
-        "m_isDisabled": False,
-        "m_isOrCondition": False,
-    }
+    )
+
+
+def make_gesture_swipe(
+    sg: SiguidGen,
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    duration_ms: int = 200,
+) -> dict:
+    """Perform a single-finger Accessibility swipe gesture between pixel coordinates."""
+    return _make_ui_interaction(
+        sg,
+        {
+            "additionalFingers": 0,
+            "durationMs": duration_ms,
+            "endX": end_x,
+            "endY": end_y,
+            "endX2": 0,
+            "endY2": 0,
+            "showTouchLocation": False,
+            "startX": start_x,
+            "startY": start_y,
+            "startX2": 0,
+            "startY2": 0,
+            "type": "Gesture",
+            "waitBeforeNext": True,
+            "xyPercentages": False,
+        },
+    )
 
 
 SCREENSHOT_DIR = "/storage/emulated/0/komobot_ss"
@@ -440,6 +491,9 @@ void saveConfig(JSONObject cfg) {
     try {
         synchronized (System.class) {
             JSONObject fresh = loadConfig();
+            if (fresh.optLong("run_start_ms", 0L) > cfg.optLong("run_start_ms", 0L) && cfg.optLong("run_start_ms", 0L) > 0L) {
+                return;
+            }
             if (!cfg.optBoolean("_pop_queue", false)) {
                 if (fresh.has("queue")) {
                     cfg.put("queue", fresh.getJSONArray("queue"));
@@ -463,7 +517,11 @@ void saveConfig(JSONObject cfg) {
             if (fresh.has("public_access")) {
                 cfg.put("public_access", fresh.optBoolean("public_access", true));
             }
-            FileOutputStream fos = new FileOutputStream(new File(configPath));
+            File outFile = new File(configPath);
+            if (outFile.getParentFile() != null && !outFile.getParentFile().exists()) {
+                outFile.getParentFile().mkdirs();
+            }
+            FileOutputStream fos = new FileOutputStream(outFile);
             OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
             osw.write(cfg.toString(2));
             osw.flush();
@@ -565,6 +623,42 @@ String statusStage = "";
 int qPos = 0;
 boolean dupUid = false;
 boolean isAdminUser = false;
+JSONArray coopPreemptNotices = null;
+long coopRunStart = 0L;
+
+// Wait briefly if a new worker is starting Stage 3 or exiting Stage 5 to avoid MacroDroid shared-local-var races
+boolean sawExitWait = false;
+boolean exitClearedCleanly = false;
+long waitDeadline = System.currentTimeMillis() + 2000L;
+while (System.currentTimeMillis() < waitDeadline) {{
+    JSONObject probe = loadConfig();
+    long pendMs = probe.optLong("worker_pending_start_ms", 0L);
+    long bUntil = probe.optLong("busy_until", 0L);
+    long exitMs = probe.optLong("worker_exiting_ms", 0L);
+    long nMs = System.currentTimeMillis();
+    boolean pendActive = pendMs > 0L && bUntil > 0L && (nMs - pendMs) < 2000L;
+    boolean exitActive = exitMs > 0L && bUntil == 0L && (nMs - exitMs) < 800L;
+    if (exitActive) {{
+        sawExitWait = true;
+    }}
+    if (!pendActive && !exitActive) {{
+        if (sawExitWait && exitMs == 0L) {{
+            exitClearedCleanly = true;
+        }}
+        break;
+    }}
+    try {{
+        Thread.sleep(25L);
+    }} catch (Exception e) {{
+        break;
+    }}
+}}
+if (exitClearedCleanly) {{
+    try {{
+        Thread.sleep(100L);
+    }} catch (Exception e) {{
+    }}
+}}
 
 synchronized (System.class) {{
     JSONObject cfg = loadConfig();
@@ -704,7 +798,21 @@ synchronized (System.class) {{
             }} else {{
                 long now = System.currentTimeMillis();
                 long busyUntil = cfg.optLong("busy_until", 0L);
-                if (now < busyUntil) {{
+                String lowerMsg = msgText.toLowerCase();
+                String requestedMode = "";
+                if (isAdmin && msgText.indexOf("Reset VM") >= 0) {{
+                    requestedMode = "reset";
+                }} else if (lowerMsg.equals("/qr") || lowerMsg.equals("qr") || msgText.indexOf("Take QR Screenshot") >= 0 || lowerMsg.indexOf("qr") >= 0 || lowerMsg.indexOf("screenshot") >= 0) {{
+                    requestedMode = "qr";
+                }}
+                boolean isResetPreempt = (now < busyUntil)
+                    && requestedMode.equals("reset")
+                    && !cfg.optString("capture_mode", "qr").equals("reset");
+                boolean workerActive = cfg.optBoolean("worker_active", false);
+                long heartbeatMs = cfg.optLong("worker_heartbeat_ms", 0L);
+                boolean isLiveWorker = workerActive && heartbeatMs > 0L && (now - heartbeatMs) < 20000L;
+
+                if (now < busyUntil && !isResetPreempt) {{
                     if (cid == cfg.optLong("active_chat_id", 0L)) {{
                         saveConfig(cfg);
                         if (now - cfg.optLong("run_start_ms", 0L) >= 3000L) {{
@@ -739,22 +847,43 @@ synchronized (System.class) {{
                         }}
                     }}
                 }} else {{
-                    String mode = "";
-                    String lowerMsg = msgText.toLowerCase();
-                    if (isAdmin && msgText.indexOf("Reset VM") >= 0) {{
-                        mode = "reset";
-                    }} else if (lowerMsg.equals("/qr") || lowerMsg.equals("qr") || msgText.indexOf("Take QR Screenshot") >= 0 || lowerMsg.indexOf("qr") >= 0 || lowerMsg.indexOf("screenshot") >= 0) {{
-                        mode = "qr";
-                    }}
-                    if (mode.length() == 0) {{
+                    if (requestedMode.length() == 0) {{
                         saveConfig(cfg);
                     }} else {{
-                        cfg.put("busy_until", now + 45000L);
+                        JSONArray displaced = new JSONArray();
+                        if (isResetPreempt) {{
+                            long prevCid = cfg.optLong("active_chat_id", 0L);
+                            long prevMid = cfg.optLong("status_message_id", 0L);
+                            if (prevCid != 0L) {{
+                                JSONObject pActive = new JSONObject();
+                                pActive.put("chat_id", prevCid);
+                                pActive.put("status_message_id", prevMid);
+                                displaced.put(pActive);
+                            }}
+                            JSONArray prevQ = cfg.optJSONArray("queue");
+                            if (prevQ != null) {{
+                                for (int qi = 0; qi < prevQ.length(); qi++) {{
+                                    JSONObject qItem = prevQ.optJSONObject(qi);
+                                    if (qItem != null && qItem.optLong("chat_id", 0L) != 0L) {{
+                                        displaced.put(qItem);
+                                    }}
+                                }}
+                            }}
+                        }}
+                        long prevStart = cfg.optLong("run_start_ms", 0L);
+                        long runStart = (now > prevStart) ? now : (prevStart + 1L);
+                        long leaseMs = requestedMode.equals("reset") ? 60000L : 45000L;
+                        cfg.put("busy_until", now + leaseMs);
                         cfg.put("active_chat_id", cid);
                         cfg.put("app_name", appName);
-                        cfg.put("capture_mode", mode);
+                        cfg.put("capture_mode", requestedMode);
                         cfg.put("queue", new JSONArray());
                         cfg.put("qr_was_closed", false);
+                        cfg.put("reset_notified", false);
+                        cfg.put("reset_stage", 0);
+                        cfg.put("reset_kills", 0);
+                        cfg.put("reset_recents_checked", false);
+                        cfg.put("reset_open_tries", 0);
                         cfg.put("step_count", 0);
                         cfg.put("other_count", 0);
                         cfg.put("white_count", 0);
@@ -763,11 +892,35 @@ synchronized (System.class) {{
                         cfg.put("progress_pct", isAdmin ? 0 : 10);
                         cfg.put("pending_status_text", "");
                         cfg.put("last_ss_deleted", true);
-                        cfg.put("run_start_ms", now);
+                        cfg.put("run_start_ms", runStart);
                         cfg.put("status_message_id", 0L);
-                        saveConfig(cfg);
-                        deletePrivateFrames();
-                        actionResult = "RUN";
+                        cfg.put("worker_active", true);
+                        cfg.put("worker_heartbeat_ms", now);
+                        cfg.put("worker_exiting_ms", 0L);
+
+                        if (isResetPreempt && isLiveWorker) {{
+                            cfg.put("preempted_notices", new JSONArray());
+                            saveConfig(cfg);
+                            coopPreemptNotices = displaced;
+                            coopRunStart = runStart;
+                            statusStage = "COOP_RESET";
+                            actionResult = "IGNORE";
+                        }} else {{
+                            JSONArray preemptNotices = cfg.optJSONArray("preempted_notices");
+                            if (preemptNotices == null) {{
+                                preemptNotices = new JSONArray();
+                            }}
+                            for (int di = 0; di < displaced.length(); di++) {{
+                                preemptNotices.put(displaced.get(di));
+                            }}
+                            cfg.put("preempted_notices", preemptNotices);
+                            cfg.put("vm_booting", false);
+                            cfg.put("worker_pending_start_ms", now);
+                            cfg.put("worker_start_ms", runStart);
+                            saveConfig(cfg);
+                            deletePrivateFrames();
+                            actionResult = "RUN";
+                        }}
                     }}
                 }}
             }}
@@ -780,6 +933,40 @@ if (dupUid) {{
 }}
 if (actionResult.equals("RUN")) {{
     return "RUN";
+}}
+if (statusStage.equals("COOP_RESET")) {{
+    JSONObject sent = sendMsg(cid, "🔄 Force-restarting Telcell Wallet...", null);
+    long resetMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
+    if (resetMsgId > 0L) {{
+        synchronized (System.class) {{
+            JSONObject fresh = loadConfig();
+            if (fresh.optLong("active_chat_id", 0L) == cid
+                && fresh.optLong("run_start_ms", 0L) == coopRunStart
+                && fresh.optLong("status_message_id", 0L) == 0L) {{
+                fresh.put("status_message_id", resetMsgId);
+                fresh.put("last_ss_deleted", true);
+                saveConfig(fresh);
+            }}
+        }}
+    }}
+    if (coopPreemptNotices != null) {{
+        for (int ni = 0; ni < coopPreemptNotices.length(); ni++) {{
+            JSONObject nItem = coopPreemptNotices.optJSONObject(ni);
+            if (nItem != null) {{
+                long nCid = nItem.optLong("chat_id", 0L);
+                long nMid = nItem.optLong("status_message_id", 0L);
+                if (nCid != 0L) {{
+                    String cancelMsg = "❌ Request cancelled by VM reset. Please try again.";
+                    if (nMid > 0L) {{
+                        updateStatus(nCid, nMid, cancelMsg);
+                    }} else {{
+                        sendMsg(nCid, cancelMsg, null);
+                    }}
+                }}
+            }}
+        }}
+    }}
+    return "IGNORE";
 }}
 if (replyText != null) {{
     sendMsg(cid, replyText, replyMarkup);
@@ -817,11 +1004,11 @@ return actionResult;
 def build_init_status_script() -> str:
     """BeanShell Java 7 script sending initial status while Virtual Master boots."""
     return (
-        'import java.io.*;\n'
-        'import java.net.HttpURLConnection;\n'
-        'import java.net.URL;\n'
-        'import org.json.JSONArray;\n'
-        'import org.json.JSONObject;\n\n'
+        "import java.io.*;\n"
+        "import java.net.HttpURLConnection;\n"
+        "import java.net.URL;\n"
+        "import org.json.JSONArray;\n"
+        "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
         + _BSH_READ_STREAM
@@ -838,26 +1025,72 @@ def build_init_status_script() -> str:
 long t0 = System.currentTimeMillis();
 deletePrivateFrames();
 
-JSONObject cfg = loadConfig();
-long cid = cfg.optLong("active_chat_id", 0L);
-long adminId = cfg.optLong("admin_id", 0L);
-long claimedRunStart = cfg.optLong("run_start_ms", 0L);
-if (cid <= 0L || cfg.optLong("status_message_id", 0L) > 0L) {
+long cid = 0L;
+long adminId = 0L;
+long claimedRunStart = 0L;
+long existingMid = 0L;
+String captureMode = "qr";
+synchronized (System.class) {
+    JSONObject cfg = loadConfig();
+    cfg.put("worker_pending_start_ms", 0L);
+    cfg.put("worker_heartbeat_ms", System.currentTimeMillis());
+    saveConfig(cfg);
+    cid = cfg.optLong("active_chat_id", 0L);
+    adminId = cfg.optLong("admin_id", 0L);
+    claimedRunStart = cfg.optLong("run_start_ms", 0L);
+    existingMid = cfg.optLong("status_message_id", 0L);
+    captureMode = cfg.optString("capture_mode", "qr");
+}
+if (cid <= 0L || existingMid > 0L) {
     return "SKIP";
 }
 
-String initText = (cid == adminId)
-    ? "🔍 Waking phone & checking Virtual Master..."
-    : formatProgress("⏳ Generating QR code...", 10);
+String initText = captureMode.equals("reset")
+    ? "🔄 Force-restarting Telcell Wallet..."
+    : ((cid == adminId)
+        ? "🔍 Waking phone & checking Virtual Master..."
+        : formatProgress("⏳ Generating QR code...", 10));
 JSONObject sent = sendMsg(cid, initText, null);
 long statusMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
-if (statusMsgId > 0L) {
-    synchronized (System.class) {
-        JSONObject fresh = loadConfig();
-        if (fresh.optLong("active_chat_id", 0L) == cid && fresh.optLong("run_start_ms", 0L) == claimedRunStart) {
-            fresh.put("status_message_id", statusMsgId);
-            fresh.put("last_ss_deleted", true);
-            saveConfig(fresh);
+JSONArray preemptNotices = null;
+boolean deleteOrphanedMsg = false;
+synchronized (System.class) {
+    JSONObject fresh = loadConfig();
+    fresh.put("worker_heartbeat_ms", System.currentTimeMillis());
+    boolean dirty = true;
+    boolean sameOwner = fresh.optLong("active_chat_id", 0L) == cid && fresh.optLong("run_start_ms", 0L) == claimedRunStart;
+    if (statusMsgId > 0L && sameOwner) {
+        fresh.put("status_message_id", statusMsgId);
+        fresh.put("last_ss_deleted", true);
+    } else if (statusMsgId > 0L && !sameOwner) {
+        deleteOrphanedMsg = true;
+    }
+    JSONArray pendingNotices = fresh.optJSONArray("preempted_notices");
+    if (pendingNotices != null && pendingNotices.length() > 0) {
+        preemptNotices = pendingNotices;
+        fresh.put("preempted_notices", new JSONArray());
+    }
+    if (dirty) {
+        saveConfig(fresh);
+    }
+}
+if (deleteOrphanedMsg) {
+    deleteStatus(cid, statusMsgId);
+}
+if (preemptNotices != null) {
+    for (int i = 0; i < preemptNotices.length(); i++) {
+        JSONObject nItem = preemptNotices.optJSONObject(i);
+        if (nItem != null) {
+            long nCid = nItem.optLong("chat_id", 0L);
+            long nMid = nItem.optLong("status_message_id", 0L);
+            if (nCid != 0L) {
+                String cancelMsg = "❌ Request cancelled by VM reset. Please try again.";
+                if (nMid > 0L) {
+                    updateStatus(nCid, nMid, cancelMsg);
+                } else {
+                    sendMsg(nCid, cancelMsg, null);
+                }
+            }
         }
     }
 }
@@ -877,13 +1110,13 @@ return (statusMsgId > 0L) ? "SENT" : "ERR";
 def build_vision_script() -> str:
     """BeanShell Java 7 script for screenshot polling, state machine & QR crop."""
     return (
-        'import android.graphics.Bitmap;\n'
-        'import android.graphics.BitmapFactory;\n'
-        'import java.io.*;\n'
-        'import java.net.HttpURLConnection;\n'
-        'import java.net.URL;\n'
-        'import org.json.JSONArray;\n'
-        'import org.json.JSONObject;\n\n'
+        "import android.graphics.Bitmap;\n"
+        "import android.graphics.BitmapFactory;\n"
+        "import java.io.*;\n"
+        "import java.net.HttpURLConnection;\n"
+        "import java.net.URL;\n"
+        "import org.json.JSONArray;\n"
+        "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
         'String appName = "{lv=app_name}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
@@ -895,6 +1128,45 @@ def build_vision_script() -> str:
         + "\n\n"
         + _BSH_WORKER_CONFIG_HELPERS
         + f"""
+
+JSONObject syncActiveConfig(JSONObject curCfg, String ssName, long ssMtime, boolean ssDel, boolean countStep) {{
+    synchronized (System.class) {{
+        JSONObject fresh = loadConfig();
+        long curWStart = curCfg.optLong("worker_start_ms", 0L);
+        long freshWStart = fresh.optLong("worker_start_ms", 0L);
+        if (curWStart > 0L && freshWStart > curWStart) {{
+            return null;
+        }}
+        long nowMs = System.currentTimeMillis();
+        if (fresh.optLong("run_start_ms", 0L) > curCfg.optLong("run_start_ms", 0L)) {{
+            fresh.put("vm_booting", curCfg.optBoolean("vm_booting", false));
+            if (ssName != null) {{
+                fresh.put("last_ss_name", ssName);
+                fresh.put("last_ss_mtime", ssMtime);
+                fresh.put("last_ss_deleted", ssDel);
+            }}
+            if (countStep) {{
+                fresh.put("step_count", fresh.optInt("step_count", 0) + 1);
+            }}
+            fresh.put("worker_heartbeat_ms", nowMs);
+            long mLease = nowMs + 30000L;
+            if (fresh.optLong("busy_until", 0L) < mLease) {{
+                fresh.put("busy_until", mLease);
+            }}
+            saveConfig(fresh);
+            return fresh;
+        }}
+        if (fresh.optLong("status_message_id", 0L) > 0L
+            && curCfg.optLong("status_message_id", 0L) == 0L
+            && fresh.optLong("active_chat_id", 0L) == curCfg.optLong("active_chat_id", 0L)
+            && fresh.optLong("run_start_ms", 0L) == curCfg.optLong("run_start_ms", 0L)) {{
+            curCfg.put("status_message_id", fresh.optLong("status_message_id", 0L));
+        }}
+        curCfg.put("worker_heartbeat_ms", nowMs);
+        saveConfig(curCfg);
+        return curCfg;
+    }}
+}}
 
 int sendPhotoBytes(long cid, byte[] pngBytes, String filename, String caption) {{
     HttpURLConnection conn = null;
@@ -1020,12 +1292,21 @@ boolean cleanScreenshots(String[] dirs, File latestFile, String latestName) {{
     return deleted;
 }}
 
-JSONObject cfg = loadConfig();
+JSONObject cfg = null;
+synchronized (System.class) {{
+    cfg = loadConfig();
+    cfg.put("worker_heartbeat_ms", System.currentTimeMillis());
+    saveConfig(cfg);
+}}
+String mode = cfg.optString("capture_mode", "qr");
 long cid = cfg.optLong("active_chat_id", 0L);
 long adminId = cfg.optLong("admin_id", 0L);
 long statusMsgId = cfg.optLong("status_message_id", 0L);
-String mode = cfg.optString("capture_mode", "qr");
-int stepCount = cfg.optInt("step_count", 0) + 1;
+int prevStepCount = cfg.optInt("step_count", 0);
+if (prevStepCount >= 95) {{
+    return "ABORT_TIMEOUT";
+}}
+int stepCount = prevStepCount + 1;
 cfg.put("step_count", stepCount);
 long minLease = System.currentTimeMillis() + 30000L;
 if (cfg.optLong("busy_until", 0L) < minLease) {{
@@ -1088,6 +1369,11 @@ while (System.currentTimeMillis() - waitStart < 3800L) {{
 }}
 
 if (latest == null) {{
+    JSONObject synced = syncActiveConfig(cfg, null, 0L, false, false);
+    if (synced == null) {{
+        return "ABORT_PREEMPTED";
+    }}
+    cfg = synced;
     cfg.put("last_state", "NO_SCREENSHOT");
     cfg.put("pending_status_text", "");
     saveConfig(cfg);
@@ -1106,6 +1392,11 @@ cfg.put("last_ss_mtime", latestMtime);
 if (!latestReady) {{
     boolean deletedNow = cleanScreenshots(dirs, latest, latestName);
     cfg.put("last_ss_deleted", deletedNow);
+    JSONObject synced = syncActiveConfig(cfg, latestName, latestMtime, deletedNow, false);
+    if (synced == null) {{
+        return "ABORT_PREEMPTED";
+    }}
+    cfg = synced;
     cfg.put("last_state", "TRUNCATED_SS");
     cfg.put("pending_status_text", "");
     saveConfig(cfg);
@@ -1123,6 +1414,11 @@ boolean deletedNow = cleanScreenshots(dirs, latest, latestName);
 cfg.put("last_ss_deleted", deletedNow);
 
 if (bmp == null) {{
+    JSONObject synced = syncActiveConfig(cfg, latestName, latestMtime, deletedNow, false);
+    if (synced == null) {{
+        return "ABORT_PREEMPTED";
+    }}
+    cfg = synced;
     cfg.put("last_state", "DECODE_ERR");
     cfg.put("pending_status_text", "");
     saveConfig(cfg);
@@ -1130,6 +1426,18 @@ if (bmp == null) {{
 }}
 
 try {{
+    JSONObject synced = syncActiveConfig(cfg, latestName, latestMtime, deletedNow, true);
+    if (synced == null) {{
+        return "ABORT_PREEMPTED";
+    }}
+    if (synced != cfg) {{
+        cfg = synced;
+        mode = cfg.optString("capture_mode", "qr");
+        cid = cfg.optLong("active_chat_id", 0L);
+        adminId = cfg.optLong("admin_id", 0L);
+        stepCount = cfg.optInt("step_count", 1);
+    }}
+    statusMsgId = cfg.optLong("status_message_id", 0L);
     int w = bmp.getWidth();
     int h = bmp.getHeight();
     int px(int x) {{
@@ -1165,6 +1473,16 @@ try {{
     boolean isPopupCorner(int x, int y) {{
         int r = getR(x, y); int g = getG(x, y); int b = getB(x, y);
         return r >= 15 && r <= 42 && g >= 10 && g <= 35 && b >= 20 && b <= 48;
+    }}
+    boolean isRecentsBg(int x, int y) {{
+        int r = getR(x, y); int g = getG(x, y); int b = getB(x, y);
+        return r >= 200 && r <= 230 && g >= 200 && g <= 230 && b >= 212 && b <= 242 && (b - r) >= 6 && Math.abs(r - g) <= 6;
+    }}
+    boolean isRecentsCardPixel(int x, int y) {{
+        int dr = Math.abs(getR(x, y) - getR(40, 800));
+        int dg = Math.abs(getG(x, y) - getG(40, 800));
+        int db = Math.abs(getB(x, y) - getB(40, 800));
+        return (dr + dg + db) > 20 || !isRecentsBg(x, y);
     }}
     void resetWaitCounters(JSONObject cfg) throws Exception {{
         cfg.put("white_count", 0);
@@ -1219,6 +1537,38 @@ try {{
         saveConfig(cfg);
         return "RESET_TO_HOME";
     }}
+    String handleResetInApp(JSONObject cfg, long cid, long adminId) throws Exception {{
+        cfg.put("vm_booting", false);
+        int openTries = cfg.optInt("reset_open_tries", 0) + 1;
+        cfg.put("reset_open_tries", openTries);
+        cfg.put("reset_recents_checked", true);
+        cfg.put("last_state", "RESET_OPEN_RECENTS");
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        if (openTries == 1 || openTries == 3) {{
+            String stepText = prepareStepStatus(cfg, cid, adminId, "🧹 Opening VM Recents...", 20);
+            queueStepStatus(cfg, stepText);
+            saveConfig(cfg);
+            return "OPEN_RECENTS";
+        }}
+        queueStepStatus(cfg, null);
+        if (openTries == 2 || openTries == 4) {{
+            saveConfig(cfg);
+            return "WAIT";
+        }}
+        if (openTries == 5) {{
+            saveConfig(cfg);
+            return "CLOSE_MODAL";
+        }}
+        if (openTries == 6) {{
+            saveConfig(cfg);
+            return "CLICK_BACK";
+        }}
+        cfg.put("reset_open_tries", 0);
+        cfg.put("reset_stage", 1);
+        saveConfig(cfg);
+        return "RESET_TO_HOME";
+    }}
 
     // 1. Check VM Launcher vs VM Boot Loading
     if (isDark(360, 800) && isDark(100, 500) && isDark(360, 350)) {{
@@ -1234,17 +1584,17 @@ try {{
                 if (b > enterMax) enterMax = b;
             }}
         }}
+        cfg.put("vm_booting", true);
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
         if (enterMax > 120) {{
             cfg.put("last_state", "VM_LAUNCHER");
-            cfg.put("other_count", 0);
-            resetWaitCounters(cfg);
             String stepText = prepareStepStatus(cfg, cid, adminId, "🖥️ Entering Virtual Master...", 20);
             queueStepStatus(cfg, stepText);
             saveConfig(cfg);
             return "CLICK_ENTER";
         }}
         cfg.put("last_state", "VM_LOADING");
-        resetWaitCounters(cfg);
         String waitText = ((stepCount & 1) == 0) ? prepareWaitNudge(cfg, cid, adminId, 2, 20) : null;
         queueStepStatus(cfg, waitText);
         saveConfig(cfg);
@@ -1263,19 +1613,98 @@ try {{
         return "DISMISS_POPUP";
     }}
 
-    // 3. Handle Reset VM App mode
-    if (mode.equals("reset")) {{
-        cfg.put("last_state", "RESET");
-        cfg.put("busy_until", 0L);
+    int resetStage = cfg.optInt("reset_stage", 0);
+    int resetKills = cfg.optInt("reset_kills", 0);
+    boolean resetRecentsChecked = cfg.optBoolean("reset_recents_checked", false);
+    boolean vmBooting = cfg.optBoolean("vm_booting", false);
+
+    // 3. Check Virtual Master Recents Screen (#dad9e4 backdrop around card slot)
+    if (isRecentsBg(40, 800) && isRecentsBg(620, 800) &&
+        isRecentsBg(360, 200) && isRecentsBg(360, 1360)) {{
+        cfg.put("vm_booting", false);
+        cfg.put("other_count", 0);
+        cfg.put("reset_open_tries", 0);
+        cfg.put("reset_recents_checked", true);
         resetWaitCounters(cfg);
+        if (mode.equals("reset") && resetStage == 0) {{
+            boolean hasCard = isRecentsCardPixel(360, 500) || isRecentsCardPixel(360, 800) || isRecentsCardPixel(360, 1000);
+            if (hasCard && resetKills < 3) {{
+                cfg.put("reset_kills", resetKills + 1);
+                cfg.put("last_state", "VM_RECENTS");
+                String stepText = prepareStepStatus(cfg, cid, adminId, "🔪 Closing Telcell Wallet...", 25);
+                queueStepStatus(cfg, stepText);
+                saveConfig(cfg);
+                return "SWIPE_KILL_RECENT";
+            }}
+            cfg.put("reset_stage", 1);
+            cfg.put("last_state", "VM_RECENTS_EMPTY");
+            queueStepStatus(cfg, null);
+            saveConfig(cfg);
+            return "RESET_TO_HOME";
+        }}
+        cfg.put("last_state", "VM_RECENTS");
         queueStepStatus(cfg, null);
         saveConfig(cfg);
-        return "DONE_RESET";
+        return "RESET_TO_HOME";
     }}
 
-    // 4. Check QR Code Modal
+    // 4. Check VM Home Screen (Telcell icon orange pixels)
+    if (isDark(360, 800)) {{
+        int o1 = 0;
+        for (int x = 80; x <= 120; x += 3) {{
+            for (int y = 360; y <= 400; y += 3) {{
+                if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o1++;
+            }}
+        }}
+        int o2 = 0;
+        for (int x = 80; x <= 120; x += 3) {{
+            for (int y = 120; y <= 165; y += 3) {{
+                if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o2++;
+            }}
+        }}
+        if (o1 >= 15 || o2 >= 15) {{
+            cfg.put("vm_booting", false);
+            cfg.put("other_count", 0);
+            cfg.put("reset_open_tries", 0);
+            resetWaitCounters(cfg);
+            if (mode.equals("reset") && resetStage == 0 && !resetRecentsChecked && resetKills == 0) {{
+                cfg.put("reset_recents_checked", true);
+                cfg.put("last_state", "RESET_CHECK_RECENTS");
+                String stepText = prepareStepStatus(cfg, cid, adminId, "🧹 Checking running VM apps...", 20);
+                queueStepStatus(cfg, stepText);
+                saveConfig(cfg);
+                return "OPEN_RECENTS";
+            }}
+            if (mode.equals("reset")) {{
+                cfg.put("reset_stage", 2);
+            }}
+            cfg.put("last_state", (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
+            String launchLabel = mode.equals("reset") ? "🚀 Reopening Telcell Wallet..." : "🚀 Launching Telcell Wallet...";
+            String stepText = prepareStepStatus(cfg, cid, adminId, launchLabel, mode.equals("reset") ? 35 : 30);
+            queueStepStatus(cfg, stepText);
+            saveConfig(cfg);
+            return (o1 >= 15) ? "LAUNCH_1" : "LAUNCH_2";
+        }}
+    }}
+
+    // 5. Reset Phase 0 in-app intercept (skip during VM cold boot splash so VM reaches Home)
+    if (mode.equals("reset") && resetStage == 0 && !vmBooting) {{
+        return handleResetInApp(cfg, cid, adminId);
+    }}
+
+    // 6. Check QR Code Modal
     if (getR(30, 400) < 110 && getG(30, 400) < 110 && getB(30, 400) < 110 &&
         isWhite(150, 400) && isWhite(570, 400) && isWhite(130, 590) && isWhite(590, 590)) {{
+        cfg.put("vm_booting", false);
+        if (mode.equals("reset")) {{
+            cfg.put("qr_was_closed", true);
+            cfg.put("last_state", "RESET_CLOSE_QR");
+            cfg.put("other_count", 0);
+            resetWaitCounters(cfg);
+            queueStepStatus(cfg, null);
+            saveConfig(cfg);
+            return "CLOSE_MODAL";
+        }}
         int blacks = 0;
         int whites = 0;
         for (int x = 200; x <= 520; x += 6) {{
@@ -1303,6 +1732,21 @@ try {{
                 saveConfig(cfg);
                 return "CLOSE_MODAL";
             }}
+            JSONObject preSendSync = syncActiveConfig(cfg, latestName, latestMtime, deletedNow, false);
+            if (preSendSync == null) {{
+                return "ABORT_PREEMPTED";
+            }}
+            if (preSendSync != cfg || !preSendSync.optString("capture_mode", "qr").equals("qr")) {{
+                cfg = preSendSync;
+                cfg.put("qr_was_closed", true);
+                cfg.put("last_state", "RESET_CLOSE_QR");
+                cfg.put("other_count", 0);
+                resetWaitCounters(cfg);
+                queueStepStatus(cfg, null);
+                saveConfig(cfg);
+                return "CLOSE_MODAL";
+            }}
+            statusMsgId = cfg.optLong("status_message_id", 0L);
             queueStepStatus(cfg, null);
             int cx = px(130);
             int cy = py(445);
@@ -1320,82 +1764,90 @@ try {{
                     ? "❌ Failed to upload QR (HTTP " + code + ")."
                     : "❌ Failed to upload QR. Please try again.";
                 updateStatus(cid, statusMsgId, errText);
+                if (cid != adminId && cid > 0L && adminId > 0L) {{
+                    sendMsg(adminId,
+                        "⚠️ User request failed (chat_id: " + cid + ")\\nReason: QR upload failed (HTTP " + code + ")",
+                        null);
+                }}
             }}
             long popNextCid = 0L;
             long popNextMid = 0L;
             String nextText = null;
             boolean hasNext = false;
+            boolean preemptedDuringSend = false;
+            boolean workerSuperseded = false;
             synchronized (System.class) {{
                 JSONObject latestCfg = loadConfig();
-                JSONArray queue = latestCfg.optJSONArray("queue");
-                if (queue != null && queue.length() > 0) {{
-                    JSONObject nextItem = queue.getJSONObject(0);
-                    JSONArray rem = new JSONArray();
-                    for (int qi = 1; qi < queue.length(); qi++) {{
-                        rem.put(queue.get(qi));
-                    }}
-                    popNextCid = nextItem.optLong("chat_id", 0L);
-                    popNextMid = nextItem.optLong("status_message_id", 0L);
-                    cfg.put("_pop_queue", true);
-                    cfg.put("queue", rem);
-                    cfg.put("active_chat_id", popNextCid);
-                    cfg.put("status_message_id", popNextMid);
-                    cfg.put("qr_was_closed", true);
-                    cfg.put("step_count", 2);
-                    cfg.put("other_count", 0);
-                    resetWaitCounters(cfg);
-                    cfg.put("busy_until", System.currentTimeMillis() + 45000L);
-                    cfg.put("last_state", "NEXT_IN_QUEUE");
-                    cfg.put("progress_pct", (popNextCid == adminId) ? 0 : 70);
-                    nextText = (popNextCid == adminId)
-                        ? "🔄 Generating QR code for your request..."
-                        : formatProgress("⏳ Generating QR code...", 70);
-                    queueStepStatus(cfg, nextText);
-                    saveConfig(cfg);
-                    hasNext = true;
+                long curWStart = cfg.optLong("worker_start_ms", 0L);
+                long freshWStart = latestCfg.optLong("worker_start_ms", 0L);
+                long nowMs = System.currentTimeMillis();
+                if (curWStart > 0L && freshWStart > curWStart) {{
+                    workerSuperseded = true;
+                }} else if (latestCfg.optString("capture_mode", "qr").equals("reset")
+                    || latestCfg.optLong("run_start_ms", 0L) > cfg.optLong("run_start_ms", 0L)) {{
+                    latestCfg.put("last_ss_name", latestName);
+                    latestCfg.put("last_ss_mtime", latestMtime);
+                    latestCfg.put("last_ss_deleted", deletedNow);
+                    latestCfg.put("qr_was_closed", true);
+                    latestCfg.put("worker_heartbeat_ms", nowMs);
+                    saveConfig(latestCfg);
+                    preemptedDuringSend = true;
                 }} else {{
-                    cfg.put("_pop_queue", true);
-                    cfg.put("queue", new JSONArray());
-                    cfg.put("last_state", "QR_SENT");
-                    cfg.put("busy_until", 0L);
-                    cfg.put("progress_pct", 0);
-                    resetWaitCounters(cfg);
-                    saveConfig(cfg);
+                    JSONArray queue = latestCfg.optJSONArray("queue");
+                    if (queue != null && queue.length() > 0) {{
+                        JSONObject nextItem = queue.getJSONObject(0);
+                        JSONArray rem = new JSONArray();
+                        for (int qi = 1; qi < queue.length(); qi++) {{
+                            rem.put(queue.get(qi));
+                        }}
+                        popNextCid = nextItem.optLong("chat_id", 0L);
+                        popNextMid = nextItem.optLong("status_message_id", 0L);
+                        long prevStart = cfg.optLong("run_start_ms", 0L);
+                        long nextRunStart = (nowMs > prevStart) ? nowMs : (prevStart + 1L);
+                        cfg.put("_pop_queue", true);
+                        cfg.put("queue", rem);
+                        cfg.put("active_chat_id", popNextCid);
+                        cfg.put("status_message_id", popNextMid);
+                        cfg.put("run_start_ms", nextRunStart);
+                        cfg.put("qr_was_closed", true);
+                        cfg.put("step_count", 2);
+                        cfg.put("other_count", 0);
+                        resetWaitCounters(cfg);
+                        cfg.put("busy_until", nowMs + 45000L);
+                        cfg.put("worker_heartbeat_ms", nowMs);
+                        cfg.put("last_state", "NEXT_IN_QUEUE");
+                        cfg.put("progress_pct", (popNextCid == adminId) ? 0 : 70);
+                        nextText = (popNextCid == adminId)
+                            ? "🔄 Generating QR code for your request..."
+                            : formatProgress("⏳ Generating QR code...", 70);
+                        queueStepStatus(cfg, nextText);
+                        saveConfig(cfg);
+                        hasNext = true;
+                    }} else {{
+                        cfg.put("_pop_queue", true);
+                        cfg.put("queue", new JSONArray());
+                        cfg.put("last_state", "QR_SENT");
+                        cfg.put("busy_until", 0L);
+                        cfg.put("worker_active", false);
+                        cfg.put("worker_pending_start_ms", 0L);
+                        cfg.put("worker_exiting_ms", nowMs);
+                        cfg.put("worker_heartbeat_ms", nowMs);
+                        cfg.put("progress_pct", 0);
+                        resetWaitCounters(cfg);
+                        saveConfig(cfg);
+                    }}
                 }}
             }}
-            if (hasNext) {{
-                return "CLOSE_MODAL";
-            }} else {{
-                return "DONE";
+            if (workerSuperseded) {{
+                return "ABORT_PREEMPTED";
             }}
+            if (preemptedDuringSend || hasNext) {{
+                return "CLOSE_MODAL";
+            }}
+            return "DONE";
         }}
         cfg.put("white_count", 0);
         return handleLoadingWait(cfg, "loading_count", "QR_LOADING", 9, 80, cid, adminId);
-    }}
-
-    // 6. Check VM Home Screen (Telcell icon orange pixels)
-    if (isDark(360, 800)) {{
-        int o1 = 0;
-        for (int x = 80; x <= 120; x += 3) {{
-            for (int y = 360; y <= 400; y += 3) {{
-                if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o1++;
-            }}
-        }}
-        int o2 = 0;
-        for (int x = 80; x <= 120; x += 3) {{
-            for (int y = 120; y <= 165; y += 3) {{
-                if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o2++;
-            }}
-        }}
-        if (o1 >= 15 || o2 >= 15) {{
-            cfg.put("last_state", (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
-            cfg.put("other_count", 0);
-            resetWaitCounters(cfg);
-            String stepText = prepareStepStatus(cfg, cid, adminId, "🚀 Launching Telcell Wallet...", 30);
-            queueStepStatus(cfg, stepText);
-            saveConfig(cfg);
-            return (o1 >= 15) ? "LAUNCH_1" : "LAUNCH_2";
-        }}
     }}
 
     // 7. Check Telcell PIN Screen (gray background + top orange Telcell logo)
@@ -1407,6 +1859,10 @@ try {{
             }}
         }}
         if (pinLogo >= 10) {{
+            cfg.put("vm_booting", false);
+            if (mode.equals("reset") && resetStage == 0) {{
+                return handleResetInApp(cfg, cid, adminId);
+            }}
             int spinner = 0;
             for (int x = 330; x <= 390; x += 3) {{
                 for (int y = 680; y <= 715; y += 3) {{
@@ -1430,6 +1886,10 @@ try {{
     // 8. Check Telcell Dashboard (navigate via Услуги -> Транспорт)
     boolean dashNav = isOrange(360, 1372) || (isWhite(50, 1490) && isWhite(670, 1490) && getB(80, 1430) - getG(80, 1430) > 30);
     if (dashNav) {{
+        cfg.put("vm_booting", false);
+        if (mode.equals("reset") && resetStage == 0) {{
+            return handleResetInApp(cfg, cid, adminId);
+        }}
         if (isWhite(200, 300) && isWhite(580, 415) && isWhite(360, 800)) {{
             cfg.put("white_count", 0);
             return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
@@ -1465,9 +1925,80 @@ try {{
     boolean availTabOrange = isOrange(277, 235) && isWhite(100, 235);
     boolean ticketBgGray = getR(360, 800) >= 240 && getR(360, 800) <= 250 && getG(360, 800) >= 240 && getG(360, 800) <= 251;
     if ((buyBtnOrange || availTabOrange) && ticketBgGray) {{
+        cfg.put("vm_booting", false);
+        if (mode.equals("reset") && resetStage == 0) {{
+            return handleResetInApp(cfg, cid, adminId);
+        }}
         if (getR(360, 400) < 252 || getG(360, 400) < 252 || getB(360, 400) < 252) {{
             cfg.put("white_count", 0);
             return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 9, 70, cid, adminId);
+        }}
+        if (mode.equals("reset")) {{
+            long popNextCid = 0L;
+            long popNextMid = 0L;
+            boolean hasNext = false;
+            synchronized (System.class) {{
+                JSONObject latestCfg = loadConfig();
+                JSONArray queue = latestCfg.optJSONArray("queue");
+                cfg.put("qr_was_closed", true);
+                cfg.put("other_count", 0);
+                resetWaitCounters(cfg);
+                long nowMs = System.currentTimeMillis();
+                if (queue != null && queue.length() > 0) {{
+                    JSONObject nextItem = queue.getJSONObject(0);
+                    JSONArray rem = new JSONArray();
+                    for (int qi = 1; qi < queue.length(); qi++) {{
+                        rem.put(queue.get(qi));
+                    }}
+                    popNextCid = nextItem.optLong("chat_id", 0L);
+                    popNextMid = nextItem.optLong("status_message_id", 0L);
+                    long prevStart = latestCfg.optLong("run_start_ms", cfg.optLong("run_start_ms", 0L));
+                    long nextRunStart = (nowMs > prevStart) ? nowMs : (prevStart + 1L);
+                    cfg.put("_pop_queue", true);
+                    cfg.put("queue", rem);
+                    cfg.put("capture_mode", "qr");
+                    cfg.put("active_chat_id", popNextCid);
+                    cfg.put("status_message_id", popNextMid);
+                    cfg.put("run_start_ms", nextRunStart);
+                    cfg.put("step_count", 2);
+                    cfg.put("reset_stage", 0);
+                    cfg.put("reset_kills", 0);
+                    cfg.put("reset_recents_checked", false);
+                    cfg.put("reset_open_tries", 0);
+                    cfg.put("reset_notified", false);
+                    cfg.put("busy_until", nowMs + 45000L);
+                    cfg.put("worker_heartbeat_ms", nowMs);
+                    cfg.put("last_state", "TICKET_LIST");
+                    cfg.put("progress_pct", (popNextCid == adminId) ? 0 : 80);
+                    String nextText = (popNextCid == adminId)
+                        ? "🎫 Selecting ticket..."
+                        : formatProgress("⏳ Generating QR code...", 80);
+                    queueStepStatus(cfg, nextText);
+                    saveConfig(cfg);
+                    hasNext = true;
+                }} else {{
+                    queueStepStatus(cfg, null);
+                }}
+            }}
+            if (hasNext) {{
+                updateStatus(cid, statusMsgId, "✅ VM app reset complete — Telcell restarted & ready.");
+                return "CLICK_TICKET_ROW";
+            }}
+            updateStatus(cid, statusMsgId, "✅ VM app reset complete — Telcell restarted & ready.");
+            synchronized (System.class) {{
+                long nowMs = System.currentTimeMillis();
+                cfg.put("_pop_queue", true);
+                cfg.put("queue", new JSONArray());
+                cfg.put("last_state", "RESET");
+                cfg.put("reset_notified", true);
+                cfg.put("busy_until", 0L);
+                cfg.put("worker_active", false);
+                cfg.put("worker_pending_start_ms", 0L);
+                cfg.put("worker_exiting_ms", nowMs);
+                cfg.put("worker_heartbeat_ms", nowMs);
+                saveConfig(cfg);
+            }}
+            return "DONE_RESET";
         }}
         cfg.put("qr_was_closed", true);
         cfg.put("last_state", "TICKET_LIST");
@@ -1483,6 +2014,10 @@ try {{
     boolean buyTabOrange = isOrange(100, 235) && isWhite(277, 235);
     boolean buyCardBtns = isWhite(360, 120) && isWhite(277, 235) && isOrange(550, 485);
     if (buyTabOrange || buyCardBtns) {{
+        cfg.put("vm_booting", false);
+        if (mode.equals("reset") && resetStage == 0) {{
+            return handleResetInApp(cfg, cid, adminId);
+        }}
         cfg.put("qr_was_closed", true);
         cfg.put("last_state", "BUY_TICKET_TAB");
         cfg.put("other_count", 0);
@@ -1503,7 +2038,8 @@ try {{
         }}
         if (whiteHits >= 34) {{
             cfg.put("loading_count", 0);
-            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", 7, 40, cid, adminId);
+            int maxWhite = (vmBooting || mode.equals("reset")) ? 18 : 7;
+            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", maxWhite, 40, cid, adminId);
         }}
     }}
 
@@ -1514,6 +2050,17 @@ try {{
     resetWaitCounters(cfg);
     queueStepStatus(cfg, null);
     saveConfig(cfg);
+    if (vmBooting) {{
+        if (otherCount <= 30) {{
+            return "WAIT";
+        }}
+        if (otherCount == 31) {{
+            return "CLICK_BACK";
+        }}
+        cfg.put("other_count", 0);
+        saveConfig(cfg);
+        return "RESET_TO_HOME";
+    }}
     if (otherCount <= 2 || otherCount == 4) {{
         return "WAIT";
     }}
@@ -1534,11 +2081,11 @@ try {{
 def build_post_step_script() -> str:
     """BeanShell Java 7 script overlapping status edits with post-tap settle pause."""
     return (
-        'import java.io.*;\n'
-        'import java.net.HttpURLConnection;\n'
-        'import java.net.URL;\n'
-        'import org.json.JSONArray;\n'
-        'import org.json.JSONObject;\n\n'
+        "import java.io.*;\n"
+        "import java.net.HttpURLConnection;\n"
+        "import java.net.URL;\n"
+        "import org.json.JSONArray;\n"
+        "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
         'String stepCmd = "{lv=step_cmd}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
@@ -1554,6 +2101,7 @@ long waitMs = 350L;
 if (stepCmd.equals("WAIT")) waitMs = 300L;
 else if (stepCmd.equals("DISMISS_POPUP")) waitMs = 350L;
 else if (stepCmd.equals("CLOSE_MODAL") || stepCmd.equals("CLICK_BACK") || stepCmd.equals("RESET_TO_HOME")) waitMs = 450L;
+else if (stepCmd.equals("OPEN_RECENTS") || stepCmd.equals("SWIPE_KILL_RECENT")) waitMs = 550L;
 else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 600L;
 else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
 else if (stepCmd.equals("CLICK_TRANSPORT_LOW") || stepCmd.equals("CLICK_TRANSPORT_HIGH")) waitMs = 750L;
@@ -1561,13 +2109,25 @@ else if (stepCmd.equals("CLICK_ENTER")) waitMs = 900L;
 else if (stepCmd.equals("ENTER_PIN")) waitMs = 1000L;
 else if (stepCmd.equals("LAUNCH_1") || stepCmd.equals("LAUNCH_2")) waitMs = 1100L;
 
-JSONObject cfg = loadConfig();
-String pendingText = cfg.optString("pending_status_text", "");
-if (pendingText.length() > 0) {
-    long cid = cfg.optLong("active_chat_id", 0L);
-    long mid = cfg.optLong("status_message_id", 0L);
-    cfg.put("pending_status_text", "");
-    saveConfig(cfg);
+long cid = 0L;
+long mid = 0L;
+String pendingText = "";
+synchronized (System.class) {
+    JSONObject cfg = loadConfig();
+    if (cfg.has("active_chat_id") || cfg.optBoolean("worker_active", false)) {
+        cfg.put("worker_heartbeat_ms", System.currentTimeMillis());
+        pendingText = cfg.optString("pending_status_text", "");
+        if (pendingText.length() > 0) {
+            cid = cfg.optLong("active_chat_id", 0L);
+            mid = cfg.optLong("status_message_id", 0L);
+            if (mid > 0L) {
+                cfg.put("pending_status_text", "");
+            }
+        }
+        saveConfig(cfg);
+    }
+}
+if (pendingText.length() > 0 && mid > 0L) {
     updateStatus(cid, mid, pendingText);
 }
 
@@ -1586,11 +2146,11 @@ return "OK";
 def build_timeout_script() -> str:
     """BeanShell Java 7 post-loop guard to clear busy lock and report timeouts."""
     return (
-        'import java.io.*;\n'
-        'import java.net.HttpURLConnection;\n'
-        'import java.net.URL;\n'
-        'import org.json.JSONArray;\n'
-        'import org.json.JSONObject;\n\n'
+        "import java.io.*;\n"
+        "import java.net.HttpURLConnection;\n"
+        "import java.net.URL;\n"
+        "import org.json.JSONArray;\n"
+        "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n'
         'String stepCmd = "{lv=step_cmd}".trim();\n\n'
@@ -1601,40 +2161,91 @@ def build_timeout_script() -> str:
         + _BSH_TG_HTTP_HELPERS
         + """
 
+if (stepCmd.equals("ABORT_PREEMPTED")) return "KEEP_ON";
+
+boolean keepScreenOn = false;
+boolean notifyCleanup = false;
+boolean resetAlreadyNotified = false;
+long adminId = 0L;
+long cid = 0L;
+long mid = 0L;
+String lastState = "UNKNOWN";
+int stepCount = 0;
+JSONArray queue = null;
+
+synchronized (System.class) {
+    File f = new File(configPath);
+    if (f.exists()) {
+        FileInputStream fis = new FileInputStream(f);
+        String raw = readStream(fis);
+        fis.close();
+        if (raw.length() > 0) {
+            JSONObject cfg = new JSONObject(raw);
+            adminId = cfg.optLong("admin_id", 0L);
+            long busyUntil = cfg.optLong("busy_until", 0L);
+            boolean workerActive = cfg.optBoolean("worker_active", false);
+            resetAlreadyNotified = cfg.optBoolean("reset_notified", false);
+            cid = cfg.optLong("active_chat_id", 0L);
+            mid = cfg.optLong("status_message_id", 0L);
+            lastState = cfg.optString("last_state", "UNKNOWN");
+            stepCount = cfg.optInt("step_count", 0);
+
+            boolean newRunClaimed = (
+                stepCmd.equals("DONE") && (workerActive || busyUntil > 0L)
+            ) || (
+                stepCmd.equals("DONE_RESET")
+                && resetAlreadyNotified
+                && (workerActive || busyUntil > 0L)
+            );
+            if (newRunClaimed) {
+                keepScreenOn = true;
+            } else {
+                boolean dirty = false;
+                if (cfg.optBoolean("worker_active", false)
+                    || cfg.optLong("worker_pending_start_ms", 0L) > 0L
+                    || cfg.optLong("worker_exiting_ms", 0L) > 0L) {
+                    cfg.put("worker_active", false);
+                    cfg.put("worker_pending_start_ms", 0L);
+                    cfg.put("worker_exiting_ms", 0L);
+                    dirty = true;
+                }
+                if (stepCmd.equals("DONE")) {
+                    // Already completed QR flow; only clear worker flags
+                } else if (busyUntil > 0L || (stepCmd.equals("DONE_RESET") && !resetAlreadyNotified)) {
+                    queue = cfg.optJSONArray("queue");
+                    cfg.put("busy_until", 0L);
+                    cfg.put("queue", new JSONArray());
+                    cfg.put("pending_status_text", "");
+                    dirty = true;
+                    notifyCleanup = true;
+                }
+                if (dirty) {
+                    FileOutputStream fos = new FileOutputStream(f);
+                    OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
+                    osw.write(cfg.toString(2));
+                    osw.flush();
+                    osw.close();
+                }
+            }
+        }
+    }
+}
+
+if (keepScreenOn) {
+    return "KEEP_ON";
+}
+
 deletePrivateFrames();
-File f = new File(configPath);
-if (!f.exists()) return "OK";
 
-FileInputStream fis = new FileInputStream(f);
-String raw = readStream(fis);
-fis.close();
-if (raw.length() == 0) return "OK";
-
-JSONObject cfg = new JSONObject(raw);
-long adminId = cfg.optLong("admin_id", 0L);
-long busyUntil = cfg.optLong("busy_until", 0L);
-long cid = cfg.optLong("active_chat_id", 0L);
-long mid = cfg.optLong("status_message_id", 0L);
-String lastState = cfg.optString("last_state", "UNKNOWN");
-
-if (busyUntil > 0L || stepCmd.equals("DONE_RESET")) {
-    JSONArray queue = cfg.optJSONArray("queue");
-    cfg.put("busy_until", 0L);
-    cfg.put("queue", new JSONArray());
-    cfg.put("pending_status_text", "");
-    FileOutputStream fos = new FileOutputStream(f);
-    OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
-    osw.write(cfg.toString(2));
-    osw.flush();
-    osw.close();
-
+if (notifyCleanup) {
     String msg = stepCmd.equals("DONE_RESET")
-        ? "✅ VM app reset complete."
+        ? "✅ VM app reset complete — Telcell restarted & ready."
         : (cid == adminId
             ? "❌ Timed out waiting for QR screen (last state: " + lastState + "). Please try again."
             : "❌ Timed out generating QR code. Please try again.");
     updateStatus(cid, mid, msg);
 
+    String failedQueueIds = "";
     if (queue != null) {
         String qMsg = stepCmd.equals("DONE_RESET")
             ? "❌ Request cancelled by VM reset. Please try again."
@@ -1642,12 +2253,36 @@ if (busyUntil > 0L || stepCmd.equals("DONE_RESET")) {
         for (int qi = 0; qi < queue.length(); qi++) {
             JSONObject qItem = queue.optJSONObject(qi);
             if (qItem != null) {
-                updateStatus(qItem.optLong("chat_id", 0L), qItem.optLong("status_message_id", 0L), qMsg);
+                long qCid = qItem.optLong("chat_id", 0L);
+                updateStatus(qCid, qItem.optLong("status_message_id", 0L), qMsg);
+                if (!stepCmd.equals("DONE_RESET") && qCid != adminId && qCid > 0L) {
+                    if (failedQueueIds.length() > 0) {
+                        failedQueueIds = failedQueueIds + ", ";
+                    }
+                    failedQueueIds = failedQueueIds + qCid;
+                }
             }
         }
     }
+
+    if (!stepCmd.equals("DONE_RESET") && adminId > 0L) {
+        if (cid != adminId && cid > 0L) {
+            String adminNotice = "⚠️ User request failed (chat_id: " + cid
+                + ")\\nReason: Timed out waiting for QR screen\\nLast state: " + lastState
+                + " (step " + stepCount + ")";
+            if (failedQueueIds.length() > 0) {
+                adminNotice = adminNotice + "\\nAffected queued users: " + failedQueueIds;
+            }
+            sendMsg(adminId, adminNotice, null);
+        } else if (failedQueueIds.length() > 0) {
+            sendMsg(adminId,
+                "⚠️ Queued user request(s) failed due to timeout: " + failedQueueIds
+                + "\\nLast state: " + lastState + " (step " + stepCount + ")",
+                null);
+        }
+    }
 }
-return "OK";
+return "SCREEN_OFF";
 """
     )
 
@@ -1698,8 +2333,8 @@ def build_macro(
     )
     actions.append(make_java_action(sg, build_init_status_script()))
 
-    # 4. Vision state loop (up to 45 iterations; ScreenOn in Stage 3 holds screen awake)
-    actions.append(make_loop(sg, 45))
+    # 4. Vision state loop (up to 95 total steps across preempted/queued requests; per-request cap = 45)
+    actions.append(make_loop(sg, 130))
     actions.append(make_take_screenshot(sg))
     actions.append(make_java_action(sg, build_vision_script(), response_var="step_cmd"))
 
@@ -1708,29 +2343,20 @@ def build_macro(
         actions.extend(branch_actions)
         actions.append(make_end_if(sg))
 
-    # Close QR modal only on DONE to keep Telcell Ticket List foregrounded across runs
+    # Close QR modal only on DONE; DONE_RESET keeps freshly restarted Telcell parked on Ticket List
     add_cmd_branch(
         "DONE",
-        [
-            make_click_xy(sg, 626, 121),
-            make_pause(sg, millis=250),
-            make_break_loop(sg),
-        ],
+        [make_click_xy(sg, 626, 121), make_pause(sg, millis=250), make_break_loop(sg)],
     )
-    add_cmd_branch(
-        "DONE_RESET",
-        [
-            make_click_xy(sg, 626, 121),
-            make_pause(sg, millis=200),
-            make_click_xy(sg, 151, 1553),
-            make_pause(sg, millis=200),
-            make_click_xy(sg, 360, 1553),
-            make_pause(sg, millis=200),
-            make_break_loop(sg),
-        ],
-    )
+    add_cmd_branch("DONE_RESET", [make_break_loop(sg)])
+    add_cmd_branch("ABORT_PREEMPTED", [make_break_loop(sg)])
+    add_cmd_branch("ABORT_TIMEOUT", [make_break_loop(sg)])
     add_cmd_branch("CLICK_ENTER", [make_click_xy(sg, 627, 250)])
     add_cmd_branch("DISMISS_POPUP", [make_click_xy(sg, 100, 200)])
+    add_cmd_branch("OPEN_RECENTS", [make_click_xy(sg, 567, 1553)])
+    add_cmd_branch(
+        "SWIPE_KILL_RECENT", [make_gesture_swipe(sg, 360, 900, 360, 200, 200)]
+    )
     add_cmd_branch("LAUNCH_1", [make_click_xy(sg, 97, 382)])
     add_cmd_branch("LAUNCH_2", [make_click_xy(sg, 97, 142)])
 
@@ -1764,10 +2390,14 @@ def build_macro(
     actions.append(make_end_loop(sg))
 
     # 5. Post-loop timeout & reset completion guard
-    actions.append(make_java_action(sg, build_timeout_script()))
+    actions.append(
+        make_java_action(sg, build_timeout_script(), response_var="screen_action")
+    )
 
-    # 6. Turn screen off without leaving Virtual Master (prevents VM backgrounding)
+    # 6. Turn screen off without leaving Virtual Master (skip if a newer worker/request owns the screen)
+    actions.append(make_if_var_equals(sg, "screen_action", "SCREEN_OFF"))
     actions.append(make_screen_on(sg, screen_off=True))
+    actions.append(make_end_if(sg))
     actions.append(make_end_if(sg))
 
     local_vars = [
@@ -1782,6 +2412,7 @@ def build_macro(
         make_var("pin_d2", supports_input=False),
         make_var("pin_d3", supports_input=False),
         make_var("pin_d4", supports_input=False),
+        make_var("screen_action"),
         make_var("step_cmd"),
         make_var("update_id", supports_input=False),
         make_var("webhook_body", working=True, supports_input=False),

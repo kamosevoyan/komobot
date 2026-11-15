@@ -63,6 +63,17 @@ class ScreenFactory:
         return bmp
 
     @classmethod
+    def vm_recents(
+        cls, *, has_card: bool = True, floating_ball: bool = False
+    ) -> MockBitmap:
+        bmp, rect = cls.scaled(720, 1600, (218, 217, 228))
+        if has_card:
+            rect(124, 220, 592, 1260, 240, 242, 244)
+        if floating_ball:
+            rect(665, 760, 715, 840, 253, 253, 253)
+        return bmp
+
+    @classmethod
     def pin_screen(
         cls, *, spinner: bool = False, w: int = 720, h: int = 1600
     ) -> MockBitmap:
@@ -366,11 +377,87 @@ class TestVisionScenarios(unittest.TestCase):
         )
         self.assertEqual(self.env.read_config()["last_state"], "DASHBOARD_HIGH")
 
-        # Reset mode exits immediately with DONE_RESET regardless of UI state
+        # Full Option A reset flow: open Recents, kill card, relaunch to Ticket List
         self._seed_active_run(mode="reset")
-        self.assertEqual(self._step(ScreenFactory.white_blank()), "DONE_RESET")
-        self.assertEqual(self.env.read_config()["last_state"], "RESET")
-        self.assertEqual(self.env.read_config()["busy_until"], 0)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "OPEN_RECENTS"
+        )
+        self.assertEqual(self.env.read_config()["last_state"], "RESET_OPEN_RECENTS")
+        # Second in-app tick waits rather than double-tapping Recents during animation
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "WAIT"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.vm_recents(has_card=True, floating_ball=True)),
+            "SWIPE_KILL_RECENT",
+        )
+        self.assertEqual(self.env.read_config()["reset_kills"], 1)
+        self.assertEqual(
+            self._step(ScreenFactory.vm_recents(has_card=False, floating_ball=True)),
+            "RESET_TO_HOME",
+        )
+        self.assertEqual(self.env.read_config()["reset_stage"], 1)
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=2)), "LAUNCH_2")
+        self.assertEqual(self.env.read_config()["reset_stage"], 2)
+        self.assertEqual(self._step(ScreenFactory.white_blank()), "WAIT")
+        self.assertEqual(self._step(ScreenFactory.pin_screen()), "ENTER_PIN")
+        self.assertEqual(
+            self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.buy_ticket_tab()), "CLICK_AVAILABLE_TAB"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=False)), "WAIT"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "DONE_RESET"
+        )
+        reset_cfg = self.env.read_config()
+        self.assertEqual(reset_cfg["last_state"], "RESET")
+        self.assertEqual(reset_cfg["busy_until"], 0)
+        self.assertEqual(
+            [c for c in self.env.tg_calls if c["method"] == "sendPhoto"], []
+        )
+
+    def test_reset_from_vm_home_qr_recents_escape_and_preemption(self) -> None:
+        # Starting reset on VM_HOME checks Recents once before launching Telcell
+        self._seed_active_run(mode="reset")
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "OPEN_RECENTS")
+        self.assertEqual(self.env.read_config()["last_state"], "RESET_CHECK_RECENTS")
+        self.assertEqual(
+            self._step(ScreenFactory.vm_recents(has_card=False)), "RESET_TO_HOME"
+        )
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "LAUNCH_1")
+        # Stale QR modal during reset is closed without uploading photo
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
+        self.assertEqual(self.env.read_config()["last_state"], "RESET_CLOSE_QR")
+        self.assertEqual(
+            [c for c in self.env.tg_calls if c["method"] == "sendPhoto"], []
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "DONE_RESET"
+        )
+
+        # Regular QR run recovers cleanly from VM_RECENTS back to home
+        self.setUp()
+        self._seed_active_run(mode="qr")
+        self.assertEqual(
+            self._step(ScreenFactory.vm_recents(has_card=True)), "RESET_TO_HOME"
+        )
+        self.assertEqual(self.env.read_config()["last_state"], "VM_RECENTS")
+
+        # Cooperative preemption on shared single worker switches cleanly to reset
+        self._seed_active_run(mode="reset")
+        qr_vars = {**LOCAL_VARS, "msg_text": "/qr"}
+        self.assertEqual(run_bsh_script(VISION_SCRIPT, self.env, qr_vars), "WAIT")
+        self.assertEqual(
+            run_bsh_script(
+                POST_STEP_SCRIPT, self.env, {**qr_vars, "step_cmd": "ENTER_PIN"}
+            ),
+            "OK",
+        )
+        self.assertEqual(self.env.read_config()["last_state"], "NO_SCREENSHOT")
 
     def test_resolution_scaling_filtering_decode_err_and_http_error(self) -> None:
         # 1080x2400 scaling works for both PIN pad and QR modal crop (690x690)
@@ -609,10 +696,7 @@ class TestVisionScenarios(unittest.TestCase):
             if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_3
         ]
         self.assertEqual(
-            user3_edits,
-            [
-                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 80%",
-            ],
+            user3_edits, ["⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 80%"]
         )
         for text in user2_edits + user2_qr_edits + user3_handoff + user3_edits:
             for leak in ("Virtual Master", "Telcell", "PIN", "Transport", "ticket"):
@@ -649,6 +733,174 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(cmd2, "CLICK_TICKET_ROW")
         self.assertLess(self.env.now_ms - t1, 100)
         self.assertEqual(self.env.read_config()["last_state"], "TICKET_LIST")
+
+    def test_reverse_reset_to_queued_user_qr_upload_failure_and_step_cap(self) -> None:
+        # 1. Reverse overlap: Admin Reset active while USER_2 is queued
+        self._seed_active_run(
+            mode="reset",
+            active_chat_id=ADMIN_ID,
+            queue=[{"chat_id": USER_2, "status_message_id": 7002}],
+        )
+        cfg = self.env.read_config()
+        cfg["status_message_id"] = 7001
+        self.env.write_config(cfg)
+        self.assertEqual(self._step(ScreenFactory.vm_launcher(True)), "CLICK_ENTER")
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "OPEN_RECENTS")
+        self.assertEqual(
+            self._step(ScreenFactory.vm_recents(has_card=True)), "SWIPE_KILL_RECENT"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.vm_recents(has_card=False)), "RESET_TO_HOME"
+        )
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "LAUNCH_1")
+        self.assertEqual(
+            self._step(ScreenFactory.pin_screen(spinner=False)), "ENTER_PIN"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
+        )
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+
+        # Admin reset message completes and popped USER_2 receives 80% progress bar
+        edits = [
+            c["payload"] for c in self.env.tg_calls if c["method"] == "editMessageText"
+        ]
+        self.assertIn(
+            {
+                "chat_id": ADMIN_ID,
+                "message_id": 7001,
+                "text": "✅ VM app reset complete — Telcell restarted & ready.",
+            },
+            edits,
+        )
+        self.assertIn(
+            {
+                "chat_id": USER_2,
+                "message_id": 7002,
+                "text": "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 80%",
+            },
+            edits,
+        )
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["capture_mode"], "qr")
+        self.assertEqual(cfg["active_chat_id"], USER_2)
+        self.assertEqual(cfg["queue"], [])
+        self.assertEqual(cfg["step_count"], 2)
+
+        # 2. Regular user QR upload failure notifies Admin with HTTP status
+        self.env.http_status_overrides["sendPhoto"] = 502
+        self.env.tg_calls.clear()
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        user_edits = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_2
+        ]
+        self.assertEqual(user_edits, ["❌ Failed to upload QR. Please try again."])
+        admin_sends = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "sendMessage" and c["payload"]["chat_id"] == ADMIN_ID
+        ]
+        self.assertEqual(len(admin_sends), 1)
+        self.assertIn(f"chat_id: {USER_2}", admin_sends[0])
+        self.assertIn("HTTP 502", admin_sends[0])
+
+        # 3. Per-request 95-step cap triggers ABORT_TIMEOUT inside 130-step loop
+        self._seed_active_run(step_count=95)
+        cfg_cap = self.env.read_config()
+        cfg_cap["last_state"] = "WHITE_LOADING"
+        self.env.write_config(cfg_cap)
+        self.assertEqual(
+            run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS), "ABORT_TIMEOUT"
+        )
+        self.assertEqual(self.env.read_config()["step_count"], 95)
+        self.assertEqual(self.env.read_config()["last_state"], "WHITE_LOADING")
+
+        # 4. Cold VM boot in reset mode (after VM_LAUNCHER) does NOT fire
+        # RESET_OPEN_RECENTS or early CLICK_BACK on VM splash/white frames
+        self.setUp()
+        self._seed_active_run(mode="qr", active_chat_id=USER_2, step_count=0)
+        self.assertEqual(self._step(ScreenFactory.vm_launcher(True)), "CLICK_ENTER")
+        self.assertTrue(self.env.read_config()["vm_booting"])
+        # Simulate cooperative preemption to reset while VM splash / OTHER shows
+        coop_cfg = self.env.read_config()
+        coop_cfg["capture_mode"] = "reset"
+        coop_cfg["active_chat_id"] = ADMIN_ID
+        coop_cfg["run_start_ms"] = coop_cfg["run_start_ms"] + 500
+        coop_cfg["step_count"] = 0
+        self.env.write_config(coop_cfg)
+        boot_splash = MockBitmap(720, 1600, (120, 130, 140))
+        for _ in range(5):
+            self.assertEqual(self._step(boot_splash), "WAIT")
+            self.assertEqual(self.env.read_config()["last_state"], "OTHER")
+        self.assertEqual(self._step(ScreenFactory.white_blank()), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "WHITE_LOADING")
+        # Once VM_HOME renders, vm_booting clears and Reset checks Recents cleanly
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "OPEN_RECENTS")
+        self.assertFalse(self.env.read_config()["vm_booting"])
+        self.assertEqual(self.env.read_config()["last_state"], "RESET_CHECK_RECENTS")
+
+        # Even if vm_booting was still set, a recognized Telcell screen
+        # (such as TICKET_LIST) still triggers Phase 0 in-app intercept
+        self.setUp()
+        self._seed_active_run(mode="reset", step_count=1)
+        boot_telcell = self.env.read_config()
+        boot_telcell["vm_booting"] = True
+        self.env.write_config(boot_telcell)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "OPEN_RECENTS"
+        )
+        self.assertFalse(self.env.read_config()["vm_booting"])
+        self.assertEqual(self.env.read_config()["last_state"], "RESET_OPEN_RECENTS")
+
+        # 5. Worker supersession (bumped worker_start_ms) returns ABORT_PREEMPTED;
+        # cooperative in-place reset mid-sendPhoto returns CLOSE_MODAL instead.
+        self.setUp()
+        self._seed_active_run(step_count=1)
+        cfg_ws = self.env.read_config()
+        cfg_ws["worker_start_ms"] = 100
+        cfg_ws["run_start_ms"] = 100
+        self.env.write_config(cfg_ws)
+        env_ref = self.env
+
+        class _BumpOnPhoto(list):
+            def __init__(self, initial: list, *, supersede: bool) -> None:
+                super().__init__(initial)
+                self.supersede = supersede
+                self.done = False
+
+            def append(self, item: dict) -> None:
+                super().append(item)
+                if not self.done and item.get("method") == "sendPhoto":
+                    self.done = True
+                    fresh = env_ref.read_config()
+                    fresh["capture_mode"] = "reset"
+                    fresh["run_start_ms"] = 200
+                    if self.supersede:
+                        fresh["worker_start_ms"] = 999
+                    env_ref.write_config(fresh)
+
+        env_ref.tg_calls = _BumpOnPhoto(env_ref.tg_calls, supersede=True)
+        self.assertEqual(
+            self._step(ScreenFactory.qr_modal(loaded=True)), "ABORT_PREEMPTED"
+        )
+
+        self.setUp()
+        self._seed_active_run(step_count=1)
+        cfg_coop = self.env.read_config()
+        cfg_coop["worker_start_ms"] = 100
+        cfg_coop["run_start_ms"] = 100
+        self.env.write_config(cfg_coop)
+        self.env.tg_calls = _BumpOnPhoto(self.env.tg_calls, supersede=False)
+        env_ref = self.env
+        env_ref.tg_calls = _BumpOnPhoto(env_ref.tg_calls, supersede=False)
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
+        self.assertTrue(env_ref.read_config()["qr_was_closed"])
+        self.assertEqual(env_ref.read_config()["capture_mode"], "reset")
 
 
 if __name__ == "__main__":

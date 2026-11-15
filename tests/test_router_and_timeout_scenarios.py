@@ -225,7 +225,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
 
         self.env.tg_calls.clear()
         self.env.http_connections.clear()
-        self.assertEqual(_run_timeout(self.env, "WAIT"), "OK")
+        self.assertEqual(_run_timeout(self.env, "WAIT"), "SCREEN_OFF")
         after_cfg = self.env.read_config()
         self.assertEqual(after_cfg["busy_until"], 0)
         self.assertEqual(after_cfg["queue"], [])
@@ -235,6 +235,13 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(len(edits), 2)
         self.assertIn("last state: WHITE_LOADING", edits[0]["text"])
         self.assertIn("Previous request timed out", edits[1]["text"])
+        admin_sends = [
+            c["payload"] for c in self.env.tg_calls if c["method"] == "sendMessage"
+        ]
+        self.assertEqual(len(admin_sends), 1)
+        self.assertEqual(admin_sends[0]["chat_id"], int(ADMIN_ID))
+        self.assertIn("Queued user request(s) failed", admin_sends[0]["text"])
+        self.assertIn(ALLOWED_USER, admin_sends[0]["text"])
         for conn in self.env.http_connections:
             self.assertTrue(conn["stream_read"])
             self.assertTrue(conn["stream_closed"])
@@ -246,7 +253,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(self.env.read_config()["capture_mode"], "reset")
         self.assertEqual(_run_router(self.env, ALLOWED_USER, "/qr"), "IGNORE")
         self.env.tg_calls.clear()
-        self.assertEqual(_run_timeout(self.env, "DONE_RESET"), "OK")
+        self.assertEqual(_run_timeout(self.env, "DONE_RESET"), "SCREEN_OFF")
         self.assertEqual(self.env.read_config()["busy_until"], 0)
         self.assertEqual(self.env.read_config()["queue"], [])
         edits = [
@@ -260,8 +267,23 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         cfg["busy_until"] = 0
         self.env.write_config(cfg)
         self.env.tg_calls.clear()
-        self.assertEqual(_run_timeout(self.env, "DONE"), "OK")
+        self.assertEqual(_run_timeout(self.env, "DONE"), "SCREEN_OFF")
         self.assertEqual(self.env.tg_calls, [])
+
+        # Scenario 4: DONE exit after new run started skips cleanup & keeps screen on
+        self.assertEqual(_dispatch_qr(self.env, ALLOWED_USER, "/qr"), "RUN")
+        busy_snapshot = self.env.read_config()["busy_until"]
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_timeout(self.env, "DONE"), "KEEP_ON")
+        self.assertEqual(self.env.read_config()["busy_until"], busy_snapshot)
+        self.assertEqual(self.env.tg_calls, [])
+
+        # Scenario 5: DONE_RESET after reset_notified + new run also returns KEEP_ON
+        new_cfg = self.env.read_config()
+        new_cfg["reset_notified"] = True
+        self.env.write_config(new_cfg)
+        self.assertEqual(_run_timeout(self.env, "DONE_RESET"), "KEEP_ON")
+        self.assertEqual(self.env.read_config()["busy_until"], busy_snapshot)
 
     def test_long_inactivity_expired_lease_recovery(self) -> None:
         # Simulate hours of inactivity after an interrupted prior run that left
@@ -325,12 +347,13 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             "⏳ Queued (#2) — waiting for current request to finish...",
         )
 
-        # Regular user timeout hides internal last_state detail
+        # Regular user timeout hides internal last_state detail, but alerts admin
         cfg = self.env.read_config()
         cfg["last_state"] = "WHITE_LOADING"
+        cfg["step_count"] = 17
         self.env.write_config(cfg)
         self.env.tg_calls.clear()
-        self.assertEqual(_run_timeout(self.env, "WAIT"), "OK")
+        self.assertEqual(_run_timeout(self.env, "ABORT_TIMEOUT"), "SCREEN_OFF")
         edits = [
             c["payload"] for c in self.env.tg_calls if c["method"] == "editMessageText"
         ]
@@ -339,6 +362,14 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             edits[0]["text"], "❌ Timed out generating QR code. Please try again."
         )
         self.assertNotIn("last state", edits[0]["text"])
+        sends = [
+            c["payload"] for c in self.env.tg_calls if c["method"] == "sendMessage"
+        ]
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0]["chat_id"], int(ADMIN_ID))
+        self.assertIn(f"chat_id: {ALLOWED_USER}", sends[0]["text"])
+        self.assertIn("WHITE_LOADING (step 17)", sends[0]["text"])
+        self.assertIn(f"Affected queued users: {THIRD_USER}", sends[0]["text"])
 
         # Admin RUN preserves exact original diagnostic text
         self.env.tg_calls.clear()
@@ -348,6 +379,115 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             "🔍 Waking phone & checking Virtual Master...",
         )
         self.assertEqual(self.env.read_config()["progress_pct"], 0)
+
+    def test_admin_reset_preempts_active_and_queued_requests(self) -> None:
+        # Active user + queued user running QR pipeline
+        self.assertEqual(_dispatch_qr(self.env, ALLOWED_USER, "/qr"), "RUN")
+        self.assertEqual(_run_router(self.env, THIRD_USER, "/qr"), "IGNORE")
+        active_cfg = self.env.read_config()
+        old_run_start = active_cfg["run_start_ms"]
+        old_user_mid = active_cfg["status_message_id"]
+        queued_mid = active_cfg["queue"][0]["status_message_id"]
+
+        # Admin Reset VM App cooperates in-place when live worker is active (IGNORE)
+        self.env.tg_calls.clear()
+        self.env.advance_time(500)
+        self.assertEqual(_run_router(self.env, ADMIN_ID, "🧹 Reset VM App"), "IGNORE")
+        pre_init_cfg = self.env.read_config()
+        self.assertEqual(pre_init_cfg["capture_mode"], "reset")
+        self.assertEqual(pre_init_cfg["active_chat_id"], int(ADMIN_ID))
+        self.assertGreater(pre_init_cfg["busy_until"], self.env.now_ms + 50000)
+        self.assertGreater(pre_init_cfg["run_start_ms"], old_run_start)
+        self.assertEqual(pre_init_cfg["reset_stage"], 0)
+        self.assertEqual(pre_init_cfg["reset_kills"], 0)
+        self.assertTrue(pre_init_cfg["worker_active"])
+        self.assertGreater(pre_init_cfg["status_message_id"], 0)
+        sends = [
+            c["payload"] for c in self.env.tg_calls if c["method"] == "sendMessage"
+        ]
+        edits = [
+            c["payload"] for c in self.env.tg_calls if c["method"] == "editMessageText"
+        ]
+        self.assertEqual(
+            sends,
+            [
+                {
+                    "chat_id": int(ADMIN_ID),
+                    "text": "🔄 Force-restarting Telcell Wallet...",
+                }
+            ],
+        )
+        self.assertEqual(
+            sorted((e["chat_id"], e["message_id"], e["text"]) for e in edits),
+            sorted(
+                [
+                    (
+                        int(ALLOWED_USER),
+                        old_user_mid,
+                        "❌ Request cancelled by VM reset. Please try again.",
+                    ),
+                    (
+                        int(THIRD_USER),
+                        queued_mid,
+                        "❌ Request cancelled by VM reset. Please try again.",
+                    ),
+                ]
+            ),
+        )
+
+        # Sending another Reset while reset is already running does NOT self-preempt
+        self.env.advance_time(3500)
+        self.assertEqual(_run_router(self.env, ADMIN_ID, "🧹 Reset VM App"), "IGNORE")
+        self.assertIn("already in progress", self.env.tg_calls[-1]["payload"]["text"])
+
+        # Dead/stalled worker fallback (>= 20s heartbeat stale) spawns fresh RUN worker
+        self.env.advance_time(65000)
+        self.assertEqual(_dispatch_qr(self.env, ALLOWED_USER, "/qr"), "RUN")
+        stale_cfg = self.env.read_config()
+        stale_cfg["worker_heartbeat_ms"] = self.env.now_ms - 25000
+        self.env.write_config(stale_cfg)
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_router(self.env, ADMIN_ID, "🧹 Reset VM App"), "RUN")
+        fallback_cfg = self.env.read_config()
+        self.assertEqual(len(fallback_cfg["preempted_notices"]), 1)
+        self.assertEqual(_run_init_status(self.env), "SENT")
+        self.assertEqual(self.env.read_config()["preempted_notices"], [])
+
+        # Superseded stalled worker ABORT_PREEMPTED keeps screen on cleanly
+        self.env.tg_calls.clear()
+        before_busy = self.env.read_config()["busy_until"]
+        self.assertEqual(_run_timeout(self.env, "ABORT_PREEMPTED"), "KEEP_ON")
+        self.assertEqual(self.env.read_config()["busy_until"], before_busy)
+        self.assertEqual(self.env.tg_calls, [])
+
+    def test_startup_barrier_and_orphaned_init_status_cleanup(self) -> None:
+        # Router RUN sets worker_pending_start_ms > 0; if init_status is in-flight
+        # during sendMessage when Reset preempts, init_status deletes its orphaned bar.
+        self.assertEqual(_run_router(self.env, ALLOWED_USER, "/qr"), "RUN")
+        initial_cfg = self.env.read_config()
+        self.assertGreater(initial_cfg["worker_pending_start_ms"], 0)
+
+        preempted = {"done": False}
+        env_ref = self.env
+
+        class _PreemptOnSend(list):
+            def append(self, item: dict) -> None:
+                super().append(item)
+                if not preempted["done"] and item.get("method") == "sendMessage":
+                    preempted["done"] = True
+                    # Simulate Reset preempting while init_status waits on sendMsg
+                    _run_router(env_ref, ADMIN_ID, "🧹 Reset VM App")
+
+        self.env.tg_calls = _PreemptOnSend()
+        # Init_status clears pending flag before sendMsg, gets preempted mid-sendMsg,
+        # detects lost ownership afterward, and deletes orphaned "10%" bar.
+        self.assertEqual(_run_init_status(self.env), "SENT")
+        methods = [c["method"] for c in self.env.tg_calls]
+        self.assertIn("deleteMessage", methods)
+        final_cfg = self.env.read_config()
+        self.assertEqual(final_cfg["active_chat_id"], int(ADMIN_ID))
+        self.assertEqual(final_cfg["capture_mode"], "reset")
+        self.assertEqual(final_cfg["worker_pending_start_ms"], 0)
 
 
 if __name__ == "__main__":

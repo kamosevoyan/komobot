@@ -8,18 +8,18 @@ Once deployed via ADB, there is **no PC, Docker container, or external backend s
 
 ## Key Capabilities & Architectural Design
 
-* **Standalone On-Device Execution:** Generated via [`generate_macro.py`](generate_macro.py) (`195` MacroDroid actions, `5` BeanShell `JavaAction` scripts) and deployed over ADB with [`deploy_macro.sh`](deploy_macro.sh). All runtime state lives in `/storage/emulated/0/Download/komobot_config.json`.
+* **Standalone On-Device Execution:** Generated via [`generate_macro.py`](generate_macro.py) (`203` MacroDroid actions, `5` BeanShell `JavaAction` scripts) and deployed over ADB with [`deploy_macro.sh`](deploy_macro.sh). All runtime state lives in `/storage/emulated/0/Download/komobot_config.json`.
 * **`FLAG_SECURE` Bypass & Zero-Flash Direct PNG Capture:** Financial apps block `adb screencap` and native screenshots when run directly on the host OS. Running the target app inside **Virtual Master** renders the guest OS inside a Virtual Master host surface, letting MacroDroid's host-level `TakeScreenshotAction` (`uiOption: 1`, `screenshotFormat: 1`) capture every screen directly to `/storage/emulated/0/komobot_ss/frame.png` without SystemUI screenshot animations/flashes or MediaStore thumbnail delays.
 * **Serverless Telegram Webhook Trigger:** Telegram Bot API updates arrive via a MacroDroid `WebHookTrigger` (`identifier: "komobotv2"`, body stored in `{lv=webhook_body}`).
-* **Multi-User Access Control & In-Loop FIFO Queueing:** Authorized users share access through `/storage/emulated/0/Download/komobot_config.json`. Concurrent requests are serialized by a time-bounded `busy_until` lease and an in-memory/disk FIFO `queue` so burst requests from multiple users execute back-to-back in a single phone wake cycle.
-* **Stale Ticket, Stale QR & Warm Foreground Retention:** Navigates through the dashboard **`Услуги` → `Транспорт` → `Доступно`** ticket list rather than quick shortcuts (which can open an expired/stale ticket). Automatically switches tabs if `Купить билет` opens instead of `Доступно`, and rejects/refreshes a QR modal if one was already open on `step_count == 1`. On `DONE`, closes the QR modal cleanly (`(626, 121)`) and keeps Telcell Wallet foregrounded on `TICKET_LIST` inside Virtual Master so repeat requests skip cold launch/PIN entry.
-* **Deep Doze & Extended Inactivity Resilience:** [`deploy_macro.sh`](deploy_macro.sh) disables Android Doze (`dumpsys deviceidle disable`), app standby, Android Phantom Process Killer monitoring (`settings_enable_monitor_phantom_procs false` and `max_phantom_processes 2147483647` for Virtual Master's guest processes), Wi-Fi power saving/sleep, host lockscreen, system window/transition/animator animations (`0`), Virtual Master toast windows, and Samsung Smart Capture toolbars, plus creates `/storage/emulated/0/komobot_ss/.nomedia`. Extended cold-boot tolerances (`45×` loop, `WHITE_LOADING <= 7`, `DASH_LOADING < 5`, `QR_LOADING`/`PIN_SPINNER`/`TICKET_LOADING <= 9`) let Virtual Master and Telcell Wallet recover even after LMKD evictions, while keeping Virtual Master in the host foreground on sleep (`ScreenOnAction(screen_off=True)`). *(Re-run `./deploy_macro.sh` after a full phone reboot, as `dumpsys deviceidle disable` is non-persistent.)*
+* **Multi-User Access Control, Cooperative Preemption & In-Loop Queueing:** Authorized users share access through `/storage/emulated/0/Download/komobot_config.json`. Concurrent requests are serialized by a time-bounded `busy_until` lease, a single-worker heartbeat (`worker_active` / `worker_heartbeat_ms`), and an in-memory/disk FIFO `queue` so burst requests execute back-to-back in a single phone wake cycle. When a live worker is already in flight, Admin `🧹 Reset VM App` preempts it cooperatively in-place (avoiding colliding Stage 4 loops); queued requests received during a reset pop straight into `CLICK_TICKET_ROW` once Telcell lands on `TICKET_LIST`. Any regular-user timeout or QR upload HTTP failure keeps user replies generic while alerting `admin_id` with diagnostics.
+* **Stale Ticket, Stale QR & Warm Foreground Retention:** Navigates through the dashboard **`Услуги` → `Транспорт` → `Доступно`** ticket list rather than quick shortcuts (which can open an expired/stale ticket). Automatically switches tabs if `Купить билет` opens instead of `Доступно`, and rejects/refreshes a QR modal if one was already open on `step_count == 1`. Both `DONE` (after QR modal close at `(626, 121)`) and Option A `DONE_RESET` (after force-closing via VM Recents and cold-relaunching) keep Telcell Wallet foregrounded on `TICKET_LIST` inside Virtual Master so repeat requests skip cold launch/PIN entry.
+* **Deep Doze & Extended Inactivity Resilience:** [`deploy_macro.sh`](deploy_macro.sh) disables Android Doze (`dumpsys deviceidle disable`), app standby, Android Phantom Process Killer monitoring (`settings_enable_monitor_phantom_procs false` and `max_phantom_processes 2147483647` for Virtual Master's guest processes), Wi-Fi power saving/sleep, host lockscreen, system window/transition/animator animations (`0`), Virtual Master toast windows, and Samsung Smart Capture toolbars, plus creates `/storage/emulated/0/komobot_ss/.nomedia`. Extended cold-boot tolerances (`130×` macro loop with a `95`-step per-request cap, `vm_booting` tracking across `VM_LAUNCHER`/`VM_LOADING`, `OTHER <= 30` during cold VM boot, `WHITE_LOADING <= 7` in `qr` / `<= 18` during `vm_booting` or `reset`, `DASH_LOADING < 5`, `QR_LOADING`/`PIN_SPINNER`/`TICKET_LOADING <= 9`) let Virtual Master and Telcell Wallet recover even after full app kills or LMKD evictions, while keeping Virtual Master in the host foreground on sleep (`ScreenOnAction(screen_off=True)`). *(Re-run `./deploy_macro.sh` after a full phone reboot, as `dumpsys deviceidle disable` is non-persistent.)*
 
 ---
 
 ## Full Pipeline Architecture
 
-The generated macro (**Komobot Controller**, `195` actions) processes every incoming Telegram update through five stages (reusing HTTP/1.1 Keep-Alive TLS connections across Telegram API calls):
+The generated macro (**Komobot Controller**, `203` actions) processes every incoming Telegram update through five stages (reusing HTTP/1.1 Keep-Alive TLS connections across Telegram API calls):
 
 ```mermaid
 flowchart TD
@@ -27,42 +27,48 @@ flowchart TD
     S1["Stage 1: Extract update_id, chat_id, msg_text"] --> S2
     S2["Stage 2: JavaAction #1 Router, Auth & Queue Manager"]
 
-    S2 -->|"IGNORE (duplicate uid / unauthorized / admin cmd)"| END1["Stop (reply already sent if applicable)"]
+    S2 -->|"IGNORE (dup uid / unauth / admin cmd / live coop reset)"| END1["Stop (coop reset updates config in-place; replies sent)"]
     S2 -->|"QUEUE (busy_until > now, other user)"| END2["Append to cfg.queue + Extend busy_until (+30s) + Notify"]
-    S2 -->|"RUN (lease claimed, busy_until = now + 45s)"| S3
+    S2 -->|"RUN (lease claimed, or Reset over dead/idle worker)"| S3
 
-    S3["Stage 3: Screen On + Launch Virtual Master + JavaAction #2 Initial Status (400ms settle floor)"] --> S4
-    S4["Stage 4: Vision State Loop (Repeat up to 45x)"]
+    S3["Stage 3: Screen On + Launch Virtual Master + JavaAction #2 Initial Status (startup barrier + 400ms settle)"] --> S4
+    S4["Stage 4: Vision State Loop (Repeat up to 130x; 95-step cap/request)"]
 
     S4 --> CAP["Direct TakeScreenshotAction (PNG to komobot_ss/frame.png)"]
     CAP --> VA["JavaAction #3 Vision Pixel Classifier (step_cmd) + Immediate Frame Delete"]
 
+    VA -->|"Worker superseded / step_count >= 95"| ABORT["ABORT_PREEMPTED / ABORT_TIMEOUT -> BreakLoop"]
     VA -->|"VM_LAUNCHER / VM_POPUP / VM_HOME"| ACT1["Click Enter (627, 250) / Dismiss Menu / Tap Telcell Icon"]
+    VA -->|"Reset Stage 0 (Recents Kill, skipped during vm_booting)"| RST0["OPEN_RECENTS (567, 1553) -> SWIPE_KILL_RECENT (360,900->360,200) -> Home"]
     VA -->|"PIN_PAD"| PIN["Extract pin_d1..d4 & Tap Calibrated PIN_COORDS (3x400ms)"]
     VA -->|"DASHBOARD_LOW / DASHBOARD_HIGH"| TR["Tap Услуги -> Транспорт"]
     VA -->|"BUY_TICKET_TAB"| TAB["Tap Доступно Tab (277, 200)"]
-    VA -->|"TICKET_LIST"| ROW["Tap Ticket Row (360, 400)"]
-    VA -->|"STALE_QR (step 1)"| CLOSE["Close Modal (626, 121) to Force Refresh"]
-    VA -->|"Loading / OTHER"| REC["Tuned Wait 350ms / Back (151, 1553) / VM Home (360, 1553)"]
+    VA -->|"TICKET_LIST (mode == qr)"| ROW["Tap Ticket Row (360, 400)"]
+    VA -->|"TICKET_LIST (mode == reset & queue empty)"| RST["Set RESET, busy_until=0 -> BreakLoop (parked on Ticket List)"]
+    VA -->|"TICKET_LIST (mode == reset & queue non-empty)"| RSTQ["Notify Admin Reset Complete + Pop User -> CLICK_TICKET_ROW"]
+    VA -->|"STALE_QR (step 1) / Reset QR Modal"| CLOSE["Close Modal (626, 121)"]
+    VA -->|"Loading / OTHER / QR on VM_RECENTS"| REC["Tuned Wait / Back (151, 1553) / VM Home (360, 1553)"]
 
     ACT1 --> POST["JavaAction #4 Overlapped Status Edit + Post-Tap Settle Delay"]
+    RST0 --> POST
     PIN --> POST
     TR --> POST
     TAB --> POST
     ROW --> POST
+    RSTQ --> POST
     CLOSE --> POST
     REC --> POST
     POST --> S4
 
-    VA -->|"QR Valid"| CROP["Crop [130,445]..[590,905] & sendPhoto (PNG) + Delete Status"]
-    CROP -->|"Queue non-empty"| POP["Pop Next User (NEXT_IN_QUEUE) & Close Modal"]
+    VA -->|"QR Valid (mode == qr)"| CROP["Crop [130,445]..[590,905] & sendPhoto (PNG) + Delete Status (or Alert Admin on HTTP != 200)"]
+    CROP -->|"Queue non-empty or coop reset pending"| POP["Pop Next User (NEXT_IN_QUEUE) or Enter Reset + Close Modal"]
     POP --> POST
     CROP -->|"Queue empty"| DONE["Set QR_SENT, busy_until=0 -> Close (626, 121) + 250ms + BreakLoop"]
-    VA -->|"mode == reset"| RST["Close + Back + VM Home + BreakLoop"]
 
-    DONE --> S5["Stage 5: JavaAction #5 Timeout/Reset Guard + Screen Off"]
+    DONE --> S5["Stage 5: JavaAction #5 Timeout/Reset Guard -> screen_action (SCREEN_OFF / KEEP_ON)"]
     RST --> S5
-    S4 -->|"45 iterations exhausted"| S5
+    ABORT --> S5
+    S4 -->|"130 iterations exhausted"| S5
 ```
 
 ### Stage 1: Webhook Ingestion & Field Extraction
@@ -82,21 +88,23 @@ Triggered by MacroDroid's `WebHookTrigger` (`identifier: "komobotv2"`), three `T
 1. **Deduplication & Diagnostics:** Drops any non-zero `uid <= last_update_id` (`return "IGNORE"`). Updates with `update_id: 0` bypass deduplication and never advance `last_update_id`, making synthetic diagnostics safe. Every non-duplicate update records `last_chat_id` and `last_msg_text` in `komobot_config.json`.
 2. **Authorization:** Compares `chat_id` against `admin_id` (seeded from `{lv=admin_id}`) and `allowed_users`. Unauthorized users receive `⛔ Unauthorized. Your ID: <cid>`.
 3. **Access & Admin Commands:** Handles `/start` (role-specific Reply Keyboard), `/adduser <id>`, `/removeuser <id>`, `/listusers` / `👥 List Users`, and `/toggle` / `🛑 Toggle Public Access`. When `public_access` is `false`, non-admin allowed users receive `⚠️ The bot is currently locked by the admin.`.
-4. **Concurrency Lock & Queue Insertion:**
-   * If `now < busy_until`:
+4. **Concurrency Lock, Queue Insertion & Admin Reset Preemption:**
+   * If `now < busy_until` and the request is not an admin `🧹 Reset VM App` preempting a non-reset run:
      * Same `active_chat_id` (after `>= 3s`): replies `⏳ Your request is already in progress.` without enqueueing a duplicate.
      * Another allowed user not yet in `queue`: appends `{"chat_id": cid, "status_message_id": 0}`, extends `busy_until` by `+30000ms`, sends a queued status message (detailed waiting notice for Admin; `0%` progress bar for regular users), and patches the saved `status_message_id` into the matching queue entry.
      * Another user already in `queue`: replies `⏳ You are already in the queue (#N).`.
-   * If idle (`now >= busy_until`): initializes a new run (`busy_until = now + 45000`, `active_chat_id = cid`, `status_message_id = 0`, `capture_mode = "qr"` or `"reset"`, `queue = []`, `qr_was_closed = false`, `step_count = 0`, `other_count = 0`, `white_count = 0`, `loading_count = 0`, `progress_pct = 0` or `10`, `pending_status_text = ""`, `last_ss_deleted = true`, `last_state = "INIT"`, `run_start_ms = now`), deletes any stale `/storage/emulated/0/komobot_ss/frame.{png,jpg}`, and returns `bot_action = "RUN"` immediately without blocking on a Telegram HTTP round-trip.
+   * If idle (`now >= busy_until`) or admin sends `🧹 Reset VM App` while a non-reset run is active: collects any displaced active/queued chats (`displaced`), initializes a new run (`busy_until = now + 45000` for `"qr"` or `now + 60000` for `"reset"`, `active_chat_id = cid`, `status_message_id = 0`, `capture_mode = "qr"` or `"reset"`, `queue = []`, `qr_was_closed = false`, `reset_stage = 0`, `reset_kills = 0`, `reset_recents_checked = false`, `reset_open_tries = 0`, `reset_notified = false`, `step_count = 0`, `other_count = 0`, `white_count = 0`, `loading_count = 0`, `progress_pct = 0` or `10`, `pending_status_text = ""`, `last_ss_deleted = true`, `last_state = "INIT"`, monotonic `run_start_ms`, worker coordination fields).
+     * When preempting a **live worker** (`worker_active == true` with `worker_heartbeat_ms` `< 20s` old): updates `komobot_config.json` in-place, sends displaced notices and `"🔄 Force-restarting Telcell Wallet..."` directly (`status_message_id`), and returns `bot_action = "IGNORE"` so the active Stage 4 loop picks up the reset cooperatively (`syncActiveConfig`) without spawning a colliding worker.
+     * When starting fresh (or over an expired/dead worker): sets `vm_booting = false`, bumps `worker_pending_start_ms` / `worker_start_ms`, deletes any stale `/storage/emulated/0/komobot_ss/frame.{png,jpg}`, and returns `bot_action = "RUN"` immediately without blocking on a Telegram HTTP round-trip.
 
 ### Stage 3: Screen Wake, Virtual Master Launch & Overlapped Status Init (`JavaAction #2`)
 
 When `{lv=bot_action}` equals `"RUN"`:
 1. `ScreenOnAction(screen_off=False)` wakes the display (lockscreen is disabled at provisioning time by `deploy_macro.sh`).
 2. `LaunchActivityAction` brings **Virtual Master** (`com.clone.android.dual.space`) to the foreground immediately.
-3. `build_init_status_script()` (`JavaAction #2`) runs while Virtual Master initializes its surface: sends `🔍 Waking phone & checking Virtual Master...` for Admin or `10%` progress (`🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%`) for regular users via HTTP/1.1 Keep-Alive, saves `status_message_id` into `komobot_config.json`, and enforces a `400ms` settle floor from Virtual Master launch.
+3. `build_init_status_script()` (`JavaAction #2`) waits past any `worker_pending_start_ms` supersession check, sends `🔄 Force-restarting Telcell Wallet...` (`"reset"` mode), `🔍 Waking phone & checking Virtual Master...` (Admin `"qr"`), or `10%` progress (`🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%`, regular user) via HTTP/1.1 Keep-Alive, atomically saves `status_message_id` and clears `preempted_notices` (deleting orphaned status messages if superseded mid-flight), notifies any displaced active/queued chats with `❌ Request cancelled by VM reset. Please try again.`, and enforces a `400ms` settle floor from Virtual Master launch.
 
-### Stage 4: Vision-Guided State Machine Loop (`Repeat 45×`, `JavaAction #3` + `JavaAction #4`)
+### Stage 4: Vision-Guided State Machine Loop (`Repeat 130×`, `JavaAction #3` + `JavaAction #4`)
 
 Each iteration captures a host screenshot (`TakeScreenshotAction` with `uiOption=1`, `screenshotFormat=1`, `customAllFilesPath="/storage/emulated/0/komobot_ss"`, `customFilename="frame"`) and runs `build_vision_script()` (`response_var="step_cmd"`), followed by UI dispatch and `build_post_step_script()`:
 
@@ -110,37 +118,44 @@ Each iteration captures a host screenshot (`TakeScreenshotAction` with `uiOption
 
 | Detected Screen (`last_state`) | Visual Heuristic (`720x1600`) | Dispatched `step_cmd` & MacroDroid Actions / Settle Window |
 | :--- | :--- | :--- |
+| Superseded / Timed Out (`worker_start_ms` or `step_count >= 95`) | Newer worker started (`worker_start_ms` bumped) or single-request step cap (`95`) reached | `ABORT_PREEMPTED` or `ABORT_TIMEOUT` -> `BreakFromLoopAction` immediately |
+| Cooperative Preemption (`run_start_ms` bumped) | Active loop's `syncActiveConfig` detects newer `run_start_ms` from Admin Reset | Switches active config in-place (`vm_booting` preserved) and continues as `"reset"` cleanly |
 | `NO_SCREENSHOT` / `TRUNCATED_SS` / `DECODE_ERR` | No complete screenshot within `3.8s` or unreadable file | `WAIT` -> Pause `50ms` + PostStep (`300ms`, `350ms` total) |
-| `VM_LAUNCHER` | Dark VM card with bright `Enter` button `(595..670, 235..265)` | `CLICK_ENTER` -> Click `(627, 250)` + PostStep (`900ms` total) |
-| `VM_LOADING` | Dark VM boot background without `Enter` button | `WAIT` -> Pause `350ms` total |
+| `VM_LAUNCHER` | Dark VM card with bright `Enter` button `(595..670, 235..265)`; sets `vm_booting=true` | `CLICK_ENTER` -> Click `(627, 250)` + PostStep (`900ms` total) |
+| `VM_LOADING` | Dark VM boot background without `Enter` button; keeps `vm_booting=true` | `WAIT` -> Pause `350ms` total |
 | `VM_POPUP` | Dark 3×3 Virtual Master quick-menu corners `(130/590, 590/1050)` | `DISMISS_POPUP` -> Click `(100, 200)` + PostStep (`350ms` total) |
-| `RESET` (`capture_mode == "reset"`) | Any screen while running admin Reset command | `DONE_RESET` -> Close `(626, 121)` + `200ms` + VM Back `(151, 1553)` + `200ms` + VM Home `(360, 1553)` + `200ms` + `BreakFromLoopAction` |
+| `VM_RECENTS` / `VM_RECENTS_EMPTY` | `#dad9e4` VM Recents backdrop `(40/620, 800)` & `(360, 200/1360)`; clears `vm_booting` | In `"reset"` Stage `0` with card (`reset_kills < 3`): `SWIPE_KILL_RECENT` (`(360, 900) -> (360, 200)` in `200ms`, PostStep `550ms`). Empty/cap or `"qr"` mode: `RESET_TO_HOME` (`(360, 1553)`). |
+| `RESET_CHECK_RECENTS` / `RESET_OPEN_RECENTS` | `"reset"` Stage `0` on `VM_HOME` (un-checked), recognized Telcell UI, or non-booting in-app fallback (`!vm_booting`) | `OPEN_RECENTS` -> Click `(567, 1553)` + PostStep (`550ms`), with `WAIT` on retries `2`/`4` and `CLOSE_MODAL`/`CLICK_BACK`/`RESET_TO_HOME` fallbacks |
+| `RESET_CLOSE_QR` | QR modal encountered while `capture_mode == "reset"` | `CLOSE_MODAL` -> Click `(626, 121)` + PostStep (`450ms`), never uploads QR |
 | `STALE_QR` | QR modal present on `step_count == 1` with `qr_was_closed == false` | `CLOSE_MODAL` -> Click `(626, 121)` + PostStep (`450ms` total) |
-| QR Valid -> `NEXT_IN_QUEUE` / `QR_SENT` | Darkened backdrop, white modal card, `>= 100` dark & `>= 100` light QR modules in `(200..520, 510..830)` | Crops `[130, 445]..[590, 905]` (`460x460`), encodes lossless PNG, uploads directly via `multipart/form-data` `sendPhoto` (`🎫 QR Code`), deletes progress message on HTTP `200`. Queues `NEXT_IN_QUEUE` edit (`CLOSE_MODAL`) if `queue` non-empty, else `DONE`. |
+| QR Valid -> `NEXT_IN_QUEUE` / `QR_SENT` | Darkened backdrop, white modal card, `>= 100` dark & `>= 100` light QR modules in `(200..520, 510..830)` | Crops `[130, 445]..[590, 905]` (`460x460`), encodes lossless PNG, uploads directly via `multipart/form-data` `sendPhoto` (`🎫 QR Code`), deletes status on `200` (alerts `admin_id` if regular user & HTTP `!= 200`). Queues `NEXT_IN_QUEUE` (`CLOSE_MODAL`) or yields to preempting Reset if pending, else `DONE`. |
 | `QR_LOADING` | White modal card without QR modules yet | Bounded `WAIT` via `loading_count` (`<= 9` -> `WAIT`; `10` -> `CLICK_BACK`; `11` -> `WAIT`; `>= 12` -> `RESET_TO_HOME`) |
-| `VM_HOME_1` / `VM_HOME_2` | Dark VM wallpaper with orange Telcell icon at row `(80..120, 360..400)` or `(80..120, 120..165)` | `LAUNCH_1` `(97, 382)` or `LAUNCH_2` `(97, 142)` + PostStep (`1100ms` total) |
+| `VM_HOME_1` / `VM_HOME_2` | Dark VM wallpaper with orange Telcell icon at `(80..120, 360..400)` or `(80..120, 120..165)`; clears `vm_booting` | `LAUNCH_1` `(97, 382)` or `LAUNCH_2` `(97, 142)` + PostStep (`1100ms` total); advances `reset_stage = 2` in `"reset"` mode |
 | `PIN_SPINNER` | Gray PIN background with orange Telcell logo and spinner at `(330..390, 680..715)` | Bounded `WAIT` via `loading_count` (`<= 9` -> `WAIT`; `10` -> `CLICK_BACK`; `11` -> `WAIT`; `>= 12` -> `RESET_TO_HOME`) |
 | `PIN_PAD` | Gray PIN screen `(100, 500)` & `(360, 1372)` + `>= 10` Telcell orange logo pixels `(280..440, 120..220)` | `ENTER_PIN` -> 4× `ExtractTextManipulation` split `app_pin` into `pin_d1..pin_d4`; `IfConditionAction` branches tap calibrated `PIN_COORDS` (`3×400ms` inter-digit pause, PostStep `1000ms` post-PIN settle) |
 | `DASH_LOADING` | Dashboard nav visible while white skeleton covers content or `svcLow < 3 && svcHigh < 3` (`loading_count < 5`) | Bounded `WAIT` via `loading_count` (`<= 9` -> `WAIT`; `10` -> `CLICK_BACK`; `11` -> `WAIT`; `>= 12` -> `RESET_TO_HOME`) |
 | `DASHBOARD_LOW` / `DASHBOARD_HIGH` | Dashboard bottom nav bar orange/white; scans `Услуги` orange icon offsets (`1045..1105` vs `785..845`) | `CLICK_TRANSPORT_LOW` `(360, 1100)` or `CLICK_TRANSPORT_HIGH` `(360, 840)` + PostStep (`750ms` total) |
 | `BUY_TICKET_TAB` | `Проездной билет` opened on `Купить билет` tab (orange underline at `x=100, y=235` or buy card button `(550, 485)`) | `CLICK_AVAILABLE_TAB` -> Click `Доступно` `(277, 200)` + PostStep (`700ms` total) |
 | `TICKET_LOADING` | `Доступно` tab active on gray list background, ticket card still loading | Bounded `WAIT` via `loading_count` (`<= 9` -> `WAIT`; `10` -> `CLICK_BACK`; `11` -> `WAIT`; `>= 12` -> `RESET_TO_HOME`) |
-| `TICKET_LIST` | `Проездной билет -> Доступно` (`buyBtnOrange` or `availTabOrange`) with bright white ticket card at `(360, 400)` | `CLICK_TICKET_ROW` -> Click `(360, 400)` + PostStep (`600ms` total) |
-| `WHITE_LOADING` | White/blank transition screen (`>= 34/40` white grid samples in `x=120..600, y=240..1290`, avoiding dense multi-column UI) | Bounded `WAIT` via `white_count` (`<= 7` -> `WAIT`; `8` -> `CLICK_BACK` `(151, 1553)`; `9` -> `WAIT`; `>= 10` -> `RESET_TO_HOME` `(360, 1553)`) |
-| `OTHER` | Unrecognized transition/overlay screen (`other_count`) | `<= 2` or `4` -> `WAIT` (`350ms`); `3` -> `CLICK_BACK` `(151, 1553)` (`450ms`); `>= 5` -> `RESET_TO_HOME` `(360, 1553)` (`450ms`, resets `other_count = 0`) |
+| `TICKET_LIST` (`mode == "qr"`) / `RESET` (`mode == "reset"`) | `Проездной билет -> Доступно` (`buyBtnOrange` or `availTabOrange`) with bright white ticket card at `(360, 400)` | `qr`: `CLICK_TICKET_ROW` `(360, 400)`. `reset` (empty queue): `DONE_RESET` -> `BreakFromLoopAction`. `reset` (queue non-empty): notifies Admin reset complete, pops `queue[0]` directly into `"qr"` (`CLICK_TICKET_ROW` + `80%` progress). |
+| `WHITE_LOADING` | White/blank transition screen (`>= 34/40` white grid samples in `x=120..600, y=240..1290`, avoiding dense multi-column UI) | Bounded `WAIT` via `white_count` (`<= 7` in `qr`, `<= 18` when `vm_booting` or `"reset"` -> `WAIT`; next -> `CLICK_BACK` `(151, 1553)`; +1 -> `WAIT`; +2 -> `RESET_TO_HOME` `(360, 1553)`) |
+| `OTHER` | Unrecognized transition/overlay screen (`other_count`) | Warm/in-app: `<= 2` or `4` -> `WAIT`, `3` -> `CLICK_BACK`, `>= 5` -> `RESET_TO_HOME`. Cold VM boot (`vm_booting`): `<= 30` -> `WAIT`, `31` -> `CLICK_BACK`, `>= 32` -> `RESET_TO_HOME`. |
 
 3. **Clean Exit vs. Queue Handoff & Role-Specific Status UI:**
-   * **Admin (`cid == admin_id`):** Receives full internal step-by-step status logs (`🖥️ Entering Virtual Master...`, `🚀 Launching Telcell Wallet...`, `🔐 Entering PIN...`, etc.) and diagnostic timeout details (`last state: ...`).
+   * **Admin (`cid == admin_id`):** Receives full internal step-by-step status logs (`🖥️ Entering Virtual Master...`, `🔪 Closing Telcell Wallet...`, `🚀 Launching Telcell Wallet...`, `🔐 Entering PIN...`, etc.) and diagnostic timeout details (`last state: ...`).
    * **Regular Users (`cid != admin_id`):** Internal step logs are replaced by a monotonic emoji progress bar (`0% -> 10% -> ... -> 80%`) that never regresses backwards and omits internal app/VM details, including on timeouts (`❌ Timed out generating QR code. Please try again.`).
    * **Queue Non-Empty (`NEXT_IN_QUEUE`):** Pops `queue[0]`, sets `active_chat_id` and `status_message_id` to the queued user, sets `step_count = 2`, `qr_was_closed = true`, `busy_until = now + 45000`, queues `🔄 Generating QR code for your request...` (Admin) or `70%` progress bar (regular user) into `pending_status_text`, and returns `CLOSE_MODAL` (`(626, 121)`) so `PostStep` updates the queued user while returning to `TICKET_LIST`.
-   * **Queue Empty (`DONE`):** Sets `last_state = "QR_SENT"`, `busy_until = 0`, clicks Close `(626, 121)` -> `250ms` -> `BreakFromLoopAction`. Keeping Telcell Wallet foregrounded cleanly on `TICKET_LIST` inside Virtual Master avoids cold app launches and repeated PIN entry on warm repeat requests (while `STALE_QR` guards against pre-opened modals and `🧹 Reset VM App` / `DONE_RESET` returns to `VM_HOME`).
+   * **Queue Empty (`DONE` / `DONE_RESET`):** On `DONE`, sets `last_state = "QR_SENT"`, `busy_until = 0`, clicks Close `(626, 121)` -> `250ms` -> `BreakFromLoopAction`. On `DONE_RESET`, Option A force-close + reopen breaks directly on loaded `TICKET_LIST` (`last_state = "RESET"`, `busy_until = 0`). Both keep Telcell Wallet foregrounded cleanly on `TICKET_LIST` inside Virtual Master so repeat QR requests skip cold launches and PIN entry (~6-7s).
 
-### Stage 5: Post-Loop Guard (`JavaAction #5`) & Screen Sleep
+### Stage 5: Post-Loop Guard (`JavaAction #5`, `screen_action`) & Conditional Screen Sleep
 
-After exiting the `45×` loop, `build_timeout_script()` deletes any leftover `/storage/emulated/0/komobot_ss/frame.{png,jpg}` and checks whether `busy_until > 0` or `step_cmd == "DONE_RESET"`:
-* Resets `busy_until = 0`, `queue = []`, and `pending_status_text = ""`.
-* Edits the active (and any remaining queued) status messages with `✅ VM app reset complete.` or `❌ Timed out waiting for QR screen (last state: <last_state>). Please try again.` (Admin) / `❌ Timed out generating QR code. Please try again.` (regular user).
-* Finally executes `ScreenOnAction(screen_off=True)` to put the display to sleep (`mWakefulness=Dozing`) with Virtual Master still in the host foreground.
+After exiting the `130×` loop:
+* If a newer worker/request claimed the screen (`worker_start_ms > workerStart` or `worker_pending_start_ms > workerStart`), `build_timeout_script()` returns `"KEEP_ON"` immediately without deleting `komobot_ss/frame.*`, mutating config, or editing Telegram messages, and Stage 6 skips `ScreenOnAction(screen_off=True)` so the new run keeps the display awake.
+* Otherwise, `build_timeout_script()` deletes any leftover `/storage/emulated/0/komobot_ss/frame.{png,jpg}`, clears `worker_active`/`worker_pending_start_ms`/`worker_exiting_ms`, and checks whether `busy_until > 0` or `step_cmd == "DONE_RESET"` (without `reset_notified`):
+  * Resets `busy_until = 0`, `queue = []`, and `pending_status_text = ""`.
+  * Edits the active (and any remaining queued) status messages with `✅ VM app reset complete — Telcell restarted & ready.` / `❌ Request cancelled by VM reset. Please try again.` or `❌ Timed out waiting for QR screen (last state: <last_state>). Please try again.` (Admin) / `❌ Timed out generating QR code. Please try again.` (regular user).
+  * When a non-reset request times out and affects any regular user (`cid != admin_id`, `cid > 0`, active or queued), sends a diagnostic failure alert to `admin_id` (`chat_id`, reason, `last_state`, `step_count`, and affected queued IDs).
+  * Returns `"SCREEN_OFF"`, allowing Stage 6 (`If (screen_action = SCREEN_OFF)`) to execute `ScreenOnAction(screen_off=True)` (`mWakefulness=Dozing`) with Virtual Master still in the host foreground.
 
 ---
 
@@ -229,7 +244,7 @@ Verify with `getWebhookInfo` that `pending_update_count` is `0` and `last_error_
 | `/adduser <id>` | Admin only | Adds `<id>` to `allowed_users`. |
 | `/removeuser <id>` | Admin only | Removes `<id>` from `allowed_users`. |
 | `/toggle` or `🛑 Toggle Public Access` | Admin only | Toggles `public_access` (`true`/`false`) for non-admin allowed users. |
-| `🧹 Reset VM App` | Admin only | Enters `reset` mode (`DONE_RESET`): closes any open modal, taps VM Back & VM Home, clears `busy_until`, and sleeps the screen. |
+| `🧹 Reset VM App` | Admin only | Enters `reset` mode (preempts any active non-reset run & cancels queued/active chats): opens VM Recents (`(567, 1553)`), swipe-kills Telcell (`(360, 900) -> (360, 200)`), relaunches through `PIN_PAD` -> `DASHBOARD` -> `TICKET_LIST` (`DONE_RESET`), parks warm, and sleeps the screen. |
 
 ---
 
@@ -240,9 +255,11 @@ Verify with `getWebhookInfo` that `pending_update_count` is `0` and `last_error_
 | `admin_id`, `allowed_users`, `public_access` | Access-control policy managed at runtime via Telegram admin commands. |
 | `last_update_id` | Highest non-zero Telegram `update_id` processed (used to ignore duplicate retries). |
 | `last_chat_id`, `last_msg_text` | Most recent non-duplicate sender ID and extracted message text for debugging webhook parsing. |
-| `busy_until`, `queue` | Concurrency lock epoch (`ms`) and FIFO array of waiting `{"chat_id", "status_message_id"}` entries. |
-| `active_chat_id`, `status_message_id`, `capture_mode`, `run_start_ms` | Active run ownership, progress message ID for `editMessageText`, mode (`"qr"`/`"reset"`), and run start timestamp. |
-| `qr_was_closed`, `step_count`, `other_count`, `white_count`, `loading_count`, `last_state` | State-machine progress flags, total vision iterations (`1..45`), recovery counters, and last classified screen state (e.g., `QR_SENT`, `STALE_QR`, `BUY_TICKET_TAB`, `TICKET_LIST`, `WHITE_LOADING`). |
+| `busy_until`, `queue`, `preempted_notices` | Concurrency lock epoch (`ms`), FIFO array of waiting `{"chat_id", "status_message_id"}` entries, and pending reset preemption notifications. |
+| `active_chat_id`, `status_message_id`, `capture_mode`, `run_start_ms` | Active run ownership, progress message ID for `editMessageText`, mode (`"qr"`/`"reset"`), and monotonic run start timestamp. |
+| `reset_stage`, `reset_kills`, `reset_recents_checked`, `reset_open_tries`, `reset_notified`, `vm_booting` | Option A Reset progress flags (Recents check/kill stage, swipe kill count, retry escalation, completion flag) and cold-boot splash tracker across `VM_LAUNCHER`/`VM_LOADING`. |
+| `worker_active`, `worker_heartbeat_ms`, `worker_pending_start_ms`, `worker_start_ms`, `worker_exiting_ms` | Single-worker coordination fields preventing duplicate loop spawns on cooperative preemption and guarding Stage 3/Stage 6 race conditions. |
+| `qr_was_closed`, `step_count`, `other_count`, `white_count`, `loading_count`, `last_state` | State-machine progress flags, per-request vision iterations (`1..95` inside `130×` loop), recovery counters, and last classified screen state (e.g., `QR_SENT`, `VM_RECENTS`, `RESET`, `STALE_QR`, `BUY_TICKET_TAB`, `TICKET_LIST`, `WHITE_LOADING`). |
 | `last_ss_name`, `last_ss_mtime`, `last_ss_deleted`, `app_name` | Last processed host screenshot identity + delete flag (enables safe same-second frame acceptance in `komobot_ss`) and configured package name. |
 
 ### Safe Synthetic Webhook Testing
@@ -267,9 +284,9 @@ Executes macro schema/regex/PIN checks and compiles/runs the generated BeanShell
 python3 -m unittest discover -s tests -v
 ```
 
-* [`tests/test_macro_structure.py`](tests/test_macro_structure.py): Macro schema, unique `m_SIGUID`s, balanced `If`/`Loop` actions, `step_cmd` branch coverage, `PIN_COORDS` mapping, centered nav taps, Stage 1 regex extraction, and BeanShell compilation.
-* [`tests/test_router_and_timeout_scenarios.py`](tests/test_router_and_timeout_scenarios.py): Deduplication (`update_id: 0` safety vs repeated `uid`), auth, `/start` keyboards, `/adduser`/`/removeuser`/`/toggle`, busy lease & expired lease reclaim after extended inactivity, multi-user FIFO queue, and post-loop timeout/`DONE_RESET` cleanup.
-* [`tests/test_vision_scenarios.py`](tests/test_vision_scenarios.py): Synthetic `720x1600` & `1080x2400` screen pipelines (`VM_LAUNCHER` -> `PIN_PAD` -> `DASHBOARD` -> `BUY_TICKET_TAB` -> `TICKET_LIST` -> `QR_SENT`), full 30-step cold VM + cold Telcell resume within `45` steps, `STALE_QR` refresh, queue handoff (`NEXT_IN_QUEUE`), `WHITE_LOADING` (`<= 7`) vs dense UI / `PIN_PAD` regressions, `5`-tick unloaded dashboard wait, bounded loading recovery, private `komobot_ss` same-second frame acceptance, overlapped PostStep status edits, and HTTP Keep-Alive checks.
+* [`tests/test_macro_structure.py`](tests/test_macro_structure.py): Macro schema, unique `m_SIGUID`s, balanced `If`/`Loop` actions (`130×` loop), `step_cmd` branch coverage (including `Gesture` swipe `SWIPE_KILL_RECENT`, `DONE_RESET`, `ABORT_PREEMPTED`, `ABORT_TIMEOUT`, and `screen_action == SCREEN_OFF`), `PIN_COORDS` mapping, centered nav taps, Stage 1 regex extraction, BeanShell raw-newline string literal guards, and BeanShell compilation.
+* [`tests/test_router_and_timeout_scenarios.py`](tests/test_router_and_timeout_scenarios.py): Deduplication (`update_id: 0` safety vs repeated `uid`), auth, `/start` keyboards, `/adduser`/`/removeuser`/`/toggle`, busy lease & expired lease reclaim after extended inactivity, multi-user FIFO queue, single-worker cooperative reset preemption vs dead-worker fallback, startup barrier & orphaned `init_status` cleanup, and post-loop timeout (including Admin diagnostic alerts for regular-user failures) / `DONE_RESET` / `KEEP_ON` cleanup.
+* [`tests/test_vision_scenarios.py`](tests/test_vision_scenarios.py): Synthetic `720x1600` & `1080x2400` screen pipelines (`VM_LAUNCHER` -> `PIN_PAD` -> `DASHBOARD` -> `BUY_TICKET_TAB` -> `TICKET_LIST` -> `QR_SENT`), cold VM + cold Telcell resume, Option A `reset` force-close (`VM_RECENTS` swipe kill) + cold relaunch to `TICKET_LIST`, reverse `reset` -> queued user `CLICK_TICKET_ROW` handoff, regular-user `sendPhoto` HTTP error Admin alert, `vm_booting` cold-boot splash guard against premature `RESET_OPEN_RECENTS`/`CLICK_BACK`, `95`-step cap `ABORT_TIMEOUT`, `worker_start_ms` supersession (`ABORT_PREEMPTED`), `qr` `VM_RECENTS` escape, `STALE_QR` refresh, queue handoff (`NEXT_IN_QUEUE`), `WHITE_LOADING` (`<= 7`) vs dense UI / `PIN_PAD` regressions, `5`-tick unloaded dashboard wait, bounded loading recovery, private `komobot_ss` same-second frame acceptance, overlapped PostStep status edits, and HTTP Keep-Alive checks.
 
 ### Live Device E2E Scenario Runner (ADB + Webhook)
 

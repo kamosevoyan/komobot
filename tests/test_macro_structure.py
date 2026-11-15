@@ -91,6 +91,7 @@ class TestMacroStructure(unittest.TestCase):
             "pin_d2",
             "pin_d3",
             "pin_d4",
+            "screen_action",
             "step_cmd",
             "update_id",
             "webhook_body",
@@ -125,7 +126,7 @@ class TestMacroStructure(unittest.TestCase):
                 self.assertGreater(loop_depth, 0)
         self.assertEqual(if_depth, 0)
         self.assertEqual(loop_depth, 0)
-        self.assertEqual(loop_counts, [45])
+        self.assertEqual(loop_counts, [130])
 
         # Stage 3 overlaps initial Telegram status with VM launch (no in-loop ScreenOn)
         loop_idx = next(
@@ -140,13 +141,10 @@ class TestMacroStructure(unittest.TestCase):
         )
         stage3_types = [a.get("m_classType") for a in self.actions[:loop_idx][-3:]]
         self.assertEqual(
-            stage3_types,
-            ["ScreenOnAction", "LaunchActivityAction", "JavaAction"],
+            stage3_types, ["ScreenOnAction", "LaunchActivityAction", "JavaAction"]
         )
         loop_body = self.actions[loop_idx + 1 : end_loop_idx]
-        self.assertNotIn(
-            "ScreenOnAction", [a.get("m_classType") for a in loop_body]
-        )
+        self.assertNotIn("ScreenOnAction", [a.get("m_classType") for a in loop_body])
         self.assertEqual(loop_body[-1].get("m_classType"), "JavaAction")
         screenshots = [
             a for a in loop_body if a.get("m_classType") == "TakeScreenshotAction"
@@ -207,11 +205,54 @@ class TestMacroStructure(unittest.TestCase):
             ]
 
         self.assertEqual(xy_points("DONE"), [(626, 121)])
-        self.assertEqual(
-            xy_points("DONE_RESET"), [(626, 121), (151, 1553), (360, 1553)]
-        )
+        self.assertEqual(xy_points("DONE_RESET"), [])
+        self.assertEqual(xy_points("ABORT_PREEMPTED"), [])
+        self.assertEqual(xy_points("ABORT_TIMEOUT"), [])
+        self.assertEqual(xy_points("OPEN_RECENTS"), [(567, 1553)])
         self.assertEqual(xy_points("CLICK_BACK"), [(151, 1553)])
         self.assertEqual(xy_points("RESET_TO_HOME"), [(360, 1553)])
+
+        for break_cmd in ("DONE_RESET", "ABORT_PREEMPTED", "ABORT_TIMEOUT"):
+            classes = [
+                a["m_classType"] for a in _find_cmd_branch(self.actions, break_cmd)
+            ]
+            self.assertEqual(classes, ["BreakFromLoopAction"])
+
+        swipe_actions = [
+            a
+            for a in _find_cmd_branch(self.actions, "SWIPE_KILL_RECENT")
+            if a.get("m_classType") == "UIInteractionAction"
+        ]
+        self.assertEqual(len(swipe_actions), 1)
+        swipe_cfg = swipe_actions[0]["uiInteractionConfiguration"]
+        self.assertEqual(swipe_cfg["type"], "Gesture")
+        self.assertEqual(
+            (
+                swipe_cfg["startX"],
+                swipe_cfg["startY"],
+                swipe_cfg["endX"],
+                swipe_cfg["endY"],
+                swipe_cfg["durationMs"],
+                swipe_cfg["additionalFingers"],
+                swipe_cfg["xyPercentages"],
+                swipe_cfg["waitBeforeNext"],
+            ),
+            (360, 900, 360, 200, 200, 0, False, True),
+        )
+
+        # Post-loop ScreenOff must be gated by Stage 5 screen_action == "SCREEN_OFF"
+        timeout_action = self.actions[-5]
+        screen_off_if = self.actions[-4]
+        screen_off = self.actions[-3]
+        self.assertEqual(timeout_action["m_classType"], "JavaAction")
+        self.assertEqual(timeout_action["responseVariableName"], "screen_action")
+        self.assertEqual(screen_off_if["m_classType"], "IfConditionAction")
+        c = screen_off_if["m_constraintList"][0]
+        self.assertEqual(c["m_variable"]["m_name"], "screen_action")
+        self.assertTrue(c["m_stringEqual"])
+        self.assertEqual(c["m_stringValue"], "SCREEN_OFF")
+        self.assertEqual(screen_off["m_classType"], "ScreenOnAction")
+        self.assertTrue(screen_off["m_screenOff"])
 
     def test_stage1_webhook_regex_extractors(self) -> None:
         extractors: dict[str, tuple[str, str]] = {}
@@ -278,6 +319,17 @@ class TestMacroStructure(unittest.TestCase):
             src = script_fn()
             self.assertNotIn("{{", src)
             self.assertNotIn("}}", src)
+            i, n, in_str = 0, len(src), False
+            while i < n:
+                ch = src[i]
+                if ch == "\\" and in_str:
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                elif ch == "\n" and in_str:
+                    self.fail(f"Raw newline inside Java string in {script_fn.__name__}")
+                i += 1
             py_src = compile_bsh_to_python(src, {})
             compile(py_src, script_fn.__name__, "exec")
 
