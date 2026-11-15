@@ -62,12 +62,15 @@ def get_wakefulness() -> str:
 
 
 def ensure_dozing(wait_s: float = 12.0) -> None:
-    if get_wakefulness() != "Dozing":
-        adb("shell", "input", "keyevent", "223")
+    last_sleep_cmd = 0.0
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         if get_wakefulness() == "Dozing":
             return
+        now = time.monotonic()
+        if now - last_sleep_cmd >= 3.0:
+            adb("shell", "input", "keyevent", "223")
+            last_sleep_cmd = now
         time.sleep(1.0)
     raise AssertionError(f"Device did not enter Dozing (state={get_wakefulness()})")
 
@@ -330,12 +333,30 @@ def scenario_inactivity_audit(ctx: ScenarioContext) -> str:
     acc = adb("shell", "settings", "get", "secure", "enabled_accessibility_services")
     assert "com.arlosoft.macrodroid" in acc, f"MacroDroid Accessibility off: {acc!r}"
 
-    for op in ("WAKE_LOCK", "SYSTEM_ALERT_WINDOW", "RUN_ANY_IN_BACKGROUND"):
+    for op in (
+        "WAKE_LOCK",
+        "SYSTEM_ALERT_WINDOW",
+        "RUN_ANY_IN_BACKGROUND",
+        "MANAGE_EXTERNAL_STORAGE",
+    ):
         out = adb("shell", "appops", "get", "com.arlosoft.macrodroid", op)
         assert "allow" in out, f"MacroDroid appop {op} not allowed: {out!r}"
 
+    for scale in (
+        "window_animation_scale",
+        "transition_animation_scale",
+        "animator_duration_scale",
+    ):
+        val = adb("shell", "settings", "get", "global", scale)
+        assert val in ("0", "0.0"), f"{scale}={val!r} (expected 0)"
+
+    nomedia = adb(
+        "shell", "test -f /storage/emulated/0/komobot_ss/.nomedia && echo ok"
+    )
+    assert nomedia == "ok", "Missing /storage/emulated/0/komobot_ss/.nomedia"
+
     return (
-        f"buckets=({macro_bucket},{vm_bucket}) doze=off "
+        f"buckets=({macro_bucket},{vm_bucket}) doze=off anim=0 "
         f"phantom_mon={phantom_mon} max_procs={max_procs} "
         f"wifi_sleep={wifi_sleep} lock_disabled={lock_disabled}"
     )
@@ -346,6 +367,7 @@ def scenario_unplugged_doze_qr(ctx: ScenarioContext) -> str:
     before = read_device_config()
     try:
         adb("shell", "dumpsys", "battery", "unplug")
+        time.sleep(1.0)
         ensure_dozing()
         time.sleep(ctx.idle_wait_s)
         post_webhook(

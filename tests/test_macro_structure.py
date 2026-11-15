@@ -125,7 +125,40 @@ class TestMacroStructure(unittest.TestCase):
                 self.assertGreater(loop_depth, 0)
         self.assertEqual(if_depth, 0)
         self.assertEqual(loop_depth, 0)
-        self.assertEqual(loop_counts, [32])
+        self.assertEqual(loop_counts, [45])
+
+        # Stage 3 overlaps initial Telegram status with VM launch (no in-loop ScreenOn)
+        loop_idx = next(
+            i
+            for i, a in enumerate(self.actions)
+            if a.get("m_classType") == "LoopAction"
+        )
+        end_loop_idx = next(
+            i
+            for i, a in enumerate(self.actions)
+            if a.get("m_classType") == "EndLoopAction"
+        )
+        stage3_types = [a.get("m_classType") for a in self.actions[:loop_idx][-3:]]
+        self.assertEqual(
+            stage3_types,
+            ["ScreenOnAction", "LaunchActivityAction", "JavaAction"],
+        )
+        loop_body = self.actions[loop_idx + 1 : end_loop_idx]
+        self.assertNotIn(
+            "ScreenOnAction", [a.get("m_classType") for a in loop_body]
+        )
+        self.assertEqual(loop_body[-1].get("m_classType"), "JavaAction")
+        screenshots = [
+            a for a in loop_body if a.get("m_classType") == "TakeScreenshotAction"
+        ]
+        self.assertEqual(len(screenshots), 1)
+        ss = screenshots[0]
+        self.assertEqual(ss["uiOption"], 1)
+        self.assertEqual(ss["screenshotFormat"], 1)
+        self.assertTrue(ss["useCustomSaveLocation"])
+        self.assertEqual(ss["customAllFilesPath"], gm.SCREENSHOT_DIR)
+        self.assertTrue(ss["useCustomFilename"])
+        self.assertEqual(ss["customFilename"], gm.SCREENSHOT_FILE_BASE)
 
         returned_cmds = set(
             re.findall(r'return\s+"([A-Z0-9_]+)"\s*;', gm.build_vision_script())
@@ -161,7 +194,7 @@ class TestMacroStructure(unittest.TestCase):
         for var_name in ("pin_d1", "pin_d2", "pin_d3", "pin_d4"):
             for digit, coords in gm.PIN_COORDS.items():
                 self.assertEqual(click_map[(var_name, digit)], coords)
-        self.assertEqual(top_pauses, [(0, 450), (0, 450), (0, 450), (2, 500)])
+        self.assertEqual(top_pauses, [(0, 400), (0, 400), (0, 400)])
 
         def xy_points(cmd: str) -> list[tuple[int, int]]:
             return [
@@ -173,7 +206,7 @@ class TestMacroStructure(unittest.TestCase):
                 if a.get("m_classType") == "UIInteractionAction"
             ]
 
-        self.assertEqual(xy_points("DONE"), [(626, 121), (151, 1553), (360, 1553)])
+        self.assertEqual(xy_points("DONE"), [(626, 121)])
         self.assertEqual(
             xy_points("DONE_RESET"), [(626, 121), (151, 1553), (360, 1553)]
         )
@@ -237,7 +270,9 @@ class TestMacroStructure(unittest.TestCase):
     def test_beanshell_scripts_clean_and_cli_writes_valid_json(self) -> None:
         for script_fn in (
             gm.build_router_script,
+            gm.build_init_status_script,
             gm.build_vision_script,
+            gm.build_post_step_script,
             gm.build_timeout_script,
         ):
             src = script_fn()

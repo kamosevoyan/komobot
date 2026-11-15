@@ -309,6 +309,7 @@ class MockAndroidEnv:
         self.now_ms = now_ms
         self.files: dict[str, VirtualFileEntry] = {}
         self.tg_calls: list[dict[str, Any]] = []
+        self.http_connections: list[dict[str, Any]] = []
         self.next_message_id = 1000
         self.http_status_overrides: dict[str, int] = {}
         self.lock = threading.RLock()
@@ -346,11 +347,20 @@ class MockAndroidEnv:
         mtime_ms: int | None = None,
         directory: str = "/storage/emulated/0/DCIM/Screenshots",
         with_thumbnail: bool = False,
+        truncated: bool = False,
     ) -> str:
         path = posixpath.join(directory, name)
         mtime = self.now_ms if mtime_ms is None else mtime_ms
+        lower = name.lower()
+        if lower.endswith(".png"):
+            header = b"\x89PNG\r\n\x1a\n"
+            trailer = b"" if truncated else b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        else:
+            header = b"\xff\xd8"
+            trailer = b"" if truncated else b"\xff\xd9"
+        body_len = max(0, size - len(header) - len(trailer))
         self.files[path] = VirtualFileEntry(
-            data=b"\xff\xd8" + b"0" * max(0, size - 2), mtime_ms=mtime, bitmap=bmp
+            data=header + b"0" * body_len + trailer, mtime_ms=mtime, bitmap=bmp
         )
         if with_thumbnail:
             thumb_path = posixpath.join(directory, f"thumbnail_{name}")
@@ -421,7 +431,7 @@ class _MockFile:
     def isDirectory(self) -> bool:
         if self.path in self._env.files:
             return False
-        return self.path.endswith("/Screenshots") or any(
+        return self.path.endswith(("/Screenshots", "/komobot_ss")) or any(
             p.startswith(self.path + "/") for p in self._env.files
         )
 
@@ -463,15 +473,40 @@ class _MockFile:
 
 
 class _MockByteArrayInputStream:
-    def __init__(self, data: bytes) -> None:
+    def __init__(
+        self, data: bytes, record: dict[str, Any] | None = None
+    ) -> None:
         self._data = data
         self._read = False
+        self._record = record
 
     def read_all_lines(self) -> list[str]:
         if self._read:
             return []
         self._read = True
+        if self._record is not None:
+            self._record["stream_read"] = True
         return self._data.decode("utf-8", errors="replace").splitlines()
+
+    def close(self) -> None:
+        if self._record is not None:
+            self._record["stream_closed"] = True
+
+
+class _MockRandomAccessFile:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._pos = 0
+
+    def seek(self, pos: int) -> None:
+        self._pos = max(0, int(pos))
+
+    def read(self) -> int:
+        if self._pos >= len(self._data):
+            return -1
+        b = self._data[self._pos]
+        self._pos += 1
+        return b
 
     def close(self) -> None:
         pass
@@ -488,6 +523,7 @@ class _MockInputStreamReader:
 
 class _MockBufferedReader:
     def __init__(self, reader: _MockInputStreamReader) -> None:
+        self._reader = reader
         self._lines = reader.stream.read_all_lines()
         self._idx = 0
 
@@ -499,7 +535,7 @@ class _MockBufferedReader:
         return line
 
     def close(self) -> None:
-        pass
+        self._reader.close()
 
 
 class _MockByteArrayOutputStream:
@@ -563,6 +599,13 @@ class _MockHttpURLConnection:
         self._out = _MockByteArrayOutputStream()
         self._status: int | None = None
         self._resp = ""
+        self._conn_record: dict[str, Any] = {
+            "method": url_str.rsplit("/", 1)[-1],
+            "stream_read": False,
+            "stream_closed": False,
+            "disconnected": False,
+        }
+        self._env.http_connections.append(self._conn_record)
 
     def setRequestMethod(self, method: str) -> None:
         del method
@@ -596,14 +639,14 @@ class _MockHttpURLConnection:
 
     def getInputStream(self) -> _MockByteArrayInputStream:
         self._dispatch()
-        return _MockByteArrayInputStream(self._resp.encode("utf-8"))
+        return _MockByteArrayInputStream(self._resp.encode("utf-8"), self._conn_record)
 
     def getErrorStream(self) -> _MockByteArrayInputStream:
         self._dispatch()
-        return _MockByteArrayInputStream(self._resp.encode("utf-8"))
+        return _MockByteArrayInputStream(self._resp.encode("utf-8"), self._conn_record)
 
     def disconnect(self) -> None:
-        pass
+        self._conn_record["disconnected"] = True
 
 
 class _MockURL:
@@ -706,6 +749,8 @@ def _jcall(obj: Any, method: str, *args: Any) -> Any:
             return obj.lower() == str(args[0]).lower()
         if method == "startsWith":
             return obj.startswith(args[0])
+        if method == "endsWith":
+            return obj.endswith(args[0])
         if method == "indexOf":
             return obj.find(args[0])
         if method == "substring":
@@ -727,6 +772,13 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
             raise FileNotFoundError(file_obj.path)
         return _MockByteArrayInputStream(entry.data)
 
+    def new_RandomAccessFile(file_obj: _MockFile, mode: str) -> _MockRandomAccessFile:
+        del mode
+        entry = env.files.get(file_obj.path)
+        if entry is None:
+            raise FileNotFoundError(file_obj.path)
+        return _MockRandomAccessFile(entry.data)
+
     def new_FileOutputStream(file_obj: _MockFile) -> _MockFileOutputStream:
         return _MockFileOutputStream(env, file_obj)
 
@@ -746,6 +798,7 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
         "ByteArrayOutputStream": _MockByteArrayOutputStream,
         "File": new_File,
         "FileInputStream": new_FileInputStream,
+        "RandomAccessFile": new_RandomAccessFile,
         "FileOutputStream": new_FileOutputStream,
         "InputStreamReader": _MockInputStreamReader,
         "OutputStreamWriter": _MockOutputStreamWriter,

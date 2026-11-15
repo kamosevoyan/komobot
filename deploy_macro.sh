@@ -98,7 +98,7 @@ adb shell appops set com.clone.android.dual.space TOAST_WINDOW deny 2>/dev/null 
 adb shell dumpsys deviceidle disable >/dev/null 2>&1 || true
 adb shell settings put global app_standby_enabled 0 2>/dev/null || true
 adb shell settings put global settings_enable_monitor_phantom_procs false 2>/dev/null || true
-adb shell cmd device_config put activity_manager max_phantom_processes 2147483647 2>/dev/null || true
+adb shell cmd device_config override activity_manager max_phantom_processes 2147483647 2>/dev/null || adb shell cmd device_config put activity_manager max_phantom_processes 2147483647 2>/dev/null || true
 adb shell settings put global wifi_power_save 0 2>/dev/null || true
 adb shell settings put global wifi_sleep_policy 2 2>/dev/null || true
 adb shell settings put system screen_off_timeout 120000 2>/dev/null || true
@@ -107,9 +107,13 @@ adb shell settings put secure lockscreen.disabled 1 2>/dev/null || true
 adb shell settings put secure lock_screen_lock_after_timeout 86400000 2>/dev/null || true
 
 adb shell settings put system enable_smart_capture 0 2>/dev/null || true
+adb shell settings put global window_animation_scale 0 2>/dev/null || true
+adb shell settings put global transition_animation_scale 0 2>/dev/null || true
+adb shell settings put global animator_duration_scale 0 2>/dev/null || true
 
-echo "==> Cleaning up old Virtual Master and debug screenshots..."
-adb shell 'rm -f /storage/emulated/0/DCIM/Screenshots/*Virtual\ Master* /storage/emulated/0/DCIM/Screenshots/.trashed-*Virtual\ Master* /storage/emulated/0/DCIM/Screenshots/*Virtual_Master* /storage/emulated/0/Pictures/Screenshots/*Virtual\ Master* /storage/emulated/0/DCIM/Screenshots/.trashed-*MacroDroid* /storage/emulated/0/DCIM/Screenshots/.trashed-*One\ UI\ Home* /storage/emulated/0/DCIM/Screenshots/thumbnail_*MacroDroid* /storage/emulated/0/DCIM/Screenshots/thumbnail_*One\ UI\ Home* 2>/dev/null || true'
+echo "==> Preparing screenshot workspace & cleaning old screenshots..."
+adb shell 'mkdir -p /storage/emulated/0/komobot_ss && touch /storage/emulated/0/komobot_ss/.nomedia && rm -f /storage/emulated/0/komobot_ss/frame.png /storage/emulated/0/komobot_ss/frame.jpg'
+adb shell 'rm -f /storage/emulated/0/DCIM/Screenshots/*Virtual\ Master* /storage/emulated/0/DCIM/Screenshots/.trashed-* /storage/emulated/0/DCIM/Screenshots/thumbnail_* /storage/emulated/0/DCIM/Screenshots/*Virtual_Master* /storage/emulated/0/Pictures/Screenshots/*Virtual\ Master* 2>/dev/null || true'
 
 echo "==> Seeding /storage/emulated/0/Download/komobot_config.json if absent..."
 if ! adb shell "[ -f /storage/emulated/0/Download/komobot_config.json ]"; then

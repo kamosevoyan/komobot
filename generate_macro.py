@@ -283,44 +283,23 @@ def make_click_xy(sg: SiguidGen, x: int, y: int) -> dict:
     }
 
 
-def make_click_text(sg: SiguidGen, text: str, blocking: bool = False) -> dict:
-    return {
-        "action": 0,
-        "uiInteractionConfiguration": {
-            "blocking": blocking,
-            "checkOverlays": False,
-            "clickOption": 1,
-            "contextClick": False,
-            "longClick": False,
-            "showTouchLocation": False,
-            "skipCount": "0",
-            "textContent": text,
-            "textMatchOption": 0,
-            "useRegex": False,
-            "xyPercentages": False,
-            "xyPoint": {"x": 0, "y": 0},
-            "type": "Click",
-        },
-        "disableLogging": False,
-        "m_SIGUID": sg.next_id(),
-        "m_classType": "UIInteractionAction",
-        "m_comment": "",
-        "m_constraintList": [],
-        "m_isDisabled": False,
-        "m_isOrCondition": False,
-    }
+SCREENSHOT_DIR = "/storage/emulated/0/komobot_ss"
+SCREENSHOT_FILE_BASE = "frame"
 
 
 def make_take_screenshot(sg: SiguidGen) -> dict:
+    """Build TakeScreenshotAction using direct Android 11+ Accessibility capture."""
     return {
+        "customAllFilesPath": SCREENSHOT_DIR,
+        "customFilename": SCREENSHOT_FILE_BASE,
         "emailSubject": "Screenshot",
         "m_mechanismOption": 0,
         "m_option": 0,
         "saveToJpeg": False,
-        "screenshotFormat": 0,
-        "uiOption": 0,
-        "useCustomFilename": False,
-        "useCustomSaveLocation": False,
+        "screenshotFormat": 1,
+        "uiOption": 1,
+        "useCustomFilename": True,
+        "useCustomSaveLocation": True,
         "useSmtpEmail": False,
         "disableLogging": False,
         "m_SIGUID": sg.next_id(),
@@ -347,6 +326,153 @@ _BSH_PROGRESS_HELPER = """String formatProgress(String label, int pct) {
     return label + "\\n" + bar.toString() + " " + pct + "%";
 }"""
 
+_BSH_READ_STREAM = """String readStream(InputStream is) throws Exception {
+    if (is == null) return "";
+    BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+    StringBuilder sb = new StringBuilder();
+    String line;
+    while ((line = br.readLine()) != null) {
+        sb.append(line);
+    }
+    br.close();
+    return sb.toString();
+}"""
+
+_BSH_FRAME_HELPER = f"""void deletePrivateFrames() {{
+    try {{
+        File png = new File("{SCREENSHOT_DIR}/{SCREENSHOT_FILE_BASE}.png");
+        if (png.exists()) png.delete();
+        File jpg = new File("{SCREENSHOT_DIR}/{SCREENSHOT_FILE_BASE}.jpg");
+        if (jpg.exists()) jpg.delete();
+    }} catch (Exception e) {{
+    }}
+}}"""
+
+_BSH_TG_HTTP_HELPERS = """JSONObject tgPost(String method, JSONObject payload, int timeoutMs) {
+    HttpURLConnection conn = null;
+    try {
+        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + method);
+        conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        conn.setRequestProperty("Connection", "keep-alive");
+        byte[] outBytes = payload.toString().getBytes("UTF-8");
+        OutputStream os = conn.getOutputStream();
+        os.write(outBytes);
+        os.flush();
+        os.close();
+        int code = conn.getResponseCode();
+        InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
+        String resp = readStream(is);
+        if (resp.length() > 0) {
+            return new JSONObject(resp);
+        }
+    } catch (Exception e) {
+        if (conn != null) {
+            try {
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+    return new JSONObject();
+}
+
+void tgJson(String method, JSONObject payload) {
+    tgPost(method, payload, 5000);
+}
+
+JSONObject sendMsg(long cid, String text, JSONObject markup) {
+    try {
+        JSONObject body = new JSONObject();
+        body.put("chat_id", cid);
+        body.put("text", text);
+        if (markup != null) {
+            body.put("reply_markup", markup);
+        }
+        return tgPost("sendMessage", body, 6000);
+    } catch (Exception e) {
+        return new JSONObject();
+    }
+}
+
+void updateStatus(long cid, long mid, String text) {
+    if (cid <= 0L || mid <= 0L || text == null || text.length() == 0) return;
+    try {
+        JSONObject payload = new JSONObject();
+        payload.put("chat_id", cid);
+        payload.put("message_id", mid);
+        payload.put("text", text);
+        tgPost("editMessageText", payload, 5000);
+    } catch (Exception e) {
+    }
+}
+
+void deleteStatus(long cid, long mid) {
+    if (cid <= 0L || mid <= 0L) return;
+    try {
+        JSONObject payload = new JSONObject();
+        payload.put("chat_id", cid);
+        payload.put("message_id", mid);
+        tgPost("deleteMessage", payload, 5000);
+    } catch (Exception e) {
+    }
+}"""
+
+_BSH_WORKER_CONFIG_HELPERS = """JSONObject loadConfig() {
+    File f = new File(configPath);
+    if (f.exists()) {
+        try {
+            FileInputStream fis = new FileInputStream(f);
+            String raw = readStream(fis);
+            fis.close();
+            if (raw.length() > 0) return new JSONObject(raw);
+        } catch (Exception e) {
+        }
+    }
+    return new JSONObject();
+}
+
+void saveConfig(JSONObject cfg) {
+    try {
+        synchronized (System.class) {
+            JSONObject fresh = loadConfig();
+            if (!cfg.optBoolean("_pop_queue", false)) {
+                if (fresh.has("queue")) {
+                    cfg.put("queue", fresh.getJSONArray("queue"));
+                }
+                if (fresh.optLong("busy_until", 0L) > cfg.optLong("busy_until", 0L) && cfg.optLong("busy_until", 0L) > 0L) {
+                    cfg.put("busy_until", fresh.optLong("busy_until", 0L));
+                }
+            }
+            cfg.remove("_pop_queue");
+            if (fresh.optLong("last_update_id", 0L) > cfg.optLong("last_update_id", 0L)) {
+                cfg.put("last_update_id", fresh.optLong("last_update_id", 0L));
+            }
+            if (fresh.optLong("status_message_id", 0L) > 0L && cfg.optLong("status_message_id", 0L) == 0L &&
+                fresh.optLong("active_chat_id", 0L) == cfg.optLong("active_chat_id", 0L) &&
+                fresh.optLong("run_start_ms", 0L) == cfg.optLong("run_start_ms", 0L)) {
+                cfg.put("status_message_id", fresh.optLong("status_message_id", 0L));
+            }
+            if (fresh.has("allowed_users")) {
+                cfg.put("allowed_users", fresh.getJSONArray("allowed_users"));
+            }
+            if (fresh.has("public_access")) {
+                cfg.put("public_access", fresh.optBoolean("public_access", true));
+            }
+            FileOutputStream fos = new FileOutputStream(new File(configPath));
+            OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
+            osw.write(cfg.toString(2));
+            osw.flush();
+            osw.close();
+        }
+    } catch (Exception e) {
+    }
+}"""
+
 
 def build_router_script() -> str:
     """BeanShell Java 7 script for Telegram routing, auth, and user management."""
@@ -368,61 +494,13 @@ String chatIdStr = "{{lv=chat_id}}".trim();
 String updateIdStr = "{{lv=update_id}}".trim();
 String msgText = "{{lv=msg_text}}".trim();
 
-String readStream(InputStream is) throws Exception {{
-    if (is == null) return "";
-    BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-    StringBuilder sb = new StringBuilder();
-    String line;
-    while ((line = br.readLine()) != null) {{
-        sb.append(line);
-    }}
-    br.close();
-    return sb.toString();
-}}
-
-JSONObject tgPost(String method, JSONObject payload) {{
-    HttpURLConnection conn = null;
-    try {{
-        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + method);
-        conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(8000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        byte[] outBytes = payload.toString().getBytes("UTF-8");
-        OutputStream os = conn.getOutputStream();
-        os.write(outBytes);
-        os.flush();
-        os.close();
-        int code = conn.getResponseCode();
-        InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
-        String resp = readStream(is);
-        if (resp.length() > 0) {{
-            return new JSONObject(resp);
-        }}
-    }} catch (Exception e) {{
-    }} finally {{
-        if (conn != null) conn.disconnect();
-    }}
-    return new JSONObject();
-}}
+{_BSH_READ_STREAM}
 
 {_BSH_PROGRESS_HELPER}
 
-JSONObject sendMsg(long cid, String text, JSONObject markup) {{
-    try {{
-        JSONObject body = new JSONObject();
-        body.put("chat_id", cid);
-        body.put("text", text);
-        if (markup != null) {{
-            body.put("reply_markup", markup);
-        }}
-        return tgPost("sendMessage", body);
-    }} catch (Exception e) {{
-        return new JSONObject();
-    }}
-}}
+{_BSH_FRAME_HELPER}
+
+{_BSH_TG_HTTP_HELPERS}
 
 JSONObject loadConfig() {{
     File f = new File(configPath);
@@ -484,7 +562,6 @@ String actionResult = "IGNORE";
 String replyText = null;
 JSONObject replyMarkup = null;
 String statusStage = "";
-long claimedRunStart = 0L;
 int qPos = 0;
 boolean dupUid = false;
 boolean isAdminUser = false;
@@ -672,7 +749,6 @@ synchronized (System.class) {{
                     if (mode.length() == 0) {{
                         saveConfig(cfg);
                     }} else {{
-                        claimedRunStart = now;
                         cfg.put("busy_until", now + 45000L);
                         cfg.put("active_chat_id", cid);
                         cfg.put("app_name", appName);
@@ -685,10 +761,12 @@ synchronized (System.class) {{
                         cfg.put("loading_count", 0);
                         cfg.put("last_state", "INIT");
                         cfg.put("progress_pct", isAdmin ? 0 : 10);
+                        cfg.put("pending_status_text", "");
+                        cfg.put("last_ss_deleted", true);
                         cfg.put("run_start_ms", now);
                         cfg.put("status_message_id", 0L);
                         saveConfig(cfg);
-                        statusStage = "RUN";
+                        deletePrivateFrames();
                         actionResult = "RUN";
                     }}
                 }}
@@ -699,6 +777,9 @@ synchronized (System.class) {{
 
 if (dupUid) {{
     return "IGNORE";
+}}
+if (actionResult.equals("RUN")) {{
+    return "RUN";
 }}
 if (replyText != null) {{
     sendMsg(cid, replyText, replyMarkup);
@@ -728,146 +809,92 @@ if (replyText != null) {{
             }}
         }}
     }}
-}} else if (statusStage.equals("RUN")) {{
-    String initText = isAdminUser
-        ? "🔍 Waking phone & checking Virtual Master..."
-        : formatProgress("⏳ Generating QR code...", 10);
-    JSONObject sent = sendMsg(cid, initText, null);
-    long statusMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
-    if (statusMsgId > 0L) {{
-        synchronized (System.class) {{
-            JSONObject fresh = loadConfig();
-            if (fresh.optLong("active_chat_id", 0L) == cid && fresh.optLong("run_start_ms", 0L) == claimedRunStart) {{
-                fresh.put("status_message_id", statusMsgId);
-                saveConfig(fresh);
-            }}
-        }}
-    }}
 }}
 return actionResult;
 """
 
 
+def build_init_status_script() -> str:
+    """BeanShell Java 7 script sending initial status while Virtual Master boots."""
+    return (
+        'import java.io.*;\n'
+        'import java.net.HttpURLConnection;\n'
+        'import java.net.URL;\n'
+        'import org.json.JSONArray;\n'
+        'import org.json.JSONObject;\n\n'
+        'String botToken = "{lv=bot_token}".trim();\n'
+        'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
+        + _BSH_READ_STREAM
+        + "\n\n"
+        + _BSH_PROGRESS_HELPER
+        + "\n\n"
+        + _BSH_FRAME_HELPER
+        + "\n\n"
+        + _BSH_TG_HTTP_HELPERS
+        + "\n\n"
+        + _BSH_WORKER_CONFIG_HELPERS
+        + """
+
+long t0 = System.currentTimeMillis();
+deletePrivateFrames();
+
+JSONObject cfg = loadConfig();
+long cid = cfg.optLong("active_chat_id", 0L);
+long adminId = cfg.optLong("admin_id", 0L);
+long claimedRunStart = cfg.optLong("run_start_ms", 0L);
+if (cid <= 0L || cfg.optLong("status_message_id", 0L) > 0L) {
+    return "SKIP";
+}
+
+String initText = (cid == adminId)
+    ? "🔍 Waking phone & checking Virtual Master..."
+    : formatProgress("⏳ Generating QR code...", 10);
+JSONObject sent = sendMsg(cid, initText, null);
+long statusMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
+if (statusMsgId > 0L) {
+    synchronized (System.class) {
+        JSONObject fresh = loadConfig();
+        if (fresh.optLong("active_chat_id", 0L) == cid && fresh.optLong("run_start_ms", 0L) == claimedRunStart) {
+            fresh.put("status_message_id", statusMsgId);
+            fresh.put("last_ss_deleted", true);
+            saveConfig(fresh);
+        }
+    }
+}
+
+long rem = 400L - (System.currentTimeMillis() - t0);
+if (rem > 0L) {
+    try {
+        Thread.sleep(rem);
+    } catch (Exception e) {
+    }
+}
+return (statusMsgId > 0L) ? "SENT" : "ERR";
+"""
+    )
+
+
 def build_vision_script() -> str:
     """BeanShell Java 7 script for screenshot polling, state machine & QR crop."""
-    return f"""import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-String botToken = "{{lv=bot_token}}".trim();
-String appName = "{{lv=app_name}}".trim();
-String configPath = "/storage/emulated/0/Download/komobot_config.json";
-
-String readStream(InputStream is) throws Exception {{
-    if (is == null) return "";
-    BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-    StringBuilder sb = new StringBuilder();
-    String line;
-    while ((line = br.readLine()) != null) {{
-        sb.append(line);
-    }}
-    br.close();
-    return sb.toString();
-}}
-
-JSONObject loadConfig() {{
-    File f = new File(configPath);
-    if (f.exists()) {{
-        try {{
-            FileInputStream fis = new FileInputStream(f);
-            String raw = readStream(fis);
-            fis.close();
-            if (raw.length() > 0) return new JSONObject(raw);
-        }} catch (Exception e) {{
-        }}
-    }}
-    return new JSONObject();
-}}
-
-void saveConfig(JSONObject cfg) {{
-    try {{
-        synchronized (System.class) {{
-            JSONObject fresh = loadConfig();
-            if (!cfg.optBoolean("_pop_queue", false)) {{
-                if (fresh.has("queue")) {{
-                    cfg.put("queue", fresh.getJSONArray("queue"));
-                }}
-                if (fresh.optLong("busy_until", 0L) > cfg.optLong("busy_until", 0L) && cfg.optLong("busy_until", 0L) > 0L) {{
-                    cfg.put("busy_until", fresh.optLong("busy_until", 0L));
-                }}
-            }}
-            cfg.remove("_pop_queue");
-            if (fresh.optLong("last_update_id", 0L) > cfg.optLong("last_update_id", 0L)) {{
-                cfg.put("last_update_id", fresh.optLong("last_update_id", 0L));
-            }}
-            if (fresh.optLong("status_message_id", 0L) > 0L && cfg.optLong("status_message_id", 0L) == 0L &&
-                fresh.optLong("active_chat_id", 0L) == cfg.optLong("active_chat_id", 0L) &&
-                fresh.optLong("run_start_ms", 0L) == cfg.optLong("run_start_ms", 0L)) {{
-                cfg.put("status_message_id", fresh.optLong("status_message_id", 0L));
-            }}
-            if (fresh.has("allowed_users")) {{
-                cfg.put("allowed_users", fresh.getJSONArray("allowed_users"));
-            }}
-            if (fresh.has("public_access")) {{
-                cfg.put("public_access", fresh.optBoolean("public_access", true));
-            }}
-            FileOutputStream fos = new FileOutputStream(new File(configPath));
-            OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
-            osw.write(cfg.toString(2));
-            osw.flush();
-            osw.close();
-        }}
-    }} catch (Exception e) {{
-    }}
-}}
-
-void tgJson(String method, JSONObject payload) {{
-    HttpURLConnection conn = null;
-    try {{
-        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + method);
-        conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(6000);
-        conn.setReadTimeout(6000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        OutputStream os = conn.getOutputStream();
-        os.write(payload.toString().getBytes("UTF-8"));
-        os.flush();
-        os.close();
-        conn.getResponseCode();
-    }} catch (Exception e) {{
-    }} finally {{
-        if (conn != null) conn.disconnect();
-    }}
-}}
-
-void updateStatus(long cid, long mid, String text) {{
-    if (cid <= 0L || mid <= 0L) return;
-    try {{
-        JSONObject payload = new JSONObject();
-        payload.put("chat_id", cid);
-        payload.put("message_id", mid);
-        payload.put("text", text);
-        tgJson("editMessageText", payload);
-    }} catch (Exception e) {{
-    }}
-}}
-
-void deleteStatus(long cid, long mid) {{
-    if (cid <= 0L || mid <= 0L) return;
-    try {{
-        JSONObject payload = new JSONObject();
-        payload.put("chat_id", cid);
-        payload.put("message_id", mid);
-        tgJson("deleteMessage", payload);
-    }} catch (Exception e) {{
-    }}
-}}
+    return (
+        'import android.graphics.Bitmap;\n'
+        'import android.graphics.BitmapFactory;\n'
+        'import java.io.*;\n'
+        'import java.net.HttpURLConnection;\n'
+        'import java.net.URL;\n'
+        'import org.json.JSONArray;\n'
+        'import org.json.JSONObject;\n\n'
+        'String botToken = "{lv=bot_token}".trim();\n'
+        'String appName = "{lv=app_name}".trim();\n'
+        'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
+        + _BSH_READ_STREAM
+        + "\n\n"
+        + _BSH_PROGRESS_HELPER
+        + "\n\n"
+        + _BSH_TG_HTTP_HELPERS
+        + "\n\n"
+        + _BSH_WORKER_CONFIG_HELPERS
+        + f"""
 
 int sendPhotoBytes(long cid, byte[] pngBytes, String filename, String caption) {{
     HttpURLConnection conn = null;
@@ -880,6 +907,7 @@ int sendPhotoBytes(long cid, byte[] pngBytes, String filename, String caption) {
         conn.setDoOutput(true);
         String boundary = "*****" + System.currentTimeMillis() + "*****";
         conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        conn.setRequestProperty("Connection", "keep-alive");
         DataOutputStream req = new DataOutputStream(conn.getOutputStream());
 
         req.writeBytes("--" + boundary + "\\r\\n");
@@ -906,23 +934,68 @@ int sendPhotoBytes(long cid, byte[] pngBytes, String filename, String caption) {
         readStream(is);
         return code;
     }} catch (Exception e) {{
+        if (conn != null) {{
+            try {{
+                conn.disconnect();
+            }} catch (Exception ignored) {{
+            }}
+        }}
         return -1;
-    }} finally {{
-        if (conn != null) conn.disconnect();
     }}
 }}
 
-void cleanScreenshots(String[] dirs, File latestFile, String latestName, long mtime) {{
-    long waitMs = 1000L - (System.currentTimeMillis() - mtime);
-    if (waitMs > 0L) {{
-        try {{
-            Thread.sleep(waitMs);
-        }} catch (Exception e) {{
+boolean hasValidImageTrailer(File f) {{
+    RandomAccessFile raf = null;
+    boolean ok = false;
+    try {{
+        if (f == null || !f.exists()) return false;
+        long flen = f.length();
+        if (flen < 100L) return false;
+        String lower = f.getName().toLowerCase();
+        boolean isPng = lower.endsWith(".png");
+        boolean isJpg = lower.endsWith(".jpg") || lower.endsWith(".jpeg");
+        if (!isPng && !isJpg) return true;
+        raf = new RandomAccessFile(f, "r");
+        long maxTail = isPng ? 32L : 8L;
+        int n = (flen < maxTail) ? (int) flen : (int) maxTail;
+        raf.seek(flen - n);
+        int m = 0;
+        for (int i = 0; i < n; i++) {{
+            int b = raf.read();
+            if (b < 0) break;
+            if (isPng) {{
+                if (m == 0 && b == 73) m = 1;
+                else if (m == 1 && b == 69) m = 2;
+                else if (m == 2 && b == 78) m = 3;
+                else if (m == 3 && b == 68) m = 4;
+                else if (m == 4 && b == 174) m = 5;
+                else if (m == 5 && b == 66) m = 6;
+                else if (m == 6 && b == 96) m = 7;
+                else if (m == 7 && b == 130) {{ ok = true; break; }}
+                else m = (b == 73) ? 1 : 0;
+            }} else {{
+                if (m == 1 && b == 217) {{ ok = true; break; }}
+                m = (b == 255) ? 1 : 0;
+            }}
+        }}
+    }} catch (Exception e) {{
+        ok = false;
+    }} finally {{
+        if (raf != null) {{
+            try {{
+                raf.close();
+            }} catch (Exception ignored) {{
+            }}
         }}
     }}
+    return ok;
+}}
+
+boolean cleanScreenshots(String[] dirs, File latestFile, String latestName) {{
+    boolean deleted = false;
     if (latestFile != null) {{
         try {{
-            latestFile.delete();
+            deleted = latestFile.delete();
         }} catch (Exception e) {{
         }}
     }}
@@ -944,6 +1017,7 @@ void cleanScreenshots(String[] dirs, File latestFile, String latestName, long mt
             }}
         }}
     }}
+    return deleted;
 }}
 
 JSONObject cfg = loadConfig();
@@ -960,14 +1034,18 @@ if (cfg.optLong("busy_until", 0L) < minLease) {{
 long runStartMs = cfg.optLong("run_start_ms", System.currentTimeMillis() - 5000L);
 String lastSsName = cfg.optString("last_ss_name", "");
 long lastSsMtime = cfg.optLong("last_ss_mtime", 0L);
+boolean lastSsDeleted = cfg.optBoolean("last_ss_deleted", false);
 
 String[] dirs = new String[]{{
+    "{SCREENSHOT_DIR}",
     "/storage/emulated/0/DCIM/Screenshots",
     "/storage/emulated/0/Pictures/Screenshots"
 }};
 
 long waitStart = System.currentTimeMillis();
+long firstCandMs = 0L;
 File latest = null;
+boolean latestReady = false;
 while (System.currentTimeMillis() - waitStart < 3800L) {{
     File cand = null;
     for (int i = 0; i < dirs.length; i++) {{
@@ -978,9 +1056,12 @@ while (System.currentTimeMillis() - waitStart < 3800L) {{
         for (int j = 0; j < files.length; j++) {{
             File f = files[j];
             String n = f.getName();
-            if (f.isFile() && n.startsWith("Screenshot") && f.length() > 5000L) {{
+            boolean isPrivateFrame = (i == 0) && (n.equals("{SCREENSHOT_FILE_BASE}.png") || n.equals("{SCREENSHOT_FILE_BASE}.jpg"));
+            boolean isSysShot = n.startsWith("Screenshot");
+            if (f.isFile() && (isPrivateFrame || isSysShot) && f.length() > 5000L) {{
                 long lm = f.lastModified();
-                if (lm >= runStartMs - 2500L && (!n.equals(lastSsName) || lm > lastSsMtime)) {{
+                boolean acceptNew = lastSsDeleted || !n.equals(lastSsName) || lm > lastSsMtime;
+                if (lm >= runStartMs - 2500L && acceptNew) {{
                     if (cand == null || lm > cand.lastModified()) {{
                         cand = f;
                     }}
@@ -990,15 +1071,31 @@ while (System.currentTimeMillis() - waitStart < 3800L) {{
     }}
     if (cand != null) {{
         latest = cand;
-        break;
+        if (firstCandMs == 0L) {{
+            firstCandMs = System.currentTimeMillis();
+        }}
+        if (hasValidImageTrailer(latest)) {{
+            latestReady = true;
+            break;
+        }}
+        if (System.currentTimeMillis() - firstCandMs >= 1800L) {{
+            break;
+        }}
+        Thread.sleep(20L);
+    }} else {{
+        Thread.sleep(40L);
     }}
-    Thread.sleep(150L);
 }}
 
 if (latest == null) {{
     cfg.put("last_state", "NO_SCREENSHOT");
+    cfg.put("pending_status_text", "");
     saveConfig(cfg);
     return "WAIT";
+}}
+
+if (!latestReady) {{
+    latestReady = hasValidImageTrailer(latest);
 }}
 
 String latestName = latest.getName();
@@ -1006,16 +1103,28 @@ long latestMtime = latest.lastModified();
 cfg.put("last_ss_name", latestName);
 cfg.put("last_ss_mtime", latestMtime);
 
-Bitmap bmp = null;
-for (int attempt = 0; attempt < 5; attempt++) {{
-    bmp = BitmapFactory.decodeFile(latest.getAbsolutePath());
-    if (bmp != null) break;
-    Thread.sleep(120L);
+if (!latestReady) {{
+    boolean deletedNow = cleanScreenshots(dirs, latest, latestName);
+    cfg.put("last_ss_deleted", deletedNow);
+    cfg.put("last_state", "TRUNCATED_SS");
+    cfg.put("pending_status_text", "");
+    saveConfig(cfg);
+    return "WAIT";
 }}
 
+Bitmap bmp = null;
+for (int attempt = 0; attempt < 6; attempt++) {{
+    bmp = BitmapFactory.decodeFile(latest.getAbsolutePath());
+    if (bmp != null) break;
+    Thread.sleep(35L);
+}}
+
+boolean deletedNow = cleanScreenshots(dirs, latest, latestName);
+cfg.put("last_ss_deleted", deletedNow);
+
 if (bmp == null) {{
-    cleanScreenshots(dirs, latest, latestName, latestMtime);
     cfg.put("last_state", "DECODE_ERR");
+    cfg.put("pending_status_text", "");
     saveConfig(cfg);
     return "WAIT";
 }}
@@ -1061,7 +1170,6 @@ try {{
         cfg.put("white_count", 0);
         cfg.put("loading_count", 0);
     }}
-{_BSH_PROGRESS_HELPER}
     String prepareStepStatus(JSONObject cfg, long targetCid, long adminId, String adminText, int userPct) {{
         if (targetCid == adminId) {{
             return adminText;
@@ -1074,28 +1182,31 @@ try {{
         cfg.put("progress_pct", userPct);
         return formatProgress("⏳ Generating QR code...", userPct);
     }}
-    void updateStepStatus(long targetCid, long targetMid, String text) {{
-        if (text != null) {{
-            updateStatus(targetCid, targetMid, text);
+    void queueStepStatus(JSONObject cfg, String text) throws Exception {{
+        if (text != null && text.length() > 0) {{
+            cfg.put("pending_status_text", text);
+        }} else {{
+            cfg.put("pending_status_text", "");
         }}
     }}
     String prepareWaitNudge(JSONObject cfg, long targetCid, long adminId, int waitStep, int capPct) {{
         if (targetCid == adminId) return null;
-        if (waitStep != 2 && waitStep != 4) return null;
+        if (waitStep != 2 && waitStep != 5) return null;
         int nextPct = cfg.optInt("progress_pct", 0) + 10;
         if (nextPct > capPct) nextPct = capPct;
         return prepareStepStatus(cfg, targetCid, adminId, null, nextPct);
     }}
-    String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits, int waitCapPct, long cid, long statusMsgId, long adminId) throws Exception {{
+    String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits, int waitCapPct, long cid, long adminId) throws Exception {{
         int cnt = cfg.optInt(countKey, 0) + 1;
         cfg.put(countKey, cnt);
         cfg.put("last_state", stateName);
         if (cnt <= maxWaits) {{
             String waitText = prepareWaitNudge(cfg, cid, adminId, cnt, waitCapPct);
+            queueStepStatus(cfg, waitText);
             saveConfig(cfg);
-            updateStepStatus(cid, statusMsgId, waitText);
             return "WAIT";
         }}
+        queueStepStatus(cfg, null);
         if (cnt == maxWaits + 1) {{
             saveConfig(cfg);
             return "CLICK_BACK";
@@ -1128,15 +1239,15 @@ try {{
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
             String stepText = prepareStepStatus(cfg, cid, adminId, "🖥️ Entering Virtual Master...", 20);
+            queueStepStatus(cfg, stepText);
             saveConfig(cfg);
-            updateStepStatus(cid, statusMsgId, stepText);
             return "CLICK_ENTER";
         }}
         cfg.put("last_state", "VM_LOADING");
         resetWaitCounters(cfg);
         String waitText = ((stepCount & 1) == 0) ? prepareWaitNudge(cfg, cid, adminId, 2, 20) : null;
+        queueStepStatus(cfg, waitText);
         saveConfig(cfg);
-        updateStepStatus(cid, statusMsgId, waitText);
         return "WAIT";
     }}
 
@@ -1147,6 +1258,7 @@ try {{
         cfg.put("last_state", "VM_POPUP");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
+        queueStepStatus(cfg, null);
         saveConfig(cfg);
         return "DISMISS_POPUP";
     }}
@@ -1156,6 +1268,7 @@ try {{
         cfg.put("last_state", "RESET");
         cfg.put("busy_until", 0L);
         resetWaitCounters(cfg);
+        queueStepStatus(cfg, null);
         saveConfig(cfg);
         return "DONE_RESET";
     }}
@@ -1186,12 +1299,11 @@ try {{
                 cfg.put("other_count", 0);
                 resetWaitCounters(cfg);
                 String stepText = prepareStepStatus(cfg, cid, adminId, "🔄 Refreshing stale QR screen...", 50);
+                queueStepStatus(cfg, stepText);
                 saveConfig(cfg);
-                updateStepStatus(cid, statusMsgId, stepText);
                 return "CLOSE_MODAL";
             }}
-            String sendText = prepareStepStatus(cfg, cid, adminId, "📸 Cropping & sending QR...", 90);
-            updateStepStatus(cid, statusMsgId, sendText);
+            queueStepStatus(cfg, null);
             int cx = px(130);
             int cy = py(445);
             int cw = px(590) - cx;
@@ -1211,6 +1323,7 @@ try {{
             }}
             long popNextCid = 0L;
             long popNextMid = 0L;
+            String nextText = null;
             boolean hasNext = false;
             synchronized (System.class) {{
                 JSONObject latestCfg = loadConfig();
@@ -1234,6 +1347,10 @@ try {{
                     cfg.put("busy_until", System.currentTimeMillis() + 45000L);
                     cfg.put("last_state", "NEXT_IN_QUEUE");
                     cfg.put("progress_pct", (popNextCid == adminId) ? 0 : 70);
+                    nextText = (popNextCid == adminId)
+                        ? "🔄 Generating QR code for your request..."
+                        : formatProgress("⏳ Generating QR code...", 70);
+                    queueStepStatus(cfg, nextText);
                     saveConfig(cfg);
                     hasNext = true;
                 }} else {{
@@ -1247,17 +1364,13 @@ try {{
                 }}
             }}
             if (hasNext) {{
-                String nextText = (popNextCid == adminId)
-                    ? "🔄 Generating QR code for your request..."
-                    : formatProgress("⏳ Generating QR code...", 70);
-                updateStatus(popNextCid, popNextMid, nextText);
                 return "CLOSE_MODAL";
             }} else {{
                 return "DONE";
             }}
         }}
         cfg.put("white_count", 0);
-        return handleLoadingWait(cfg, "loading_count", "QR_LOADING", 6, 80, cid, statusMsgId, adminId);
+        return handleLoadingWait(cfg, "loading_count", "QR_LOADING", 9, 80, cid, adminId);
     }}
 
     // 6. Check VM Home Screen (Telcell icon orange pixels)
@@ -1279,8 +1392,8 @@ try {{
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
             String stepText = prepareStepStatus(cfg, cid, adminId, "🚀 Launching Telcell Wallet...", 30);
+            queueStepStatus(cfg, stepText);
             saveConfig(cfg);
-            updateStepStatus(cid, statusMsgId, stepText);
             return (o1 >= 15) ? "LAUNCH_1" : "LAUNCH_2";
         }}
     }}
@@ -1302,14 +1415,14 @@ try {{
             }}
             if (spinner >= 3) {{
                 cfg.put("white_count", 0);
-                return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 6, 40, cid, statusMsgId, adminId);
+                return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 9, 40, cid, adminId);
             }}
             cfg.put("last_state", "PIN_PAD");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
             String stepText = prepareStepStatus(cfg, cid, adminId, "🔐 Entering PIN...", 50);
+            queueStepStatus(cfg, stepText);
             saveConfig(cfg);
-            updateStepStatus(cid, statusMsgId, stepText);
             return "ENTER_PIN";
         }}
     }}
@@ -1319,7 +1432,7 @@ try {{
     if (dashNav) {{
         if (isWhite(200, 300) && isWhite(580, 415) && isWhite(360, 800)) {{
             cfg.put("white_count", 0);
-            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6, 50, cid, statusMsgId, adminId);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
         }}
         int svcLow = 0;
         int svcHigh = 0;
@@ -1332,9 +1445,9 @@ try {{
                 if (getR(x, y) > 200 && getG(x, y) >= 70 && getG(x, y) <= 165 && getB(x, y) < 125) svcHigh++;
             }}
         }}
-        if (svcLow < 3 && svcHigh < 3 && cfg.optInt("loading_count", 0) < 3) {{
+        if (svcLow < 3 && svcHigh < 3 && cfg.optInt("loading_count", 0) < 5) {{
             cfg.put("white_count", 0);
-            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6, 50, cid, statusMsgId, adminId);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
         }}
         cfg.put("qr_was_closed", true);
         cfg.put("other_count", 0);
@@ -1342,8 +1455,8 @@ try {{
         boolean useLow = (svcLow >= 3) || (svcHigh < 3 && isWhite(360, 1100) && !isWhite(360, 800));
         cfg.put("last_state", useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH");
         String stepText = prepareStepStatus(cfg, cid, adminId, "📲 Opening Transport tickets...", 60);
+        queueStepStatus(cfg, stepText);
         saveConfig(cfg);
-        updateStepStatus(cid, statusMsgId, stepText);
         return useLow ? "CLICK_TRANSPORT_LOW" : "CLICK_TRANSPORT_HIGH";
     }}
 
@@ -1354,15 +1467,15 @@ try {{
     if ((buyBtnOrange || availTabOrange) && ticketBgGray) {{
         if (getR(360, 400) < 252 || getG(360, 400) < 252 || getB(360, 400) < 252) {{
             cfg.put("white_count", 0);
-            return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 6, 70, cid, statusMsgId, adminId);
+            return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 9, 70, cid, adminId);
         }}
         cfg.put("qr_was_closed", true);
         cfg.put("last_state", "TICKET_LIST");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Selecting ticket...", 80);
+        queueStepStatus(cfg, stepText);
         saveConfig(cfg);
-        updateStepStatus(cid, statusMsgId, stepText);
         return "CLICK_TICKET_ROW";
     }}
 
@@ -1375,8 +1488,8 @@ try {{
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Switching to Available tickets...", 70);
+        queueStepStatus(cfg, stepText);
         saveConfig(cfg);
-        updateStepStatus(cid, statusMsgId, stepText);
         return "CLICK_AVAILABLE_TAB";
     }}
 
@@ -1390,7 +1503,7 @@ try {{
         }}
         if (whiteHits >= 34) {{
             cfg.put("loading_count", 0);
-            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", 5, 40, cid, statusMsgId, adminId);
+            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", 7, 40, cid, adminId);
         }}
     }}
 
@@ -1399,11 +1512,12 @@ try {{
     cfg.put("other_count", otherCount);
     cfg.put("last_state", "OTHER");
     resetWaitCounters(cfg);
+    queueStepStatus(cfg, null);
     saveConfig(cfg);
-    if (otherCount == 1 || otherCount == 3) {{
+    if (otherCount <= 2 || otherCount == 4) {{
         return "WAIT";
     }}
-    if (otherCount == 2) {{
+    if (otherCount == 3) {{
         return "CLICK_BACK";
     }}
     cfg.put("other_count", 0);
@@ -1411,59 +1525,83 @@ try {{
     return "RESET_TO_HOME";
 }} finally {{
     bmp.recycle();
-    cleanScreenshots(dirs, latest, latestName, latestMtime);
+    if (!deletedNow) cleanScreenshots(dirs, latest, latestName);
 }}
 """
+    )
+
+
+def build_post_step_script() -> str:
+    """BeanShell Java 7 script overlapping status edits with post-tap settle pause."""
+    return (
+        'import java.io.*;\n'
+        'import java.net.HttpURLConnection;\n'
+        'import java.net.URL;\n'
+        'import org.json.JSONArray;\n'
+        'import org.json.JSONObject;\n\n'
+        'String botToken = "{lv=bot_token}".trim();\n'
+        'String stepCmd = "{lv=step_cmd}".trim();\n'
+        'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
+        + _BSH_READ_STREAM
+        + "\n\n"
+        + _BSH_TG_HTTP_HELPERS
+        + "\n\n"
+        + _BSH_WORKER_CONFIG_HELPERS
+        + """
+
+long t0 = System.currentTimeMillis();
+long waitMs = 350L;
+if (stepCmd.equals("WAIT")) waitMs = 300L;
+else if (stepCmd.equals("DISMISS_POPUP")) waitMs = 350L;
+else if (stepCmd.equals("CLOSE_MODAL") || stepCmd.equals("CLICK_BACK") || stepCmd.equals("RESET_TO_HOME")) waitMs = 450L;
+else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 600L;
+else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
+else if (stepCmd.equals("CLICK_TRANSPORT_LOW") || stepCmd.equals("CLICK_TRANSPORT_HIGH")) waitMs = 750L;
+else if (stepCmd.equals("CLICK_ENTER")) waitMs = 900L;
+else if (stepCmd.equals("ENTER_PIN")) waitMs = 1000L;
+else if (stepCmd.equals("LAUNCH_1") || stepCmd.equals("LAUNCH_2")) waitMs = 1100L;
+
+JSONObject cfg = loadConfig();
+String pendingText = cfg.optString("pending_status_text", "");
+if (pendingText.length() > 0) {
+    long cid = cfg.optLong("active_chat_id", 0L);
+    long mid = cfg.optLong("status_message_id", 0L);
+    cfg.put("pending_status_text", "");
+    saveConfig(cfg);
+    updateStatus(cid, mid, pendingText);
+}
+
+long rem = waitMs - (System.currentTimeMillis() - t0);
+if (rem > 0L) {
+    try {
+        Thread.sleep(rem);
+    } catch (Exception e) {
+    }
+}
+return "OK";
+"""
+    )
 
 
 def build_timeout_script() -> str:
     """BeanShell Java 7 post-loop guard to clear busy lock and report timeouts."""
-    return f"""import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import org.json.JSONArray;
-import org.json.JSONObject;
+    return (
+        'import java.io.*;\n'
+        'import java.net.HttpURLConnection;\n'
+        'import java.net.URL;\n'
+        'import org.json.JSONArray;\n'
+        'import org.json.JSONObject;\n\n'
+        'String botToken = "{lv=bot_token}".trim();\n'
+        'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n'
+        'String stepCmd = "{lv=step_cmd}".trim();\n\n'
+        + _BSH_READ_STREAM
+        + "\n\n"
+        + _BSH_FRAME_HELPER
+        + "\n\n"
+        + _BSH_TG_HTTP_HELPERS
+        + """
 
-String botToken = "{{lv=bot_token}}".trim();
-String configPath = "/storage/emulated/0/Download/komobot_config.json";
-String stepCmd = "{{lv=step_cmd}}".trim();
-
-String readStream(InputStream is) throws Exception {{
-    if (is == null) return "";
-    BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-    StringBuilder sb = new StringBuilder();
-    String line;
-    while ((line = br.readLine()) != null) sb.append(line);
-    br.close();
-    return sb.toString();
-}}
-
-void editTgMsg(String token, long chatId, long msgId, String text) {{
-    if (chatId <= 0L || msgId <= 0L) return;
-    HttpURLConnection conn = null;
-    try {{
-        URL url = new URL("https://api.telegram.org/bot" + token + "/editMessageText");
-        conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(6000);
-        conn.setReadTimeout(6000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        JSONObject payload = new JSONObject();
-        payload.put("chat_id", chatId);
-        payload.put("message_id", msgId);
-        payload.put("text", text);
-        OutputStream os = conn.getOutputStream();
-        os.write(payload.toString().getBytes("UTF-8"));
-        os.flush();
-        os.close();
-        conn.getResponseCode();
-    }} catch (Exception e) {{
-    }} finally {{
-        if (conn != null) conn.disconnect();
-    }}
-}}
-
+deletePrivateFrames();
 File f = new File(configPath);
 if (!f.exists()) return "OK";
 
@@ -1479,10 +1617,11 @@ long cid = cfg.optLong("active_chat_id", 0L);
 long mid = cfg.optLong("status_message_id", 0L);
 String lastState = cfg.optString("last_state", "UNKNOWN");
 
-if (busyUntil > 0L || stepCmd.equals("DONE_RESET")) {{
+if (busyUntil > 0L || stepCmd.equals("DONE_RESET")) {
     JSONArray queue = cfg.optJSONArray("queue");
     cfg.put("busy_until", 0L);
     cfg.put("queue", new JSONArray());
+    cfg.put("pending_status_text", "");
     FileOutputStream fos = new FileOutputStream(f);
     OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
     osw.write(cfg.toString(2));
@@ -1494,22 +1633,23 @@ if (busyUntil > 0L || stepCmd.equals("DONE_RESET")) {{
         : (cid == adminId
             ? "❌ Timed out waiting for QR screen (last state: " + lastState + "). Please try again."
             : "❌ Timed out generating QR code. Please try again.");
-    editTgMsg(botToken, cid, mid, msg);
+    updateStatus(cid, mid, msg);
 
-    if (queue != null) {{
+    if (queue != null) {
         String qMsg = stepCmd.equals("DONE_RESET")
             ? "❌ Request cancelled by VM reset. Please try again."
             : "❌ Previous request timed out. Please try again.";
-        for (int qi = 0; qi < queue.length(); qi++) {{
+        for (int qi = 0; qi < queue.length(); qi++) {
             JSONObject qItem = queue.optJSONObject(qi);
-            if (qItem != null) {{
-                editTgMsg(botToken, qItem.optLong("chat_id", 0L), qItem.optLong("status_message_id", 0L), qMsg);
-            }}
-        }}
-    }}
-}}
+            if (qItem != null) {
+                updateStatus(qItem.optLong("chat_id", 0L), qItem.optLong("status_message_id", 0L), qMsg);
+            }
+        }
+    }
+}
 return "OK";
 """
+    )
 
 
 def build_macro(
@@ -1550,17 +1690,16 @@ def build_macro(
         make_java_action(sg, build_router_script(), response_var="bot_action")
     )
 
-    # 3. If bot_action == "RUN"
+    # 3. If bot_action == "RUN": wake screen and launch VM immediately, overlapping initial status send
     actions.append(make_if_var_equals(sg, "bot_action", "RUN"))
     actions.append(make_screen_on(sg, screen_off=False))
     actions.append(
         make_launch_app(sg, "Virtual Master", "com.clone.android.dual.space")
     )
-    actions.append(make_pause(sg, seconds=1, millis=200))
+    actions.append(make_java_action(sg, build_init_status_script()))
 
-    # 4. Vision state loop (up to 32 iterations)
-    actions.append(make_loop(sg, 32))
-    actions.append(make_screen_on(sg, screen_off=False))
+    # 4. Vision state loop (up to 45 iterations; ScreenOn in Stage 3 holds screen awake)
+    actions.append(make_loop(sg, 45))
     actions.append(make_take_screenshot(sg))
     actions.append(make_java_action(sg, build_vision_script(), response_var="step_cmd"))
 
@@ -1569,14 +1708,12 @@ def build_macro(
         actions.extend(branch_actions)
         actions.append(make_end_if(sg))
 
+    # Close QR modal only on DONE to keep Telcell Ticket List foregrounded across runs
     add_cmd_branch(
         "DONE",
         [
             make_click_xy(sg, 626, 121),
-            make_pause(sg, millis=500),
-            make_click_xy(sg, 151, 1553),
-            make_pause(sg, millis=500),
-            make_click_xy(sg, 360, 1553),
+            make_pause(sg, millis=250),
             make_break_loop(sg),
         ],
     )
@@ -1584,30 +1721,18 @@ def build_macro(
         "DONE_RESET",
         [
             make_click_xy(sg, 626, 121),
-            make_pause(sg, millis=300),
+            make_pause(sg, millis=200),
             make_click_xy(sg, 151, 1553),
-            make_pause(sg, millis=300),
+            make_pause(sg, millis=200),
             make_click_xy(sg, 360, 1553),
+            make_pause(sg, millis=200),
             make_break_loop(sg),
         ],
     )
-    add_cmd_branch(
-        "CLICK_ENTER",
-        [
-            make_click_text(sg, "Enter", blocking=False),
-            make_click_xy(sg, 627, 250),
-            make_pause(sg, seconds=2),
-        ],
-    )
-    add_cmd_branch(
-        "DISMISS_POPUP", [make_click_xy(sg, 100, 200), make_pause(sg, millis=500)]
-    )
-    add_cmd_branch(
-        "LAUNCH_1", [make_click_xy(sg, 97, 382), make_pause(sg, seconds=2, millis=500)]
-    )
-    add_cmd_branch(
-        "LAUNCH_2", [make_click_xy(sg, 97, 142), make_pause(sg, seconds=2, millis=500)]
-    )
+    add_cmd_branch("CLICK_ENTER", [make_click_xy(sg, 627, 250)])
+    add_cmd_branch("DISMISS_POPUP", [make_click_xy(sg, 100, 200)])
+    add_cmd_branch("LAUNCH_1", [make_click_xy(sg, 97, 382)])
+    add_cmd_branch("LAUNCH_2", [make_click_xy(sg, 97, 142)])
 
     pin_actions: list[dict] = [
         make_extract_text(sg, "{lv=app_pin}", "^(\\d)", "pin_d1"),
@@ -1623,38 +1748,19 @@ def build_macro(
             pin_actions.append(make_click_xy(sg, px, py))
             pin_actions.append(make_end_if(sg))
         if idx < len(pin_vars) - 1:
-            pin_actions.append(make_pause(sg, millis=450))
-        else:
-            pin_actions.append(make_pause(sg, seconds=2, millis=500))
+            pin_actions.append(make_pause(sg, millis=400))
     add_cmd_branch("ENTER_PIN", pin_actions)
 
-    add_cmd_branch(
-        "CLICK_TRANSPORT_LOW",
-        [make_click_xy(sg, 360, 1100), make_pause(sg, seconds=1, millis=500)],
-    )
-    add_cmd_branch(
-        "CLICK_TRANSPORT_HIGH",
-        [make_click_xy(sg, 360, 840), make_pause(sg, seconds=1, millis=500)],
-    )
-    add_cmd_branch(
-        "CLICK_AVAILABLE_TAB",
-        [make_click_xy(sg, 277, 200), make_pause(sg, seconds=1, millis=500)],
-    )
-    add_cmd_branch(
-        "CLICK_TICKET_ROW",
-        [make_click_xy(sg, 360, 400), make_pause(sg, seconds=1, millis=200)],
-    )
-    add_cmd_branch(
-        "CLOSE_MODAL", [make_click_xy(sg, 626, 121), make_pause(sg, millis=800)]
-    )
-    add_cmd_branch(
-        "CLICK_BACK", [make_click_xy(sg, 151, 1553), make_pause(sg, millis=800)]
-    )
-    add_cmd_branch(
-        "RESET_TO_HOME", [make_click_xy(sg, 360, 1553), make_pause(sg, millis=800)]
-    )
-    add_cmd_branch("WAIT", [make_pause(sg, seconds=1)])
+    add_cmd_branch("CLICK_TRANSPORT_LOW", [make_click_xy(sg, 360, 1100)])
+    add_cmd_branch("CLICK_TRANSPORT_HIGH", [make_click_xy(sg, 360, 840)])
+    add_cmd_branch("CLICK_AVAILABLE_TAB", [make_click_xy(sg, 277, 200)])
+    add_cmd_branch("CLICK_TICKET_ROW", [make_click_xy(sg, 360, 400)])
+    add_cmd_branch("CLOSE_MODAL", [make_click_xy(sg, 626, 121)])
+    add_cmd_branch("CLICK_BACK", [make_click_xy(sg, 151, 1553)])
+    add_cmd_branch("RESET_TO_HOME", [make_click_xy(sg, 360, 1553)])
+    add_cmd_branch("WAIT", [make_pause(sg, millis=50)])
 
+    actions.append(make_java_action(sg, build_post_step_script()))
     actions.append(make_end_loop(sg))
 
     # 5. Post-loop timeout & reset completion guard

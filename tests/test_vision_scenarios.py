@@ -10,6 +10,7 @@ import generate_macro as gm
 from tests.bsh_runtime import MockAndroidEnv, MockBitmap, run_bsh_script
 
 VISION_SCRIPT = gm.build_vision_script()
+POST_STEP_SCRIPT = gm.build_post_step_script()
 ADMIN_ID = 111222333
 USER_2 = 222333444
 USER_3 = 555666777
@@ -184,7 +185,14 @@ class TestVisionScenarios(unittest.TestCase):
             size=size,
             with_thumbnail=with_thumb,
         )
-        return run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        cmd = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        if cmd not in ("DONE", "DONE_RESET"):
+            run_bsh_script(
+                POST_STEP_SCRIPT,
+                self.env,
+                {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+            )
+        return cmd
 
     def test_cold_start_full_navigation_to_qr_sent(self) -> None:
         expected_steps = [
@@ -240,16 +248,16 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(cfg["last_state"], "PIN_PAD")
         self.assertEqual(cfg["white_count"], 0)
 
-    def test_regression_unloaded_dashboard_waits_three_ticks_before_fallback(
+    def test_regression_unloaded_dashboard_waits_five_ticks_before_fallback(
         self,
     ) -> None:
-        for expected_count in (1, 2, 3):
+        for expected_count in (1, 2, 3, 4, 5):
             self.assertEqual(self._step(ScreenFactory.dashboard("unloaded")), "WAIT")
             cfg = self.env.read_config()
             self.assertEqual(cfg["last_state"], "DASH_LOADING")
             self.assertEqual(cfg["loading_count"], expected_count)
 
-        # On 4th tick without icons, falls back to LOW tap and clears wait counters
+        # On 6th tick without icons, falls back to LOW tap and clears wait counters
         self.assertEqual(
             self._step(ScreenFactory.dashboard("unloaded")), "CLICK_TRANSPORT_LOW"
         )
@@ -259,18 +267,20 @@ class TestVisionScenarios(unittest.TestCase):
     def test_regression_white_loading_bounded_recovery_and_dense_screen_escape(
         self,
     ) -> None:
-        # Blank white transition screen: 5x WAIT -> CLICK_BACK -> WAIT -> RESET_TO_HOME
-        seq = [self._step(ScreenFactory.white_blank()) for _ in range(8)]
-        self.assertEqual(seq, ["WAIT"] * 5 + ["CLICK_BACK", "WAIT", "RESET_TO_HOME"])
+        # Blank white transition screen: 7x WAIT -> CLICK_BACK -> WAIT -> RESET_TO_HOME
+        seq = [self._step(ScreenFactory.white_blank()) for _ in range(10)]
+        self.assertEqual(seq, ["WAIT"] * 7 + ["CLICK_BACK", "WAIT", "RESET_TO_HOME"])
         cfg = self.env.read_config()
         self.assertEqual(cfg["last_state"], "WHITE_LOADING")
         self.assertEqual(cfg["white_count"], 0)
 
         # Dense multi-column UI (ProductsFragment): avoids WHITE_LOADING loop
         other_seq = [
-            self._step(ScreenFactory.dense_white_products_screen()) for _ in range(4)
+            self._step(ScreenFactory.dense_white_products_screen()) for _ in range(5)
         ]
-        self.assertEqual(other_seq, ["WAIT", "CLICK_BACK", "WAIT", "RESET_TO_HOME"])
+        self.assertEqual(
+            other_seq, ["WAIT", "WAIT", "CLICK_BACK", "WAIT", "RESET_TO_HOME"]
+        )
         self.assertEqual(self.env.read_config()["last_state"], "OTHER")
         self.assertEqual(self.env.read_config()["other_count"], 0)
 
@@ -335,9 +345,9 @@ class TestVisionScenarios(unittest.TestCase):
         ):
             self.setUp()
             self._seed_active_run(step_count=1)
-            cmds = [self._step(loader()) for _ in range(9)]
+            cmds = [self._step(loader()) for _ in range(12)]
             self.assertEqual(
-                cmds, ["WAIT"] * 6 + ["CLICK_BACK", "WAIT", "RESET_TO_HOME"]
+                cmds, ["WAIT"] * 9 + ["CLICK_BACK", "WAIT", "RESET_TO_HOME"]
             )
             self.assertEqual(self.env.read_config()["loading_count"], 0)
 
@@ -443,11 +453,60 @@ class TestVisionScenarios(unittest.TestCase):
 
         cfg = self.env.read_config()
         self.assertEqual(cfg["step_count"], 30)
-        self.assertLessEqual(cfg["step_count"], 32)
+        self.assertLessEqual(cfg["step_count"], 45)
         self.assertEqual(cfg["busy_until"], 0)
         self.assertEqual(
             len([c for c in self.env.tg_calls if c["method"] == "sendPhoto"]), 1
         )
+
+    def test_private_frame_same_second_no_1s_sleep_and_http_keep_alive(self) -> None:
+        # Consecutive private frames with identical 1s-quantized FUSE mtime must
+        # resolve without blocking 1000ms, overlap intermediate edit into PostStep,
+        # and leave Keep-Alive connections un-disconnected on clean responses.
+        self._seed_active_run(step_count=0)
+        fixed_sec_mtime = self.env.now_ms
+        t_start = self.env.now_ms
+        self.env.add_screenshot(
+            "frame.png",
+            ScreenFactory.ticket_list(card_loaded=True),
+            mtime_ms=fixed_sec_mtime,
+            directory="/storage/emulated/0/komobot_ss",
+        )
+        self.assertEqual(
+            run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS), "CLICK_TICKET_ROW"
+        )
+        elapsed_vision1 = self.env.now_ms - t_start
+        self.assertLess(elapsed_vision1, 100)
+        self.assertNotIn("/storage/emulated/0/komobot_ss/frame.png", self.env.files)
+        self.assertTrue(self.env.read_config()["last_ss_deleted"])
+        # Status edit is deferred to POST_STEP_SCRIPT (zero pre-tap Telegram blocking)
+        self.assertEqual(self.env.tg_calls, [])
+        self.assertEqual(
+            run_bsh_script(
+                POST_STEP_SCRIPT,
+                self.env,
+                {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": "CLICK_TICKET_ROW"},
+            ),
+            "OK",
+        )
+        self.assertEqual(len(self.env.tg_calls), 1)
+        self.assertEqual(self.env.tg_calls[0]["method"], "editMessageText")
+
+        t_step2 = self.env.now_ms
+        self.env.add_screenshot(
+            "frame.png",
+            ScreenFactory.qr_modal(loaded=True),
+            mtime_ms=fixed_sec_mtime,
+            directory="/storage/emulated/0/komobot_ss",
+        )
+        self.assertEqual(run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS), "DONE")
+        elapsed_vision2 = self.env.now_ms - t_step2
+        self.assertLess(elapsed_vision2, 100)
+        self.assertNotIn("/storage/emulated/0/komobot_ss/frame.png", self.env.files)
+        for conn in self.env.http_connections:
+            self.assertTrue(conn["stream_read"])
+            self.assertTrue(conn["stream_closed"])
+            self.assertFalse(conn["disconnected"])
 
     def test_regular_user_progress_bar_monotonic_and_admin_logs_preserved(self) -> None:
         self._seed_active_run(
@@ -493,7 +552,7 @@ class TestVisionScenarios(unittest.TestCase):
             ],
         )
 
-        # QR upload hits 90%, deletes USER_2 status, and notifies queued ADMIN_ID
+        # QR upload sends photo directly and deletes status without redundant 90% edit
         self.env.tg_calls.clear()
         self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
         user2_qr_edits = [
@@ -501,9 +560,7 @@ class TestVisionScenarios(unittest.TestCase):
             for c in self.env.tg_calls
             if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_2
         ]
-        self.assertEqual(
-            user2_qr_edits, ["⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜ 90%"]
-        )
+        self.assertEqual(user2_qr_edits, [])
         deletes = [
             c["payload"]["chat_id"]
             for c in self.env.tg_calls
@@ -530,9 +587,7 @@ class TestVisionScenarios(unittest.TestCase):
             for c in self.env.tg_calls
             if c["method"] == "editMessageText" and c["payload"]["chat_id"] == ADMIN_ID
         ]
-        self.assertEqual(
-            admin_step_edits, ["🎫 Selecting ticket...", "📸 Cropping & sending QR..."]
-        )
+        self.assertEqual(admin_step_edits, ["🎫 Selecting ticket..."])
         user3_handoff = [
             c["payload"]["text"]
             for c in self.env.tg_calls
@@ -542,7 +597,7 @@ class TestVisionScenarios(unittest.TestCase):
             user3_handoff, ["⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩⬜⬜⬜ 70%"]
         )
 
-        # USER_3 finishes with 80% -> 90% progress bar and no admin internal logs
+        # USER_3 finishes with 80% progress bar and photo upload (no internal logs)
         self.env.tg_calls.clear()
         self.assertEqual(
             self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
@@ -557,12 +612,43 @@ class TestVisionScenarios(unittest.TestCase):
             user3_edits,
             [
                 "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 80%",
-                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜ 90%",
             ],
         )
         for text in user2_edits + user2_qr_edits + user3_handoff + user3_edits:
             for leak in ("Virtual Master", "Telcell", "PIN", "Transport", "ticket"):
                 self.assertNotIn(leak, text)
+
+    def test_truncated_private_png_ignored_and_cleaned(self) -> None:
+        """Truncated PNG without IEND must not decode black rows as VM_LAUNCHER."""
+        self._seed_active_run()
+        partial_bmp = MockBitmap(720, 1600, (0, 0, 0))
+        partial_bmp.fill_rect(595, 235, 670, 265, 107, 146, 208)
+        frame_path = self.env.add_screenshot(
+            "frame.png",
+            partial_bmp,
+            size=131_326,
+            directory="/storage/emulated/0/komobot_ss",
+            truncated=True,
+        )
+        t0 = self.env.now_ms
+        cmd = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        self.assertEqual(cmd, "WAIT")
+        self.assertGreaterEqual(self.env.now_ms - t0, 1800)
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["last_state"], "TRUNCATED_SS")
+        self.assertTrue(cfg["last_ss_deleted"])
+        self.assertNotIn(frame_path, self.env.files)
+
+        self.env.add_screenshot(
+            "frame.png",
+            ScreenFactory.ticket_list(card_loaded=True),
+            directory="/storage/emulated/0/komobot_ss",
+        )
+        t1 = self.env.now_ms
+        cmd2 = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        self.assertEqual(cmd2, "CLICK_TICKET_ROW")
+        self.assertLess(self.env.now_ms - t1, 100)
+        self.assertEqual(self.env.read_config()["last_state"], "TICKET_LIST")
 
 
 if __name__ == "__main__":

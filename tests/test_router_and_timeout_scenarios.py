@@ -8,6 +8,7 @@ import generate_macro as gm
 from tests.bsh_runtime import MockAndroidEnv, run_bsh_script
 
 ROUTER_SCRIPT = gm.build_router_script()
+INIT_STATUS_SCRIPT = gm.build_init_status_script()
 TIMEOUT_SCRIPT = gm.build_timeout_script()
 ADMIN_ID = "111222333"
 ALLOWED_USER = "222333444"
@@ -34,6 +35,23 @@ def _run_router(
             "msg_text": msg_text,
         },
     )
+
+
+def _run_init_status(env: MockAndroidEnv) -> str:
+    return run_bsh_script(INIT_STATUS_SCRIPT, env, {"bot_token": "test-token"})
+
+
+def _dispatch_qr(
+    env: MockAndroidEnv,
+    chat_id: str,
+    msg_text: str,
+    update_id: str = "0",
+    admin_id: str = ADMIN_ID,
+) -> str:
+    res = _run_router(env, chat_id, msg_text, update_id=update_id, admin_id=admin_id)
+    if res == "RUN":
+        _run_init_status(env)
+    return res
 
 
 def _run_timeout(env: MockAndroidEnv, step_cmd: str) -> str:
@@ -149,9 +167,14 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
 
     def test_busy_lease_same_user_and_multi_user_fifo_queue(self) -> None:
         start_ms = self.env.now_ms
+        # Stale private frame from an aborted run is swept on RUN without HTTP wait
+        self.env.write_text("/storage/emulated/0/komobot_ss/frame.png", "stale")
         self.assertEqual(
             _run_router(self.env, ADMIN_ID, "📸 Take QR Screenshot"), "RUN"
         )
+        self.assertEqual(self.env.tg_calls, [])
+        self.assertNotIn("/storage/emulated/0/komobot_ss/frame.png", self.env.files)
+        self.assertEqual(_run_init_status(self.env), "SENT")
         cfg = self.env.read_config()
         self.assertEqual(cfg["busy_until"], start_ms + 45000)
         self.assertEqual(cfg["active_chat_id"], int(ADMIN_ID))
@@ -194,13 +217,14 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
 
     def test_post_loop_timeout_guard_and_reset_cleanup(self) -> None:
         # Scenario 1: loop exhausted while still busy on WHITE_LOADING with queued user
-        self.assertEqual(_run_router(self.env, ADMIN_ID, "/qr"), "RUN")
+        self.assertEqual(_dispatch_qr(self.env, ADMIN_ID, "/qr"), "RUN")
         self.assertEqual(_run_router(self.env, ALLOWED_USER, "/qr"), "IGNORE")
         cfg = self.env.read_config()
         cfg["last_state"] = "WHITE_LOADING"
         self.env.write_config(cfg)
 
         self.env.tg_calls.clear()
+        self.env.http_connections.clear()
         self.assertEqual(_run_timeout(self.env, "WAIT"), "OK")
         after_cfg = self.env.read_config()
         self.assertEqual(after_cfg["busy_until"], 0)
@@ -211,10 +235,14 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(len(edits), 2)
         self.assertIn("last state: WHITE_LOADING", edits[0]["text"])
         self.assertIn("Previous request timed out", edits[1]["text"])
+        for conn in self.env.http_connections:
+            self.assertTrue(conn["stream_read"])
+            self.assertTrue(conn["stream_closed"])
+            self.assertFalse(conn["disconnected"])
 
         # Scenario 2: Admin Reset VM App + DONE_RESET
         self.env.tg_calls.clear()
-        self.assertEqual(_run_router(self.env, ADMIN_ID, "🧹 Reset VM App"), "RUN")
+        self.assertEqual(_dispatch_qr(self.env, ADMIN_ID, "🧹 Reset VM App"), "RUN")
         self.assertEqual(self.env.read_config()["capture_mode"], "reset")
         self.assertEqual(_run_router(self.env, ALLOWED_USER, "/qr"), "IGNORE")
         self.env.tg_calls.clear()
@@ -279,7 +307,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
     def test_regular_user_progress_bar_vs_admin_detailed_logging(self) -> None:
         # Regular user RUN shows 10% progress bar instead of internal step logs
         self.assertEqual(
-            _run_router(self.env, ALLOWED_USER, "📸 Take QR Screenshot"), "RUN"
+            _dispatch_qr(self.env, ALLOWED_USER, "📸 Take QR Screenshot"), "RUN"
         )
         run_msg = self.env.tg_calls[-1]["payload"]["text"]
         self.assertEqual(run_msg, "⏳ Generating QR code...\n🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%")
@@ -314,7 +342,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
 
         # Admin RUN preserves exact original diagnostic text
         self.env.tg_calls.clear()
-        self.assertEqual(_run_router(self.env, ADMIN_ID, "/qr"), "RUN")
+        self.assertEqual(_dispatch_qr(self.env, ADMIN_ID, "/qr"), "RUN")
         self.assertEqual(
             self.env.tg_calls[-1]["payload"]["text"],
             "🔍 Waking phone & checking Virtual Master...",
