@@ -1,0 +1,274 @@
+"""Offline structural, regex, keypad, and BeanShell hygiene tests."""
+
+from __future__ import annotations
+
+import json
+import re
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import generate_macro as gm
+from tests.bsh_runtime import compile_bsh_to_python
+
+
+def _iter_actions_and_constraints(actions: list[dict]):
+    for action in actions:
+        yield action
+        for constraint in action.get("m_constraintList", []):
+            yield constraint
+
+
+def _find_cmd_branch(actions: list[dict], cmd: str) -> list[dict]:
+    """Return actions inside the ``IfConditionAction(step_cmd == cmd)`` branch."""
+    for i, action in enumerate(actions):
+        if action.get("m_classType") != "IfConditionAction":
+            continue
+        constraints = action.get("m_constraintList", [])
+        if not constraints:
+            continue
+        c0 = constraints[0]
+        var = c0.get("m_variable", {})
+        if var.get("m_name") == "step_cmd" and c0.get("m_stringValue") == cmd:
+            depth = 1
+            branch: list[dict] = []
+            for j in range(i + 1, len(actions)):
+                ct = actions[j].get("m_classType")
+                if ct == "IfConditionAction":
+                    depth += 1
+                elif ct == "EndIfAction":
+                    depth -= 1
+                    if depth == 0:
+                        return branch
+                branch.append(actions[j])
+    raise AssertionError(f"Branch for step_cmd={cmd!r} not found")
+
+
+class TestMacroStructure(unittest.TestCase):
+    """Validate Komobot macro JSON schema, control flow, regexes, and PIN mapping."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.macro_doc = gm.build_macro(
+            bot_token_var="12345:TEST_TOKEN",
+            admin_id_var="999999999",
+            app_pin_var="1234",
+            app_name_var="ru.deltapay.puntopago.telcell",
+        )
+        cls.macro = cls.macro_doc["macro"]
+        cls.actions = cls.macro["m_actionList"]
+
+    def test_macro_metadata_and_webhook_trigger(self) -> None:
+        self.assertEqual(self.macro_doc["macroExportVersion"], 1)
+        self.assertEqual(self.macro["m_name"], "Komobot Controller")
+        self.assertTrue(self.macro["m_enabled"])
+        triggers = self.macro["m_triggerList"]
+        self.assertEqual(len(triggers), 1)
+        self.assertEqual(triggers[0]["m_classType"], "WebHookTrigger")
+        self.assertEqual(triggers[0]["identifier"], "komobotv2")
+        self.assertEqual(triggers[0]["saveBodyVariableName"], "webhook_body")
+
+    def test_unique_negative_siguids_and_defined_local_vars(self) -> None:
+        seen_ids: set[int] = set()
+        for item in _iter_actions_and_constraints(self.actions):
+            sid = item["m_SIGUID"]
+            self.assertIsInstance(sid, int)
+            self.assertLess(sid, 0)
+            self.assertNotIn(sid, seen_ids, f"Duplicate m_SIGUID: {sid}")
+            seen_ids.add(sid)
+
+        declared_vars = {v["m_name"] for v in self.macro["localVariables"]}
+        expected_vars = {
+            "admin_id",
+            "app_name",
+            "app_pin",
+            "bot_action",
+            "bot_token",
+            "chat_id",
+            "msg_text",
+            "pin_d1",
+            "pin_d2",
+            "pin_d3",
+            "pin_d4",
+            "step_cmd",
+            "update_id",
+            "webhook_body",
+        }
+        self.assertTrue(expected_vars.issubset(declared_vars))
+
+        lv_re = re.compile(r"\{lv=([A-Za-z0-9_]+)\}")
+        for action in self.actions:
+            for field_name in ("scriptText", "m_text"):
+                val = action.get(field_name, "")
+                for ref in lv_re.findall(val):
+                    self.assertIn(ref, declared_vars)
+
+    def test_balanced_control_flow_and_step_cmd_coverage(self) -> None:
+        if_depth = 0
+        loop_depth = 0
+        loop_counts: list[int] = []
+        for action in self.actions:
+            ct = action.get("m_classType")
+            if ct == "IfConditionAction":
+                if_depth += 1
+            elif ct == "EndIfAction":
+                if_depth -= 1
+                self.assertGreaterEqual(if_depth, 0)
+            elif ct == "LoopAction":
+                loop_depth += 1
+                loop_counts.append(action["m_fixedOptionCount"])
+            elif ct == "EndLoopAction":
+                loop_depth -= 1
+                self.assertGreaterEqual(loop_depth, 0)
+            elif ct == "BreakFromLoopAction":
+                self.assertGreater(loop_depth, 0)
+        self.assertEqual(if_depth, 0)
+        self.assertEqual(loop_depth, 0)
+        self.assertEqual(loop_counts, [32])
+
+        returned_cmds = set(
+            re.findall(r'return\s+"([A-Z0-9_]+)"\s*;', gm.build_vision_script())
+        )
+        self.assertTrue(returned_cmds)
+        for cmd in returned_cmds:
+            branch = _find_cmd_branch(self.actions, cmd)
+            self.assertGreater(len(branch), 0, f"Empty branch for {cmd}")
+
+    def test_enter_pin_digits_pauses_and_centered_nav_coords(self) -> None:
+        pin_branch = _find_cmd_branch(self.actions, "ENTER_PIN")
+        click_map: dict[tuple[str, str], tuple[int, int]] = {}
+        current_cond: tuple[str, str] | None = None
+        top_pauses: list[tuple[int, int]] = []
+        depth = 0
+        for action in pin_branch:
+            ct = action.get("m_classType")
+            if ct == "IfConditionAction":
+                depth += 1
+                c0 = action["m_constraintList"][0]
+                current_cond = (c0["m_variable"]["m_name"], c0["m_stringValue"])
+            elif ct == "EndIfAction":
+                depth -= 1
+                current_cond = None
+            elif ct == "UIInteractionAction" and current_cond is not None:
+                pt = action["uiInteractionConfiguration"]["xyPoint"]
+                click_map[current_cond] = (pt["x"], pt["y"])
+            elif ct == "PauseAction" and depth == 0:
+                top_pauses.append(
+                    (action["m_delayInSeconds"], action["m_delayInMilliSeconds"])
+                )
+
+        for var_name in ("pin_d1", "pin_d2", "pin_d3", "pin_d4"):
+            for digit, coords in gm.PIN_COORDS.items():
+                self.assertEqual(click_map[(var_name, digit)], coords)
+        self.assertEqual(top_pauses, [(0, 450), (0, 450), (0, 450), (2, 500)])
+
+        def xy_points(cmd: str) -> list[tuple[int, int]]:
+            return [
+                (
+                    a["uiInteractionConfiguration"]["xyPoint"]["x"],
+                    a["uiInteractionConfiguration"]["xyPoint"]["y"],
+                )
+                for a in _find_cmd_branch(self.actions, cmd)
+                if a.get("m_classType") == "UIInteractionAction"
+            ]
+
+        self.assertEqual(xy_points("DONE"), [(626, 121), (151, 1553), (360, 1553)])
+        self.assertEqual(
+            xy_points("DONE_RESET"), [(626, 121), (151, 1553), (360, 1553)]
+        )
+        self.assertEqual(xy_points("CLICK_BACK"), [(151, 1553)])
+        self.assertEqual(xy_points("RESET_TO_HOME"), [(360, 1553)])
+
+    def test_stage1_webhook_regex_extractors(self) -> None:
+        extractors: dict[str, tuple[str, str]] = {}
+        for action in self.actions[:3]:
+            self.assertEqual(action["m_classType"], "TextManipulationAction")
+            suffix = action["m_text"].split("{lv=webhook_body}", 1)[1]
+            regex = action["m_textManipulation"]["params"][0]
+            extractors[action["variableName"]] = (regex, suffix)
+
+        def extract(body: str) -> dict[str, str]:
+            out: dict[str, str] = {}
+            for name, (regex, suffix) in extractors.items():
+                m = re.search(regex, body + suffix)
+                self.assertIsNotNone(m, f"Extractor {name} failed on {body!r}")
+                out[name] = m.group(1)
+            return out
+
+        standard = json.dumps(
+            {
+                "update_id": 100001,
+                "message": {
+                    "message_id": 42,
+                    "chat": {"id": 111222333},
+                    "text": "📸 Take QR Screenshot",
+                },
+            },
+            ensure_ascii=False,
+        )
+        self.assertEqual(
+            extract(standard),
+            {
+                "update_id": "100001",
+                "chat_id": "111222333",
+                "msg_text": "📸 Take QR Screenshot",
+            },
+        )
+
+        group_msg = (
+            '{"update_id":0,"message":{"chat":{"id": -100123456},"text": "/qr"}}'
+        )
+        self.assertEqual(
+            extract(group_msg),
+            {"update_id": "0", "chat_id": "-100123456", "msg_text": "/qr"},
+        )
+
+        non_text_update = '{"update_id":99,"message":{"chat":{"id":77},"photo":[]}}'
+        self.assertEqual(
+            extract(non_text_update),
+            {"update_id": "99", "chat_id": "77", "msg_text": ""},
+        )
+
+        self.assertEqual(
+            extract(""), {"update_id": "0", "chat_id": "0", "msg_text": ""}
+        )
+
+    def test_beanshell_scripts_clean_and_cli_writes_valid_json(self) -> None:
+        for script_fn in (
+            gm.build_router_script,
+            gm.build_vision_script,
+            gm.build_timeout_script,
+        ):
+            src = script_fn()
+            self.assertNotIn("{{", src)
+            self.assertNotIn("}}", src)
+            py_src = compile_bsh_to_python(src, {})
+            compile(py_src, script_fn.__name__, "exec")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "Komobot_Controller.macro"
+            with (
+                mock.patch.object(gm, "OUT_MACRO", out_path),
+                mock.patch(
+                    "sys.argv",
+                    [
+                        "generate_macro.py",
+                        "--bot-token",
+                        "tok",
+                        "--admin-id",
+                        "111",
+                        "--app-pin",
+                        "0000",
+                        "--app-name",
+                        "pkg",
+                    ],
+                ),
+            ):
+                gm.main()
+            written = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(written["macro"]["m_actionList"]), len(self.actions))
+
+
+if __name__ == "__main__":
+    unittest.main()

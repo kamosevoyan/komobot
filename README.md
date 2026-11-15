@@ -13,7 +13,7 @@ Once deployed via ADB, there is **no PC, Docker container, or external backend s
 * **Serverless Telegram Webhook Trigger:** Telegram Bot API updates arrive via a MacroDroid `WebHookTrigger` (`identifier: "komobotv2"`, body stored in `{lv=webhook_body}`).
 * **Multi-User Access Control & In-Loop FIFO Queueing:** Authorized users share access through `/storage/emulated/0/Download/komobot_config.json`. Concurrent requests are serialized by a time-bounded `busy_until` lease and an in-memory/disk FIFO `queue` so burst requests from multiple users execute back-to-back in a single phone wake cycle.
 * **Stale Ticket & Stale QR Protection:** Navigates through the dashboard **`Услуги` → `Транспорт` → `Доступно`** ticket list rather than quick shortcuts (which can open an expired/stale ticket). Automatically switches tabs if `Купить билет` opens instead of `Доступно`, and rejects/refreshes a QR modal if one was already open on `step_count == 1`.
-* **Deep Doze & Extended Inactivity Resilience:** [`deploy_macro.sh`](deploy_macro.sh) disables Android Doze (`dumpsys deviceidle disable`), app standby, Wi-Fi power saving/sleep, host lockscreen, Virtual Master toast windows, and Samsung Smart Capture toolbars. After sending the QR, the macro returns Virtual Master to its VM desktop and puts the screen to sleep via `ScreenOnAction(screen_off=True)` **without switching away to the host launcher**, preventing Android from killing or background-throttling the VM after 20–30+ minutes of inactivity.
+* **Deep Doze & Extended Inactivity Resilience:** [`deploy_macro.sh`](deploy_macro.sh) disables Android Doze (`dumpsys deviceidle disable`), app standby, Android Phantom Process Killer monitoring (`settings_enable_monitor_phantom_procs false` and `max_phantom_processes 2147483647` for Virtual Master's guest processes), Wi-Fi power saving/sleep, host lockscreen, Virtual Master toast windows, and Samsung Smart Capture toolbars. Extended cold-boot tolerances (`32×` loop, `WHITE_LOADING` `<= 5`, `DASH_LOADING < 3`) let Virtual Master and Telcell Wallet recover even after LMKD evictions, while keeping Virtual Master in the host foreground on sleep (`ScreenOnAction(screen_off=True)`). *(Re-run `./deploy_macro.sh` after a full phone reboot, as `dumpsys deviceidle disable` is non-persistent.)*
 
 ---
 
@@ -32,7 +32,7 @@ flowchart TD
     S2 -->|"RUN (lease claimed: busy_until = now + 45s)"| S3
 
     S3["Stage 3: Screen On + Launch Virtual Master + Pause 1.2s"] --> S4
-    S4["Stage 4: Vision State Loop (Repeat up to 24x)"]
+    S4["Stage 4: Vision State Loop (Repeat up to 32x)"]
 
     S4 --> CAP["ScreenOn + TakeScreenshotAction + Cleanup"]
     CAP --> VA["JavaAction #2 Vision Pixel Classifier (step_cmd)"]
@@ -43,7 +43,7 @@ flowchart TD
     VA -->|"BUY_TICKET_TAB"| TAB["Tap Доступно Tab (277, 200)"]
     VA -->|"TICKET_LIST"| ROW["Tap Ticket Row (360, 400)"]
     VA -->|"STALE_QR (step 1)"| CLOSE["Close Modal (626, 121) to Force Refresh"]
-    VA -->|"Loading / OTHER"| REC["Wait 1s / Back (183, 1553) / VM Home (373, 1553)"]
+    VA -->|"Loading / OTHER"| REC["Wait 1s / Back (151, 1553) / VM Home (360, 1553)"]
 
     ACT1 --> S4
     PIN --> S4
@@ -61,7 +61,7 @@ flowchart TD
 
     DONE --> S5["Stage 5: JavaAction #3 Timeout/Reset Guard + Screen Off"]
     RST --> S5
-    S4 -->|"24 iterations exhausted"| S5
+    S4 -->|"32 iterations exhausted"| S5
 ```
 
 ### Stage 1: Webhook Ingestion & Field Extraction
@@ -95,7 +95,7 @@ When `{lv=bot_action}` equals `"RUN"`:
 2. `LaunchActivityAction` brings **Virtual Master** (`com.clone.android.dual.space`) to the foreground.
 3. `PauseAction` waits `1.2s` for the surface to settle.
 
-### Stage 4: Vision-Guided State Machine Loop (`Repeat 24×`, `JavaAction #2`)
+### Stage 4: Vision-Guided State Machine Loop (`Repeat 32×`, `JavaAction #2`)
 
 Each iteration wakes/keeps the screen on (`ScreenOnAction`), captures a host screenshot (`TakeScreenshotAction`), and runs `build_vision_script()` (`response_var="step_cmd"`):
 
@@ -112,28 +112,28 @@ Each iteration wakes/keeps the screen on (`ScreenOnAction`), captures a host scr
 | `VM_LAUNCHER` | Dark VM card with bright `Enter` button `(595..670, 235..265)` | `CLICK_ENTER` -> Click text `"Enter"` + Click `(627, 250)` + Pause `2s` |
 | `VM_LOADING` | Dark VM boot background without `Enter` button | `WAIT` -> Pause `1s` |
 | `VM_POPUP` | Dark 3×3 Virtual Master quick-menu corners `(130/590, 590/1050)` | `DISMISS_POPUP` -> Click `(100, 200)` + Pause `500ms` |
-| `RESET` (`capture_mode == "reset"`) | Any screen while running admin Reset command | `DONE_RESET` -> Close `(626, 121)` + `300ms` + VM Back `(183, 1553)` + `300ms` + VM Home `(373, 1553)` + `BreakFromLoopAction` |
+| `RESET` (`capture_mode == "reset"`) | Any screen while running admin Reset command | `DONE_RESET` -> Close `(626, 121)` + `300ms` + VM Back `(151, 1553)` + `300ms` + VM Home `(360, 1553)` + `BreakFromLoopAction` |
 | `STALE_QR` | QR modal present on `step_count == 1` with `qr_was_closed == false` | `CLOSE_MODAL` -> Click `(626, 121)` + Pause `800ms` (forces fresh ticket open) |
 | QR Valid -> `NEXT_IN_QUEUE` / `QR_SENT` | Darkened backdrop, white modal card, `>= 100` dark & `>= 100` light QR modules in `(200..520, 510..830)` | Crops `[130, 445]..[590, 905]` (`460x460`), encodes lossless PNG, uploads via `multipart/form-data` `sendPhoto` (`🎫 QR Code`), deletes progress message on HTTP `200`. Dispatches `CLOSE_MODAL` if `queue` has another user, else `DONE`. |
-| `QR_LOADING` | White modal card without QR modules yet | `WAIT` -> Pause `1s` |
+| `QR_LOADING` | White modal card without QR modules yet | Bounded `WAIT` via `loading_count` (`<= 6` -> `WAIT`; `7` -> `CLICK_BACK`; `>= 9` -> `RESET_TO_HOME`) |
 | `VM_HOME_1` / `VM_HOME_2` | Dark VM wallpaper with orange Telcell icon at row `(80..120, 360..400)` or `(80..120, 120..165)` | `LAUNCH_1` `(97, 382)` or `LAUNCH_2` `(97, 142)` + Pause `2.5s` |
-| `PIN_SPINNER` | Gray PIN background with orange spinner at `(330..390, 680..715)` | `WAIT` -> Pause `1s` |
-| `PIN_PAD` | Gray PIN screen `(100, 500)` & `(360, 1372)` | `ENTER_PIN` -> 4× `ExtractTextManipulation` split `app_pin` into `pin_d1..pin_d4`; `IfConditionAction` branches tap calibrated `PIN_COORDS` (`250ms` inter-digit pause, `2s` post-PIN pause) |
-| `DASH_LOADING` | Dashboard nav visible while white skeleton covers content | `WAIT` -> Pause `1s` |
+| `PIN_SPINNER` | Gray PIN background with orange Telcell logo and spinner at `(330..390, 680..715)` | Bounded `WAIT` via `loading_count` (`<= 6` -> `WAIT`; `7` -> `CLICK_BACK`; `>= 9` -> `RESET_TO_HOME`) |
+| `PIN_PAD` | Gray PIN screen `(100, 500)` & `(360, 1372)` + `>= 10` Telcell orange logo pixels `(280..440, 120..220)` | `ENTER_PIN` -> 4× `ExtractTextManipulation` split `app_pin` into `pin_d1..pin_d4`; `IfConditionAction` branches tap calibrated `PIN_COORDS` (`450ms` inter-digit pause, `2.5s` post-PIN pause) |
+| `DASH_LOADING` | Dashboard nav visible while white skeleton covers content or `svcLow < 3 && svcHigh < 3` (`loading_count < 3`) | Bounded `WAIT` via `loading_count` (`<= 6` -> `WAIT`; `7` -> `CLICK_BACK`; `>= 9` -> `RESET_TO_HOME`) |
 | `DASHBOARD_LOW` / `DASHBOARD_HIGH` | Dashboard bottom nav bar orange/white; scans `Услуги` orange icon offsets (`1045..1105` vs `785..845`) | `CLICK_TRANSPORT_LOW` `(360, 1100)` or `CLICK_TRANSPORT_HIGH` `(360, 840)` + Pause `1.5s` |
 | `BUY_TICKET_TAB` | `Проездной билет` opened on `Купить билет` tab (orange underline at `x=100, y=235` or buy card button `(550, 485)`) | `CLICK_AVAILABLE_TAB` -> Click `Доступно` `(277, 200)` + Pause `1.5s` |
-| `TICKET_LOADING` | `Доступно` tab active on gray list background, ticket card still loading | `WAIT` -> Pause `1s` |
+| `TICKET_LOADING` | `Доступно` tab active on gray list background, ticket card still loading | Bounded `WAIT` via `loading_count` (`<= 6` -> `WAIT`; `7` -> `CLICK_BACK`; `>= 9` -> `RESET_TO_HOME`) |
 | `TICKET_LIST` | `Проездной билет -> Доступно` (`buyBtnOrange` or `availTabOrange`) with bright white ticket card at `(360, 400)` | `CLICK_TICKET_ROW` -> Click `(360, 400)` + Pause `1.2s` |
-| `WHITE_LOADING` | Pure white transition screen across all 5 probe points | `WAIT` -> Pause `1s` |
-| `OTHER` | Unrecognized transition/overlay screen (`other_count`) | `1` or `3` -> `WAIT` (`1s`); `2` -> `CLICK_BACK` `(183, 1553)` + `800ms`; `>= 4` -> `RESET_TO_HOME` `(373, 1553)` + `800ms` (resets `other_count = 0`) |
+| `WHITE_LOADING` | White/blank transition screen (`>= 34/40` white grid samples in `x=120..600, y=240..1290`, avoiding dense multi-column UI) | Bounded `WAIT` via `white_count` (`<= 5` -> `WAIT`; `6` -> `CLICK_BACK` `(151, 1553)`; `7` -> `WAIT`; `>= 8` -> `RESET_TO_HOME` `(360, 1553)`) |
+| `OTHER` | Unrecognized transition/overlay screen (`other_count`) | `1` or `3` -> `WAIT` (`1s`); `2` -> `CLICK_BACK` `(151, 1553)` + `800ms`; `>= 4` -> `RESET_TO_HOME` `(360, 1553)` + `800ms` (resets `other_count = 0`) |
 
 3. **Clean Exit vs. Queue Handoff:**
    * **Queue Non-Empty (`NEXT_IN_QUEUE`):** Pops `queue[0]`, sets `active_chat_id` and `status_message_id` to the queued user, sets `step_count = 2`, `qr_was_closed = true`, `busy_until = now + 45000`, edits their message to `🔄 Generating QR code for your request...`, and returns `CLOSE_MODAL` (`(626, 121)`) so the next iteration immediately lands back on `TICKET_LIST` and opens a fresh QR for the next user.
-   * **Queue Empty (`DONE`):** Sets `last_state = "QR_SENT"`, `busy_until = 0`, clicks Close `(626, 121)` -> `500ms` -> VM Back `(183, 1553)` -> `500ms` -> VM Home `(373, 1553)` -> `BreakFromLoopAction`. Exiting back to the VM desktop guarantees the next request starts from a clean state without stale QR modals or open `Купить билет` tabs.
+   * **Queue Empty (`DONE`):** Sets `last_state = "QR_SENT"`, `busy_until = 0`, clicks Close `(626, 121)` -> `500ms` -> VM Back `(151, 1553)` -> `500ms` -> VM Home `(360, 1553)` -> `BreakFromLoopAction`. Exiting back to the VM desktop guarantees the next request starts from a clean state without stale QR modals or open `Купить билет` tabs.
 
 ### Stage 5: Post-Loop Guard (`JavaAction #3`) & Screen Sleep
 
-After exiting the `24×` loop, `build_timeout_script()` checks whether `busy_until > 0` or `step_cmd == "DONE_RESET"`:
+After exiting the `32×` loop, `build_timeout_script()` checks whether `busy_until > 0` or `step_cmd == "DONE_RESET"`:
 * Resets `busy_until = 0` and `queue = []`.
 * Edits the active (and any remaining queued) status messages with `✅ VM app reset complete.` or `❌ Timed out waiting for QR screen (last state: <last_state>). Please try again.`
 * Finally executes `ScreenOnAction(screen_off=True)` to put the display to sleep (`mWakefulness=Dozing`) with Virtual Master still in the host foreground.
@@ -146,6 +146,12 @@ After exiting the `24×` loop, `build_timeout_script()` checks whether `busy_unt
 komobot/
 ├── generate_macro.py   # MacroDroid JSON compiler + embedded BeanShell router, vision & guard scripts
 ├── deploy_macro.sh     # ADB provisioning, Doze/power/lockscreen tuning & automated MacroDroid import
+├── tests/              # Offline BeanShell scenario suite + live device webhook runner
+│   ├── bsh_runtime.py
+│   ├── test_macro_structure.py
+│   ├── test_router_and_timeout_scenarios.py
+│   ├── test_vision_scenarios.py
+│   └── run_device_scenarios.py
 ├── pyproject.toml      # Project metadata & dev tooling (ruff, shfmt-py)
 ├── ruff.toml           # Ruff formatting/linting configuration
 ├── .python-version     # Python version pin (3.10)
@@ -192,7 +198,7 @@ Connect the phone over USB and run:
 1. Read defaults from `.env` (or prompt interactively if unset).
 2. Generate `Komobot_Controller.macro` via `generate_macro.py`.
 3. Grant `WRITE_SECURE_SETTINGS`, `WRITE_GLOBAL_SETTINGS`, `READ_LOGS`, `DUMP`, `MANAGE_EXTERNAL_STORAGE`, and `SYSTEM_ALERT_WINDOW` to MacroDroid.
-4. Whitelist `com.arlosoft.macrodroid` and `com.clone.android.dual.space` in `deviceidle`, grant `RUN_IN_BACKGROUND`, `RUN_ANY_IN_BACKGROUND`, and `WAKE_LOCK`, disable Doze/app standby/Wi-Fi sleep/lockscreen/Samsung Smart Capture, and deny Virtual Master `TOAST_WINDOW` overlays.
+4. Whitelist `com.arlosoft.macrodroid` and `com.clone.android.dual.space` in `deviceidle`, grant `RUN_IN_BACKGROUND`, `RUN_ANY_IN_BACKGROUND`, and `WAKE_LOCK`, disable Doze, app standby, Phantom Process Killer monitoring (`settings_enable_monitor_phantom_procs` / `max_phantom_processes`), Wi-Fi sleep, lockscreen, and Samsung Smart Capture, and deny Virtual Master `TOAST_WINDOW` overlays.
 5. Seed `/storage/emulated/0/Download/komobot_config.json` if absent (preserving existing device config across upgrades).
 6. Push `Komobot_Controller.macro`, wake the screen, launch MacroDroid's importer, tap `acceptButton`, and confirm `OVERWRITE` via `uiautomator` node lookup (with coordinate fallbacks).
 
@@ -232,7 +238,7 @@ Verify with `getWebhookInfo` that `pending_update_count` is `0` and `last_error_
 | `last_chat_id`, `last_msg_text` | Most recent non-duplicate sender ID and extracted message text for debugging webhook parsing. |
 | `busy_until`, `queue` | Concurrency lock epoch (`ms`) and FIFO array of waiting `{"chat_id", "status_message_id"}` entries. |
 | `active_chat_id`, `status_message_id`, `capture_mode`, `run_start_ms` | Active run ownership, progress message ID for `editMessageText`, mode (`"qr"`/`"reset"`), and run start timestamp. |
-| `qr_was_closed`, `step_count`, `other_count`, `last_state` | State-machine progress flags, total vision iterations (`1..24`), recovery counter, and last classified screen state (e.g., `QR_SENT`, `STALE_QR`, `BUY_TICKET_TAB`, `TICKET_LIST`). |
+| `qr_was_closed`, `step_count`, `other_count`, `white_count`, `loading_count`, `last_state` | State-machine progress flags, total vision iterations (`1..32`), recovery counters, and last classified screen state (e.g., `QR_SENT`, `STALE_QR`, `BUY_TICKET_TAB`, `TICKET_LIST`, `WHITE_LOADING`). |
 | `last_ss_name`, `last_ss_mtime`, `app_name` | Last processed host screenshot identity (prevents re-reading stale screenshots) and configured package name. |
 
 ### Safe Synthetic Webhook Testing
@@ -247,12 +253,43 @@ curl -4 -sS -X POST "https://trigger.macrodroid.com/<device_uuid>/komobotv2" \
 
 ---
 
+## Test Scripts & Scenarios
+
+### Offline Scenario & Structure Tests (No Phone Required)
+
+Executes macro schema/regex/PIN checks and compiles/runs the generated BeanShell `router`, `vision`, and `timeout` scripts against an in-memory Android/Bitmap/Telegram sandbox:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+* [`tests/test_macro_structure.py`](tests/test_macro_structure.py): Macro schema, unique `m_SIGUID`s, balanced `If`/`Loop` actions, `step_cmd` branch coverage, `PIN_COORDS` mapping, centered nav taps, Stage 1 regex extraction, and BeanShell compilation.
+* [`tests/test_router_and_timeout_scenarios.py`](tests/test_router_and_timeout_scenarios.py): Deduplication (`update_id: 0` safety vs repeated `uid`), auth, `/start` keyboards, `/adduser`/`/removeuser`/`/toggle`, busy lease & expired lease reclaim after extended inactivity, multi-user FIFO queue, and post-loop timeout/`DONE_RESET` cleanup.
+* [`tests/test_vision_scenarios.py`](tests/test_vision_scenarios.py): Synthetic `720x1600` & `1080x2400` screen pipelines (`VM_LAUNCHER` -> `PIN_PAD` -> `DASHBOARD` -> `BUY_TICKET_TAB` -> `TICKET_LIST` -> `QR_SENT`), full 30-step cold VM + cold Telcell resume within `32` steps, `STALE_QR` refresh, queue handoff (`NEXT_IN_QUEUE`), `WHITE_LOADING` (`<= 5`) vs dense UI / `PIN_PAD` regressions, `3`-tick unloaded dashboard wait, bounded loading recovery, and screenshot cleanup.
+
+### Live Device E2E Scenario Runner (ADB + Webhook)
+
+Runs non-destructive live scenarios against the USB-connected phone (uses `"update_id": 0` except `dedup`, never logs out of Telcell Wallet, and resolves the webhook URL via `getWebhookInfo`):
+
+```bash
+# List scenarios or verify ADB + config + webhook without sending updates
+python3 tests/run_device_scenarios.py --list
+python3 tests/run_device_scenarios.py --dry-run
+
+# Run default audit + non-busy suite, long-inactivity audit/unplugged wakeup, or all scenarios
+python3 tests/run_device_scenarios.py
+python3 tests/run_device_scenarios.py --scenario inactivity_audit unplugged_doze_qr --idle-wait 10
+python3 tests/run_device_scenarios.py --scenario all
+```
+
+---
+
 ## Development Linting & Formatting
 
 ```bash
-# Lint & format macro generator (requires .venv)
-.venv/bin/ruff format generate_macro.py
-.venv/bin/ruff check generate_macro.py
+# Lint & format macro generator and tests (requires .venv)
+.venv/bin/ruff format generate_macro.py tests
+.venv/bin/ruff check generate_macro.py tests
 
 # Format deployment script
 .venv/bin/shfmt -w deploy_macro.sh

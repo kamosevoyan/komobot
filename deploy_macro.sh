@@ -97,6 +97,8 @@ done
 adb shell appops set com.clone.android.dual.space TOAST_WINDOW deny 2>/dev/null || true
 adb shell dumpsys deviceidle disable >/dev/null 2>&1 || true
 adb shell settings put global app_standby_enabled 0 2>/dev/null || true
+adb shell settings put global settings_enable_monitor_phantom_procs false 2>/dev/null || true
+adb shell cmd device_config put activity_manager max_phantom_processes 2147483647 2>/dev/null || true
 adb shell settings put global wifi_power_save 0 2>/dev/null || true
 adb shell settings put global wifi_sleep_policy 2 2>/dev/null || true
 adb shell settings put system screen_off_timeout 120000 2>/dev/null || true

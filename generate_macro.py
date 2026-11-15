@@ -658,6 +658,8 @@ synchronized (System.class) {{
                         cfg.put("qr_was_closed", false);
                         cfg.put("step_count", 0);
                         cfg.put("other_count", 0);
+                        cfg.put("white_count", 0);
+                        cfg.put("loading_count", 0);
                         cfg.put("last_state", "INIT");
                         cfg.put("run_start_ms", now);
                         cfg.put("status_message_id", 0L);
@@ -1024,6 +1026,30 @@ try {{
         int r = getR(x, y); int g = getG(x, y); int b = getB(x, y);
         return r >= 15 && r <= 42 && g >= 10 && g <= 35 && b >= 20 && b <= 48;
     }}
+    void resetWaitCounters(JSONObject cfg) throws Exception {{
+        cfg.put("white_count", 0);
+        cfg.put("loading_count", 0);
+    }}
+    String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits) throws Exception {{
+        int cnt = cfg.optInt(countKey, 0) + 1;
+        cfg.put(countKey, cnt);
+        cfg.put("last_state", stateName);
+        if (cnt <= maxWaits) {{
+            saveConfig(cfg);
+            return "WAIT";
+        }}
+        if (cnt == maxWaits + 1) {{
+            saveConfig(cfg);
+            return "CLICK_BACK";
+        }}
+        if (cnt == maxWaits + 2) {{
+            saveConfig(cfg);
+            return "WAIT";
+        }}
+        cfg.put(countKey, 0);
+        saveConfig(cfg);
+        return "RESET_TO_HOME";
+    }}
 
     // 1. Check VM Launcher vs VM Boot Loading
     if (isDark(360, 800) && isDark(100, 500) && isDark(360, 350)) {{
@@ -1042,11 +1068,13 @@ try {{
         if (enterMax > 120) {{
             cfg.put("last_state", "VM_LAUNCHER");
             cfg.put("other_count", 0);
+            resetWaitCounters(cfg);
             saveConfig(cfg);
             updateStatus(cid, statusMsgId, "🖥️ Entering Virtual Master...");
             return "CLICK_ENTER";
         }}
         cfg.put("last_state", "VM_LOADING");
+        resetWaitCounters(cfg);
         saveConfig(cfg);
         return "WAIT";
     }}
@@ -1057,6 +1085,7 @@ try {{
         !(isDark(360, 350) && getB(360, 350) < 35)) {{
         cfg.put("last_state", "VM_POPUP");
         cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
         saveConfig(cfg);
         return "DISMISS_POPUP";
     }}
@@ -1065,6 +1094,7 @@ try {{
     if (mode.equals("reset")) {{
         cfg.put("last_state", "RESET");
         cfg.put("busy_until", 0L);
+        resetWaitCounters(cfg);
         saveConfig(cfg);
         return "DONE_RESET";
     }}
@@ -1093,6 +1123,7 @@ try {{
                 cfg.put("qr_was_closed", true);
                 cfg.put("last_state", "STALE_QR");
                 cfg.put("other_count", 0);
+                resetWaitCounters(cfg);
                 saveConfig(cfg);
                 updateStatus(cid, statusMsgId, "🔄 Refreshing stale QR screen...");
                 return "CLOSE_MODAL";
@@ -1133,6 +1164,7 @@ try {{
                     cfg.put("qr_was_closed", true);
                     cfg.put("step_count", 2);
                     cfg.put("other_count", 0);
+                    resetWaitCounters(cfg);
                     cfg.put("busy_until", System.currentTimeMillis() + 45000L);
                     cfg.put("last_state", "NEXT_IN_QUEUE");
                     saveConfig(cfg);
@@ -1142,6 +1174,7 @@ try {{
                     cfg.put("queue", new JSONArray());
                     cfg.put("last_state", "QR_SENT");
                     cfg.put("busy_until", 0L);
+                    resetWaitCounters(cfg);
                     saveConfig(cfg);
                 }}
             }}
@@ -1152,9 +1185,8 @@ try {{
                 return "DONE";
             }}
         }}
-        cfg.put("last_state", "QR_LOADING");
-        saveConfig(cfg);
-        return "WAIT";
+        cfg.put("white_count", 0);
+        return handleLoadingWait(cfg, "loading_count", "QR_LOADING", 6);
     }}
 
     // 6. Check VM Home Screen (Telcell icon orange pixels)
@@ -1174,6 +1206,7 @@ try {{
         if (o1 >= 15) {{
             cfg.put("last_state", "VM_HOME_1");
             cfg.put("other_count", 0);
+            resetWaitCounters(cfg);
             saveConfig(cfg);
             updateStatus(cid, statusMsgId, "🚀 Launching Telcell Wallet...");
             return "LAUNCH_1";
@@ -1181,39 +1214,47 @@ try {{
         if (o2 >= 15) {{
             cfg.put("last_state", "VM_HOME_2");
             cfg.put("other_count", 0);
+            resetWaitCounters(cfg);
             saveConfig(cfg);
             updateStatus(cid, statusMsgId, "🚀 Launching Telcell Wallet...");
             return "LAUNCH_2";
         }}
     }}
 
-    // 7. Check Telcell PIN Screen
+    // 7. Check Telcell PIN Screen (gray background + top orange Telcell logo)
     if (isPinGray(100, 500) && isPinGray(360, 1372)) {{
-        int spinner = 0;
-        for (int x = 330; x <= 390; x += 3) {{
-            for (int y = 680; y <= 715; y += 3) {{
-                if (getR(x, y) > 215 && getB(x, y) < 120) spinner++;
+        int pinLogo = 0;
+        for (int x = 280; x <= 440; x += 6) {{
+            for (int y = 120; y <= 220; y += 6) {{
+                if (getR(x, y) > 200 && getG(x, y) < 130 && getB(x, y) < 100) pinLogo++;
             }}
         }}
-        if (spinner >= 3) {{
-            cfg.put("last_state", "PIN_SPINNER");
+        if (pinLogo >= 10) {{
+            int spinner = 0;
+            for (int x = 330; x <= 390; x += 3) {{
+                for (int y = 680; y <= 715; y += 3) {{
+                    if (getR(x, y) > 215 && getB(x, y) < 120) spinner++;
+                }}
+            }}
+            if (spinner >= 3) {{
+                cfg.put("white_count", 0);
+                return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 6);
+            }}
+            cfg.put("last_state", "PIN_PAD");
+            cfg.put("other_count", 0);
+            resetWaitCounters(cfg);
             saveConfig(cfg);
-            return "WAIT";
+            updateStatus(cid, statusMsgId, "🔐 Entering PIN...");
+            return "ENTER_PIN";
         }}
-        cfg.put("last_state", "PIN_PAD");
-        cfg.put("other_count", 0);
-        saveConfig(cfg);
-        updateStatus(cid, statusMsgId, "🔐 Entering PIN...");
-        return "ENTER_PIN";
     }}
 
     // 8. Check Telcell Dashboard (navigate via Услуги -> Транспорт)
     boolean dashNav = isOrange(360, 1372) || (isWhite(50, 1490) && isWhite(670, 1490) && getB(80, 1430) - getG(80, 1430) > 30);
     if (dashNav) {{
         if (isWhite(200, 300) && isWhite(580, 415) && isWhite(360, 800)) {{
-            cfg.put("last_state", "DASH_LOADING");
-            saveConfig(cfg);
-            return "WAIT";
+            cfg.put("white_count", 0);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6);
         }}
         int svcLow = 0;
         int svcHigh = 0;
@@ -1226,8 +1267,13 @@ try {{
                 if (getR(x, y) > 200 && getG(x, y) >= 70 && getG(x, y) <= 165 && getB(x, y) < 125) svcHigh++;
             }}
         }}
+        if (svcLow < 3 && svcHigh < 3 && cfg.optInt("loading_count", 0) < 3) {{
+            cfg.put("white_count", 0);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6);
+        }}
         cfg.put("qr_was_closed", true);
         cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
         if (svcLow >= 3) {{
             cfg.put("last_state", "DASHBOARD_LOW");
             saveConfig(cfg);
@@ -1258,13 +1304,13 @@ try {{
     boolean ticketBgGray = getR(360, 800) >= 240 && getR(360, 800) <= 250 && getG(360, 800) >= 240 && getG(360, 800) <= 251;
     if ((buyBtnOrange || availTabOrange) && ticketBgGray) {{
         if (getR(360, 400) < 252 || getG(360, 400) < 252 || getB(360, 400) < 252) {{
-            cfg.put("last_state", "TICKET_LOADING");
-            saveConfig(cfg);
-            return "WAIT";
+            cfg.put("white_count", 0);
+            return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 6);
         }}
         cfg.put("qr_was_closed", true);
         cfg.put("last_state", "TICKET_LIST");
         cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
         saveConfig(cfg);
         updateStatus(cid, statusMsgId, "🎫 Selecting ticket...");
         return "CLICK_TICKET_ROW";
@@ -1277,22 +1323,31 @@ try {{
         cfg.put("qr_was_closed", true);
         cfg.put("last_state", "BUY_TICKET_TAB");
         cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
         saveConfig(cfg);
         updateStatus(cid, statusMsgId, "🎫 Switching to Available tickets...");
         return "CLICK_AVAILABLE_TAB";
     }}
 
-    // 10. Check pure white loading screen
-    if (isWhite(360, 240) && isWhite(360, 400) && isWhite(360, 800) && isWhite(360, 1200) && isWhite(550, 485)) {{
-        cfg.put("last_state", "WHITE_LOADING");
-        saveConfig(cfg);
-        return "WAIT";
+    // 10. Check pure white loading screen (multi-column grid avoids dense UI screens)
+    if (isWhite(360, 240) && isWhite(360, 800) && isWhite(550, 485)) {{
+        int whiteHits = 0;
+        for (int x = 120; x <= 600; x += 120) {{
+            for (int y = 240; y <= 1290; y += 150) {{
+                if (isWhite(x, y)) whiteHits++;
+            }}
+        }}
+        if (whiteHits >= 34) {{
+            cfg.put("loading_count", 0);
+            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", 5);
+        }}
     }}
 
     // 11. Unknown / transition screen
     int otherCount = cfg.optInt("other_count", 0) + 1;
     cfg.put("other_count", otherCount);
     cfg.put("last_state", "OTHER");
+    resetWaitCounters(cfg);
     saveConfig(cfg);
     if (otherCount == 1 || otherCount == 3) {{
         return "WAIT";
@@ -1449,8 +1504,8 @@ def build_macro(
     )
     actions.append(make_pause(sg, seconds=1, millis=200))
 
-    # 4. Vision state loop (up to 24 iterations)
-    actions.append(make_loop(sg, 24))
+    # 4. Vision state loop (up to 32 iterations)
+    actions.append(make_loop(sg, 32))
     actions.append(make_screen_on(sg, screen_off=False))
     actions.append(make_take_screenshot(sg))
     actions.append(make_java_action(sg, build_vision_script(), response_var="step_cmd"))
@@ -1465,9 +1520,9 @@ def build_macro(
         [
             make_click_xy(sg, 626, 121),
             make_pause(sg, millis=500),
-            make_click_xy(sg, 183, 1553),
+            make_click_xy(sg, 151, 1553),
             make_pause(sg, millis=500),
-            make_click_xy(sg, 373, 1553),
+            make_click_xy(sg, 360, 1553),
             make_break_loop(sg),
         ],
     )
@@ -1476,9 +1531,9 @@ def build_macro(
         [
             make_click_xy(sg, 626, 121),
             make_pause(sg, millis=300),
-            make_click_xy(sg, 183, 1553),
+            make_click_xy(sg, 151, 1553),
             make_pause(sg, millis=300),
-            make_click_xy(sg, 373, 1553),
+            make_click_xy(sg, 360, 1553),
             make_break_loop(sg),
         ],
     )
@@ -1514,9 +1569,9 @@ def build_macro(
             pin_actions.append(make_click_xy(sg, px, py))
             pin_actions.append(make_end_if(sg))
         if idx < len(pin_vars) - 1:
-            pin_actions.append(make_pause(sg, millis=250))
+            pin_actions.append(make_pause(sg, millis=450))
         else:
-            pin_actions.append(make_pause(sg, seconds=2))
+            pin_actions.append(make_pause(sg, seconds=2, millis=500))
     add_cmd_branch("ENTER_PIN", pin_actions)
 
     add_cmd_branch(
@@ -1539,10 +1594,10 @@ def build_macro(
         "CLOSE_MODAL", [make_click_xy(sg, 626, 121), make_pause(sg, millis=800)]
     )
     add_cmd_branch(
-        "CLICK_BACK", [make_click_xy(sg, 183, 1553), make_pause(sg, millis=800)]
+        "CLICK_BACK", [make_click_xy(sg, 151, 1553), make_pause(sg, millis=800)]
     )
     add_cmd_branch(
-        "RESET_TO_HOME", [make_click_xy(sg, 373, 1553), make_pause(sg, millis=800)]
+        "RESET_TO_HOME", [make_click_xy(sg, 360, 1553), make_pause(sg, millis=800)]
     )
     add_cmd_branch("WAIT", [make_pause(sg, seconds=1)])
 
