@@ -84,9 +84,9 @@ Triggered by MacroDroid's `WebHookTrigger` (`identifier: "komobotv2"`), three `T
 4. **Concurrency Lock & Queue Insertion:**
    * If `now < busy_until`:
      * Same `active_chat_id` (after `>= 3s`): replies `⏳ Your request is already in progress.` without enqueueing a duplicate.
-     * Another allowed user not yet in `queue`: appends `{"chat_id": cid, "status_message_id": 0}`, extends `busy_until` by `+30000ms`, sends `⏳ Queued (#N) — waiting for current request to finish...`, and patches the saved `status_message_id` into the matching queue entry.
+     * Another allowed user not yet in `queue`: appends `{"chat_id": cid, "status_message_id": 0}`, extends `busy_until` by `+30000ms`, sends a queued status message (detailed waiting notice for Admin; `0%` progress bar for regular users), and patches the saved `status_message_id` into the matching queue entry.
      * Another user already in `queue`: replies `⏳ You are already in the queue (#N).`.
-   * If idle (`now >= busy_until`): initializes a new run (`busy_until = now + 45000`, `active_chat_id = cid`, `capture_mode = "qr"` or `"reset"`, `queue = []`, `qr_was_closed = false`, `step_count = 0`, `other_count = 0`, `last_state = "INIT"`, `run_start_ms = now`), sends `🔍 Waking phone & checking Virtual Master...`, stores `status_message_id`, and returns `bot_action = "RUN"`.
+   * If idle (`now >= busy_until`): initializes a new run (`busy_until = now + 45000`, `active_chat_id = cid`, `capture_mode = "qr"` or `"reset"`, `queue = []`, `qr_was_closed = false`, `step_count = 0`, `other_count = 0`, `progress_pct = 0` or `10`, `last_state = "INIT"`, `run_start_ms = now`), sends `🔍 Waking phone & checking Virtual Master...` for Admin or an initial `10%` progress bar (`🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%`) for regular users, stores `status_message_id`, and returns `bot_action = "RUN"`.
 
 ### Stage 3: Screen Wake & Virtual Master Foregrounding
 
@@ -127,15 +127,17 @@ Each iteration wakes/keeps the screen on (`ScreenOnAction`), captures a host scr
 | `WHITE_LOADING` | White/blank transition screen (`>= 34/40` white grid samples in `x=120..600, y=240..1290`, avoiding dense multi-column UI) | Bounded `WAIT` via `white_count` (`<= 5` -> `WAIT`; `6` -> `CLICK_BACK` `(151, 1553)`; `7` -> `WAIT`; `>= 8` -> `RESET_TO_HOME` `(360, 1553)`) |
 | `OTHER` | Unrecognized transition/overlay screen (`other_count`) | `1` or `3` -> `WAIT` (`1s`); `2` -> `CLICK_BACK` `(151, 1553)` + `800ms`; `>= 4` -> `RESET_TO_HOME` `(360, 1553)` + `800ms` (resets `other_count = 0`) |
 
-3. **Clean Exit vs. Queue Handoff:**
-   * **Queue Non-Empty (`NEXT_IN_QUEUE`):** Pops `queue[0]`, sets `active_chat_id` and `status_message_id` to the queued user, sets `step_count = 2`, `qr_was_closed = true`, `busy_until = now + 45000`, edits their message to `🔄 Generating QR code for your request...`, and returns `CLOSE_MODAL` (`(626, 121)`) so the next iteration immediately lands back on `TICKET_LIST` and opens a fresh QR for the next user.
+3. **Clean Exit vs. Queue Handoff & Role-Specific Status UI:**
+   * **Admin (`cid == admin_id`):** Receives full internal step-by-step status logs (`🖥️ Entering Virtual Master...`, `🚀 Launching Telcell Wallet...`, `🔐 Entering PIN...`, etc.) and diagnostic timeout details (`last state: ...`).
+   * **Regular Users (`cid != admin_id`):** Internal step logs are replaced by a monotonic emoji progress bar (`0% -> 10% -> ... -> 90%`) that never regresses backwards and omits internal app/VM details, including on timeouts (`❌ Timed out generating QR code. Please try again.`).
+   * **Queue Non-Empty (`NEXT_IN_QUEUE`):** Pops `queue[0]`, sets `active_chat_id` and `status_message_id` to the queued user, sets `step_count = 2`, `qr_was_closed = true`, `busy_until = now + 45000`, edits their message to `🔄 Generating QR code for your request...` (Admin) or `70%` progress bar (regular user), and returns `CLOSE_MODAL` (`(626, 121)`) so the next iteration immediately lands back on `TICKET_LIST` and opens a fresh QR for the next user.
    * **Queue Empty (`DONE`):** Sets `last_state = "QR_SENT"`, `busy_until = 0`, clicks Close `(626, 121)` -> `500ms` -> VM Back `(151, 1553)` -> `500ms` -> VM Home `(360, 1553)` -> `BreakFromLoopAction`. Exiting back to the VM desktop guarantees the next request starts from a clean state without stale QR modals or open `Купить билет` tabs.
 
 ### Stage 5: Post-Loop Guard (`JavaAction #3`) & Screen Sleep
 
 After exiting the `32×` loop, `build_timeout_script()` checks whether `busy_until > 0` or `step_cmd == "DONE_RESET"`:
 * Resets `busy_until = 0` and `queue = []`.
-* Edits the active (and any remaining queued) status messages with `✅ VM app reset complete.` or `❌ Timed out waiting for QR screen (last state: <last_state>). Please try again.`
+* Edits the active (and any remaining queued) status messages with `✅ VM app reset complete.` or `❌ Timed out waiting for QR screen (last state: <last_state>). Please try again.` (Admin) / `❌ Timed out generating QR code. Please try again.` (regular user).
 * Finally executes `ScreenOnAction(screen_off=True)` to put the display to sleep (`mWakefulness=Dozing`) with Virtual Master still in the host foreground.
 
 ---

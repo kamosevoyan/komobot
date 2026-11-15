@@ -144,10 +144,12 @@ class TestVisionScenarios(unittest.TestCase):
     def _seed_active_run(
         self,
         *,
+        active_chat_id: int = ADMIN_ID,
         mode: str = "qr",
         queue: list[dict] | None = None,
         step_count: int = 0,
         qr_was_closed: bool = False,
+        progress_pct: int = 0,
     ) -> None:
         self.env.write_config(
             {
@@ -156,7 +158,7 @@ class TestVisionScenarios(unittest.TestCase):
                 "public_access": True,
                 "busy_until": self.env.now_ms + 45000,
                 "last_update_id": 500,
-                "active_chat_id": ADMIN_ID,
+                "active_chat_id": active_chat_id,
                 "status_message_id": 1001,
                 "capture_mode": mode,
                 "queue": queue or [],
@@ -165,6 +167,7 @@ class TestVisionScenarios(unittest.TestCase):
                 "other_count": 0,
                 "white_count": 0,
                 "loading_count": 0,
+                "progress_pct": progress_pct,
                 "last_state": "INIT",
                 "run_start_ms": self.env.now_ms,
             }
@@ -445,6 +448,121 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(
             len([c for c in self.env.tg_calls if c["method"] == "sendPhoto"]), 1
         )
+
+    def test_regular_user_progress_bar_monotonic_and_admin_logs_preserved(self) -> None:
+        self._seed_active_run(
+            active_chat_id=USER_2,
+            progress_pct=10,
+            queue=[
+                {"chat_id": ADMIN_ID, "status_message_id": 9001},
+                {"chat_id": USER_3, "status_message_id": 9002},
+            ],
+        )
+
+        # Navigate USER_2 through VM + Telcell + wait nudge + backward retry guard
+        steps = [
+            (ScreenFactory.vm_launcher(True), "CLICK_ENTER"),
+            (ScreenFactory.vm_home(slot=1), "LAUNCH_1"),
+            (ScreenFactory.white_blank(), "WAIT"),  # wait tick 1: no redundant edit
+            (ScreenFactory.white_blank(), "WAIT"),  # wait tick 2: nudges to 40%
+            (ScreenFactory.pin_screen(spinner=False), "ENTER_PIN"),
+            (ScreenFactory.dashboard("low"), "CLICK_TRANSPORT_LOW"),
+            # Simulated transient return to PIN screen must never move bar backward
+            (ScreenFactory.pin_screen(spinner=False), "ENTER_PIN"),
+            (ScreenFactory.buy_ticket_tab(), "CLICK_AVAILABLE_TAB"),
+            (ScreenFactory.ticket_list(card_loaded=True), "CLICK_TICKET_ROW"),
+        ]
+        for bmp, expected_cmd in steps:
+            self.assertEqual(self._step(bmp), expected_cmd)
+
+        user2_edits = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_2
+        ]
+        self.assertEqual(
+            user2_edits,
+            [
+                "⏳ Generating QR code...\n🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜ 20%",
+                "⏳ Generating QR code...\n🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜ 30%",
+                "⏳ Generating QR code...\n🟩🟩🟩🟩⬜⬜⬜⬜⬜⬜ 40%",
+                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩⬜⬜⬜⬜⬜ 50%",
+                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩⬜⬜⬜⬜ 60%",
+                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩⬜⬜⬜ 70%",
+                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 80%",
+            ],
+        )
+
+        # QR upload hits 90%, deletes USER_2 status, and notifies queued ADMIN_ID
+        self.env.tg_calls.clear()
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
+        user2_qr_edits = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_2
+        ]
+        self.assertEqual(
+            user2_qr_edits, ["⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜ 90%"]
+        )
+        deletes = [
+            c["payload"]["chat_id"]
+            for c in self.env.tg_calls
+            if c["method"] == "deleteMessage"
+        ]
+        self.assertIn(USER_2, deletes)
+
+        # Queued ADMIN_ID still received original text prompt
+        admin_edits = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == ADMIN_ID
+        ]
+        self.assertEqual(admin_edits, ["🔄 Generating QR code for your request..."])
+
+        # ADMIN_ID ticket & QR keep detailed admin step logs; popping USER_3 starts 70%
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
+        admin_step_edits = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == ADMIN_ID
+        ]
+        self.assertEqual(
+            admin_step_edits, ["🎫 Selecting ticket...", "📸 Cropping & sending QR..."]
+        )
+        user3_handoff = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_3
+        ]
+        self.assertEqual(
+            user3_handoff, ["⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩⬜⬜⬜ 70%"]
+        )
+
+        # USER_3 finishes with 80% -> 90% progress bar and no admin internal logs
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        user3_edits = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "editMessageText" and c["payload"]["chat_id"] == USER_3
+        ]
+        self.assertEqual(
+            user3_edits,
+            [
+                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 80%",
+                "⏳ Generating QR code...\n🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜ 90%",
+            ],
+        )
+        for text in user2_edits + user2_qr_edits + user3_handoff + user3_edits:
+            for leak in ("Virtual Master", "Telcell", "PIN", "Transport", "ticket"):
+                self.assertNotIn(leak, text)
 
 
 if __name__ == "__main__":

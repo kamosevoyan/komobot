@@ -332,6 +332,22 @@ def make_take_screenshot(sg: SiguidGen) -> dict:
     }
 
 
+_BSH_PROGRESS_HELPER = """String formatProgress(String label, int pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    int filled = pct / 10;
+    StringBuilder bar = new StringBuilder();
+    for (int i = 0; i < 10; i++) {
+        if (i < filled) {
+            bar.append("🟩");
+        } else {
+            bar.append("⬜");
+        }
+    }
+    return label + "\\n" + bar.toString() + " " + pct + "%";
+}"""
+
+
 def build_router_script() -> str:
     """BeanShell Java 7 script for Telegram routing, auth, and user management."""
     return f"""import java.io.*;
@@ -391,6 +407,8 @@ JSONObject tgPost(String method, JSONObject payload) {{
     }}
     return new JSONObject();
 }}
+
+{_BSH_PROGRESS_HELPER}
 
 JSONObject sendMsg(long cid, String text, JSONObject markup) {{
     try {{
@@ -469,6 +487,7 @@ String statusStage = "";
 long claimedRunStart = 0L;
 int qPos = 0;
 boolean dupUid = false;
+boolean isAdminUser = false;
 
 synchronized (System.class) {{
     JSONObject cfg = loadConfig();
@@ -483,6 +502,9 @@ synchronized (System.class) {{
         cfg.put("last_msg_text", msgText);
 
         long adminId = cfg.optLong("admin_id", defaultAdminId);
+        if (!cfg.has("admin_id") && adminId > 0L) {{
+            cfg.put("admin_id", adminId);
+        }}
         JSONArray allowed = cfg.optJSONArray("allowed_users");
         if (allowed == null) {{
             allowed = new JSONArray();
@@ -491,6 +513,7 @@ synchronized (System.class) {{
         }}
 
         boolean isAdmin = (cid == adminId);
+        isAdminUser = isAdmin;
         boolean isAllowed = isAdmin;
         for (int i = 0; i < allowed.length(); i++) {{
             if (allowed.optLong(i, 0L) == cid) {{
@@ -661,6 +684,7 @@ synchronized (System.class) {{
                         cfg.put("white_count", 0);
                         cfg.put("loading_count", 0);
                         cfg.put("last_state", "INIT");
+                        cfg.put("progress_pct", isAdmin ? 0 : 10);
                         cfg.put("run_start_ms", now);
                         cfg.put("status_message_id", 0L);
                         saveConfig(cfg);
@@ -679,7 +703,10 @@ if (dupUid) {{
 if (replyText != null) {{
     sendMsg(cid, replyText, replyMarkup);
 }} else if (statusStage.equals("QUEUE")) {{
-    JSONObject qSent = sendMsg(cid, "⏳ Queued (#" + qPos + ") — waiting for current request to finish...", null);
+    String qText = isAdminUser
+        ? "⏳ Queued (#" + qPos + ") — waiting for current request to finish..."
+        : formatProgress("⏳ Queued (#" + qPos + ")...", 0);
+    JSONObject qSent = sendMsg(cid, qText, null);
     long qMsgId = qSent.has("result") ? qSent.getJSONObject("result").optLong("message_id", 0L) : 0L;
     if (qMsgId > 0L) {{
         synchronized (System.class) {{
@@ -702,7 +729,10 @@ if (replyText != null) {{
         }}
     }}
 }} else if (statusStage.equals("RUN")) {{
-    JSONObject sent = sendMsg(cid, "🔍 Waking phone & checking Virtual Master...", null);
+    String initText = isAdminUser
+        ? "🔍 Waking phone & checking Virtual Master..."
+        : formatProgress("⏳ Generating QR code...", 10);
+    JSONObject sent = sendMsg(cid, initText, null);
     long statusMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
     if (statusMsgId > 0L) {{
         synchronized (System.class) {{
@@ -918,6 +948,7 @@ void cleanScreenshots(String[] dirs, File latestFile, String latestName, long mt
 
 JSONObject cfg = loadConfig();
 long cid = cfg.optLong("active_chat_id", 0L);
+long adminId = cfg.optLong("admin_id", 0L);
 long statusMsgId = cfg.optLong("status_message_id", 0L);
 String mode = cfg.optString("capture_mode", "qr");
 int stepCount = cfg.optInt("step_count", 0) + 1;
@@ -1030,12 +1061,39 @@ try {{
         cfg.put("white_count", 0);
         cfg.put("loading_count", 0);
     }}
-    String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits) throws Exception {{
+{_BSH_PROGRESS_HELPER}
+    String prepareStepStatus(JSONObject cfg, long targetCid, long adminId, String adminText, int userPct) {{
+        if (targetCid == adminId) {{
+            return adminText;
+        }}
+        int cur = cfg.optInt("progress_pct", 0);
+        if (userPct <= cur) {{
+            return null;
+        }}
+        if (userPct > 100) userPct = 100;
+        cfg.put("progress_pct", userPct);
+        return formatProgress("⏳ Generating QR code...", userPct);
+    }}
+    void updateStepStatus(long targetCid, long targetMid, String text) {{
+        if (text != null) {{
+            updateStatus(targetCid, targetMid, text);
+        }}
+    }}
+    String prepareWaitNudge(JSONObject cfg, long targetCid, long adminId, int waitStep, int capPct) {{
+        if (targetCid == adminId) return null;
+        if (waitStep != 2 && waitStep != 4) return null;
+        int nextPct = cfg.optInt("progress_pct", 0) + 10;
+        if (nextPct > capPct) nextPct = capPct;
+        return prepareStepStatus(cfg, targetCid, adminId, null, nextPct);
+    }}
+    String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits, int waitCapPct, long cid, long statusMsgId, long adminId) throws Exception {{
         int cnt = cfg.optInt(countKey, 0) + 1;
         cfg.put(countKey, cnt);
         cfg.put("last_state", stateName);
         if (cnt <= maxWaits) {{
+            String waitText = prepareWaitNudge(cfg, cid, adminId, cnt, waitCapPct);
             saveConfig(cfg);
+            updateStepStatus(cid, statusMsgId, waitText);
             return "WAIT";
         }}
         if (cnt == maxWaits + 1) {{
@@ -1069,13 +1127,16 @@ try {{
             cfg.put("last_state", "VM_LAUNCHER");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
+            String stepText = prepareStepStatus(cfg, cid, adminId, "🖥️ Entering Virtual Master...", 20);
             saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "🖥️ Entering Virtual Master...");
+            updateStepStatus(cid, statusMsgId, stepText);
             return "CLICK_ENTER";
         }}
         cfg.put("last_state", "VM_LOADING");
         resetWaitCounters(cfg);
+        String waitText = ((stepCount & 1) == 0) ? prepareWaitNudge(cfg, cid, adminId, 2, 20) : null;
         saveConfig(cfg);
+        updateStepStatus(cid, statusMsgId, waitText);
         return "WAIT";
     }}
 
@@ -1124,11 +1185,13 @@ try {{
                 cfg.put("last_state", "STALE_QR");
                 cfg.put("other_count", 0);
                 resetWaitCounters(cfg);
+                String stepText = prepareStepStatus(cfg, cid, adminId, "🔄 Refreshing stale QR screen...", 50);
                 saveConfig(cfg);
-                updateStatus(cid, statusMsgId, "🔄 Refreshing stale QR screen...");
+                updateStepStatus(cid, statusMsgId, stepText);
                 return "CLOSE_MODAL";
             }}
-            updateStatus(cid, statusMsgId, "📸 Cropping & sending QR...");
+            String sendText = prepareStepStatus(cfg, cid, adminId, "📸 Cropping & sending QR...", 90);
+            updateStepStatus(cid, statusMsgId, sendText);
             int cx = px(130);
             int cy = py(445);
             int cw = px(590) - cx;
@@ -1141,7 +1204,10 @@ try {{
             if (code == 200) {{
                 deleteStatus(cid, statusMsgId);
             }} else {{
-                updateStatus(cid, statusMsgId, "❌ Failed to upload QR (HTTP " + code + ").");
+                String errText = (cid == adminId)
+                    ? "❌ Failed to upload QR (HTTP " + code + ")."
+                    : "❌ Failed to upload QR. Please try again.";
+                updateStatus(cid, statusMsgId, errText);
             }}
             long popNextCid = 0L;
             long popNextMid = 0L;
@@ -1167,6 +1233,7 @@ try {{
                     resetWaitCounters(cfg);
                     cfg.put("busy_until", System.currentTimeMillis() + 45000L);
                     cfg.put("last_state", "NEXT_IN_QUEUE");
+                    cfg.put("progress_pct", (popNextCid == adminId) ? 0 : 70);
                     saveConfig(cfg);
                     hasNext = true;
                 }} else {{
@@ -1174,19 +1241,23 @@ try {{
                     cfg.put("queue", new JSONArray());
                     cfg.put("last_state", "QR_SENT");
                     cfg.put("busy_until", 0L);
+                    cfg.put("progress_pct", 0);
                     resetWaitCounters(cfg);
                     saveConfig(cfg);
                 }}
             }}
             if (hasNext) {{
-                updateStatus(popNextCid, popNextMid, "🔄 Generating QR code for your request...");
+                String nextText = (popNextCid == adminId)
+                    ? "🔄 Generating QR code for your request..."
+                    : formatProgress("⏳ Generating QR code...", 70);
+                updateStatus(popNextCid, popNextMid, nextText);
                 return "CLOSE_MODAL";
             }} else {{
                 return "DONE";
             }}
         }}
         cfg.put("white_count", 0);
-        return handleLoadingWait(cfg, "loading_count", "QR_LOADING", 6);
+        return handleLoadingWait(cfg, "loading_count", "QR_LOADING", 6, 80, cid, statusMsgId, adminId);
     }}
 
     // 6. Check VM Home Screen (Telcell icon orange pixels)
@@ -1203,21 +1274,14 @@ try {{
                 if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o2++;
             }}
         }}
-        if (o1 >= 15) {{
-            cfg.put("last_state", "VM_HOME_1");
+        if (o1 >= 15 || o2 >= 15) {{
+            cfg.put("last_state", (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
+            String stepText = prepareStepStatus(cfg, cid, adminId, "🚀 Launching Telcell Wallet...", 30);
             saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "🚀 Launching Telcell Wallet...");
-            return "LAUNCH_1";
-        }}
-        if (o2 >= 15) {{
-            cfg.put("last_state", "VM_HOME_2");
-            cfg.put("other_count", 0);
-            resetWaitCounters(cfg);
-            saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "🚀 Launching Telcell Wallet...");
-            return "LAUNCH_2";
+            updateStepStatus(cid, statusMsgId, stepText);
+            return (o1 >= 15) ? "LAUNCH_1" : "LAUNCH_2";
         }}
     }}
 
@@ -1238,13 +1302,14 @@ try {{
             }}
             if (spinner >= 3) {{
                 cfg.put("white_count", 0);
-                return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 6);
+                return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 6, 40, cid, statusMsgId, adminId);
             }}
             cfg.put("last_state", "PIN_PAD");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
+            String stepText = prepareStepStatus(cfg, cid, adminId, "🔐 Entering PIN...", 50);
             saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "🔐 Entering PIN...");
+            updateStepStatus(cid, statusMsgId, stepText);
             return "ENTER_PIN";
         }}
     }}
@@ -1254,7 +1319,7 @@ try {{
     if (dashNav) {{
         if (isWhite(200, 300) && isWhite(580, 415) && isWhite(360, 800)) {{
             cfg.put("white_count", 0);
-            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6, 50, cid, statusMsgId, adminId);
         }}
         int svcLow = 0;
         int svcHigh = 0;
@@ -1269,33 +1334,17 @@ try {{
         }}
         if (svcLow < 3 && svcHigh < 3 && cfg.optInt("loading_count", 0) < 3) {{
             cfg.put("white_count", 0);
-            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 6, 50, cid, statusMsgId, adminId);
         }}
         cfg.put("qr_was_closed", true);
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
-        if (svcLow >= 3) {{
-            cfg.put("last_state", "DASHBOARD_LOW");
-            saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "📲 Opening Transport tickets...");
-            return "CLICK_TRANSPORT_LOW";
-        }}
-        if (svcHigh >= 3) {{
-            cfg.put("last_state", "DASHBOARD_HIGH");
-            saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "📲 Opening Transport tickets...");
-            return "CLICK_TRANSPORT_HIGH";
-        }}
-        if (isWhite(360, 1100) && !isWhite(360, 800)) {{
-            cfg.put("last_state", "DASHBOARD_LOW");
-            saveConfig(cfg);
-            updateStatus(cid, statusMsgId, "📲 Opening Transport tickets...");
-            return "CLICK_TRANSPORT_LOW";
-        }}
-        cfg.put("last_state", "DASHBOARD_HIGH");
+        boolean useLow = (svcLow >= 3) || (svcHigh < 3 && isWhite(360, 1100) && !isWhite(360, 800));
+        cfg.put("last_state", useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH");
+        String stepText = prepareStepStatus(cfg, cid, adminId, "📲 Opening Transport tickets...", 60);
         saveConfig(cfg);
-        updateStatus(cid, statusMsgId, "📲 Opening Transport tickets...");
-        return "CLICK_TRANSPORT_HIGH";
+        updateStepStatus(cid, statusMsgId, stepText);
+        return useLow ? "CLICK_TRANSPORT_LOW" : "CLICK_TRANSPORT_HIGH";
     }}
 
     // 9. Check Telcell Ticket List (Проездной билет -> Доступно)
@@ -1305,14 +1354,15 @@ try {{
     if ((buyBtnOrange || availTabOrange) && ticketBgGray) {{
         if (getR(360, 400) < 252 || getG(360, 400) < 252 || getB(360, 400) < 252) {{
             cfg.put("white_count", 0);
-            return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 6);
+            return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 6, 70, cid, statusMsgId, adminId);
         }}
         cfg.put("qr_was_closed", true);
         cfg.put("last_state", "TICKET_LIST");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
+        String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Selecting ticket...", 80);
         saveConfig(cfg);
-        updateStatus(cid, statusMsgId, "🎫 Selecting ticket...");
+        updateStepStatus(cid, statusMsgId, stepText);
         return "CLICK_TICKET_ROW";
     }}
 
@@ -1324,8 +1374,9 @@ try {{
         cfg.put("last_state", "BUY_TICKET_TAB");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
+        String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Switching to Available tickets...", 70);
         saveConfig(cfg);
-        updateStatus(cid, statusMsgId, "🎫 Switching to Available tickets...");
+        updateStepStatus(cid, statusMsgId, stepText);
         return "CLICK_AVAILABLE_TAB";
     }}
 
@@ -1339,7 +1390,7 @@ try {{
         }}
         if (whiteHits >= 34) {{
             cfg.put("loading_count", 0);
-            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", 5);
+            return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", 5, 40, cid, statusMsgId, adminId);
         }}
     }}
 
@@ -1422,6 +1473,7 @@ fis.close();
 if (raw.length() == 0) return "OK";
 
 JSONObject cfg = new JSONObject(raw);
+long adminId = cfg.optLong("admin_id", 0L);
 long busyUntil = cfg.optLong("busy_until", 0L);
 long cid = cfg.optLong("active_chat_id", 0L);
 long mid = cfg.optLong("status_message_id", 0L);
@@ -1439,7 +1491,9 @@ if (busyUntil > 0L || stepCmd.equals("DONE_RESET")) {{
 
     String msg = stepCmd.equals("DONE_RESET")
         ? "✅ VM app reset complete."
-        : "❌ Timed out waiting for QR screen (last state: " + lastState + "). Please try again.";
+        : (cid == adminId
+            ? "❌ Timed out waiting for QR screen (last state: " + lastState + "). Please try again."
+            : "❌ Timed out generating QR code. Please try again.");
     editTgMsg(botToken, cid, mid, msg);
 
     if (queue != null) {{

@@ -276,6 +276,51 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(fresh["last_state"], "INIT")
         self.assertEqual(fresh["last_update_id"], 501)
 
+    def test_regular_user_progress_bar_vs_admin_detailed_logging(self) -> None:
+        # Regular user RUN shows 10% progress bar instead of internal step logs
+        self.assertEqual(
+            _run_router(self.env, ALLOWED_USER, "📸 Take QR Screenshot"), "RUN"
+        )
+        run_msg = self.env.tg_calls[-1]["payload"]["text"]
+        self.assertEqual(run_msg, "⏳ Generating QR code...\n🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%")
+        self.assertEqual(self.env.read_config()["progress_pct"], 10)
+
+        # Queued regular user gets 0% progress bar; queued admin keeps detailed text
+        self.assertEqual(_run_router(self.env, THIRD_USER, "/qr"), "IGNORE")
+        self.assertEqual(
+            self.env.tg_calls[-1]["payload"]["text"],
+            "⏳ Queued (#1)...\n⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ 0%",
+        )
+        self.assertEqual(_run_router(self.env, ADMIN_ID, "/qr"), "IGNORE")
+        self.assertEqual(
+            self.env.tg_calls[-1]["payload"]["text"],
+            "⏳ Queued (#2) — waiting for current request to finish...",
+        )
+
+        # Regular user timeout hides internal last_state detail
+        cfg = self.env.read_config()
+        cfg["last_state"] = "WHITE_LOADING"
+        self.env.write_config(cfg)
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_timeout(self.env, "WAIT"), "OK")
+        edits = [
+            c["payload"] for c in self.env.tg_calls if c["method"] == "editMessageText"
+        ]
+        self.assertEqual(len(edits), 3)
+        self.assertEqual(
+            edits[0]["text"], "❌ Timed out generating QR code. Please try again."
+        )
+        self.assertNotIn("last state", edits[0]["text"])
+
+        # Admin RUN preserves exact original diagnostic text
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_router(self.env, ADMIN_ID, "/qr"), "RUN")
+        self.assertEqual(
+            self.env.tg_calls[-1]["payload"]["text"],
+            "🔍 Waking phone & checking Virtual Master...",
+        )
+        self.assertEqual(self.env.read_config()["progress_pct"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
