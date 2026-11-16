@@ -355,8 +355,11 @@ def scenario_inactivity_audit(ctx: ScenarioContext) -> str:
     )
     assert nomedia == "ok", "Missing /storage/emulated/0/komobot_ss/.nomedia"
 
+    night_mode = adb("shell", "cmd uimode night")
+    assert "yes" in night_mode.lower(), f"Expected locked Dark Mode: {night_mode!r}"
+
     return (
-        f"buckets=({macro_bucket},{vm_bucket}) doze=off anim=0 "
+        f"buckets=({macro_bucket},{vm_bucket}) doze=off anim=0 night=yes "
         f"phantom_mon={phantom_mon} max_procs={max_procs} "
         f"wifi_sleep={wifi_sleep} lock_disabled={lock_disabled}"
     )

@@ -110,6 +110,10 @@ adb shell settings put system enable_smart_capture 0 2>/dev/null || true
 adb shell settings put global window_animation_scale 0 2>/dev/null || true
 adb shell settings put global transition_animation_scale 0 2>/dev/null || true
 adb shell settings put global animator_duration_scale 0 2>/dev/null || true
+adb shell cmd uimode night yes >/dev/null 2>&1 || true
+adb shell settings put secure ui_night_mode 2 2>/dev/null || true
+adb shell settings put system display_night_theme_scheduled 0 2>/dev/null || true
+adb shell settings put system display_night_theme 1 2>/dev/null || true
 
 echo "==> Preparing screenshot workspace & cleaning old screenshots..."
 adb shell 'mkdir -p /storage/emulated/0/komobot_ss && touch /storage/emulated/0/komobot_ss/.nomedia && rm -f /storage/emulated/0/komobot_ss/frame.png /storage/emulated/0/komobot_ss/frame.jpg'
