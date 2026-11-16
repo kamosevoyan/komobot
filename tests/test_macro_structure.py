@@ -85,6 +85,9 @@ class TestMacroStructure(unittest.TestCase):
             "app_pin",
             "bot_action",
             "bot_token",
+            "callback_data",
+            "callback_id",
+            "callback_msg_id",
             "chat_id",
             "msg_text",
             "pin_d1",
@@ -128,7 +131,7 @@ class TestMacroStructure(unittest.TestCase):
         self.assertEqual(loop_depth, 0)
         self.assertEqual(loop_counts, [130])
 
-        # Stage 3 overlaps initial Telegram status with VM launch (no in-loop ScreenOn)
+        # Stage 3 wakes directly onto running VM and overlaps initial Telegram status
         loop_idx = next(
             i
             for i, a in enumerate(self.actions)
@@ -139,9 +142,18 @@ class TestMacroStructure(unittest.TestCase):
             for i, a in enumerate(self.actions)
             if a.get("m_classType") == "EndLoopAction"
         )
-        stage3_types = [a.get("m_classType") for a in self.actions[:loop_idx][-3:]]
+        stage3_types = [a.get("m_classType") for a in self.actions[:loop_idx][-2:]]
+        self.assertEqual(stage3_types, ["ScreenOnAction", "JavaAction"])
+        self.assertNotIn(
+            "LaunchActivityAction",
+            [a.get("m_classType") for a in self.actions[:loop_idx]],
+        )
+        launch_vm = _find_cmd_branch(self.actions, "LAUNCH_VM")
         self.assertEqual(
-            stage3_types, ["ScreenOnAction", "LaunchActivityAction", "JavaAction"]
+            [a.get("m_classType") for a in launch_vm], ["LaunchActivityAction"]
+        )
+        self.assertEqual(
+            launch_vm[0]["m_packageToLaunch"], "com.clone.android.dual.space"
         )
         loop_body = self.actions[loop_idx + 1 : end_loop_idx]
         self.assertNotIn("ScreenOnAction", [a.get("m_classType") for a in loop_body])
@@ -192,7 +204,7 @@ class TestMacroStructure(unittest.TestCase):
         for var_name in ("pin_d1", "pin_d2", "pin_d3", "pin_d4"):
             for digit, coords in gm.PIN_COORDS.items():
                 self.assertEqual(click_map[(var_name, digit)], coords)
-        self.assertEqual(top_pauses, [(0, 400), (0, 400), (0, 400)])
+        self.assertEqual(top_pauses, [(0, 250), (0, 250), (0, 250)])
 
         def xy_points(cmd: str) -> list[tuple[int, int]]:
             return [
@@ -256,7 +268,7 @@ class TestMacroStructure(unittest.TestCase):
 
     def test_stage1_webhook_regex_extractors(self) -> None:
         extractors: dict[str, tuple[str, str]] = {}
-        for action in self.actions[:3]:
+        for action in self.actions[:6]:
             self.assertEqual(action["m_classType"], "TextManipulationAction")
             suffix = action["m_text"].split("{lv=webhook_body}", 1)[1]
             regex = action["m_textManipulation"]["params"][0]
@@ -287,6 +299,9 @@ class TestMacroStructure(unittest.TestCase):
                 "update_id": "100001",
                 "chat_id": "111222333",
                 "msg_text": "📸 Take QR Screenshot",
+                "callback_id": "",
+                "callback_data": "",
+                "callback_msg_id": "42",
             },
         )
 
@@ -295,17 +310,72 @@ class TestMacroStructure(unittest.TestCase):
         )
         self.assertEqual(
             extract(group_msg),
-            {"update_id": "0", "chat_id": "-100123456", "msg_text": "/qr"},
+            {
+                "update_id": "0",
+                "chat_id": "-100123456",
+                "msg_text": "/qr",
+                "callback_id": "",
+                "callback_data": "",
+                "callback_msg_id": "0",
+            },
         )
 
         non_text_update = '{"update_id":99,"message":{"chat":{"id":77},"photo":[]}}'
         self.assertEqual(
             extract(non_text_update),
-            {"update_id": "99", "chat_id": "77", "msg_text": ""},
+            {
+                "update_id": "99",
+                "chat_id": "77",
+                "msg_text": "",
+                "callback_id": "",
+                "callback_data": "",
+                "callback_msg_id": "0",
+            },
+        )
+
+        callback_update = json.dumps(
+            {
+                "update_id": 100002,
+                "callback_query": {
+                    "id": "998877665544332211",
+                    "from": {"id": 111222333, "is_bot": False},
+                    "message": {
+                        "message_id": 505,
+                        "chat": {"id": 111222333},
+                        "reply_markup": {
+                            "inline_keyboard": [
+                                [{"text": "🔄 Refresh QR", "callback_data": "/qr"}]
+                            ]
+                        },
+                    },
+                    "chat_instance": "-1234567890",
+                    "data": "/qr",
+                },
+            },
+            ensure_ascii=False,
+        )
+        self.assertEqual(
+            extract(callback_update),
+            {
+                "update_id": "100002",
+                "chat_id": "111222333",
+                "msg_text": "🔄 Refresh QR",
+                "callback_id": "998877665544332211",
+                "callback_data": "/qr",
+                "callback_msg_id": "505",
+            },
         )
 
         self.assertEqual(
-            extract(""), {"update_id": "0", "chat_id": "0", "msg_text": ""}
+            extract(""),
+            {
+                "update_id": "0",
+                "chat_id": "0",
+                "msg_text": "",
+                "callback_id": "",
+                "callback_data": "",
+                "callback_msg_id": "0",
+            },
         )
 
     def test_beanshell_scripts_clean_and_cli_writes_valid_json(self) -> None:

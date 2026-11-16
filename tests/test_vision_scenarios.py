@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import struct
 import unittest
 from collections.abc import Callable
+from datetime import datetime
 
 import generate_macro as gm
 from tests.bsh_runtime import MockAndroidEnv, MockBitmap, run_bsh_script
@@ -157,11 +159,15 @@ class TestVisionScenarios(unittest.TestCase):
         self,
         *,
         active_chat_id: int = ADMIN_ID,
+        status_message_id: int = 1001,
+        status_is_media: bool = False,
         mode: str = "qr",
         queue: list[dict] | None = None,
         step_count: int = 0,
         qr_was_closed: bool = False,
         progress_pct: int = 0,
+        vm_seen: bool = False,
+        vm_launched: bool = False,
     ) -> None:
         self.env.write_config(
             {
@@ -171,7 +177,9 @@ class TestVisionScenarios(unittest.TestCase):
                 "busy_until": self.env.now_ms + 45000,
                 "last_update_id": 500,
                 "active_chat_id": active_chat_id,
-                "status_message_id": 1001,
+                "status_message_id": status_message_id,
+                "status_is_media": status_is_media,
+                "media_init_pending": False,
                 "capture_mode": mode,
                 "queue": queue or [],
                 "qr_was_closed": qr_was_closed,
@@ -179,6 +187,10 @@ class TestVisionScenarios(unittest.TestCase):
                 "other_count": 0,
                 "white_count": 0,
                 "loading_count": 0,
+                "vm_seen": vm_seen,
+                "vm_launched": vm_launched,
+                "pending_delete_cid": 0,
+                "pending_delete_mid": 0,
                 "progress_pct": progress_pct,
                 "last_state": "INIT",
                 "run_start_ms": self.env.now_ms,
@@ -240,6 +252,16 @@ class TestVisionScenarios(unittest.TestCase):
         photos = [c for c in self.env.tg_calls if c["method"] == "sendPhoto"]
         self.assertEqual(len(photos), 1)
         self.assertEqual(int(photos[0]["chat_id"]), ADMIN_ID)
+        expected_ts = datetime.fromtimestamp(self.env.now_ms / 1000.0).strftime(
+            "%H:%M:%S"
+        )
+        self.assertEqual(
+            photos[0]["caption"], f"🎫 QR Code • {expected_ts} (valid ~30s)"
+        )
+        self.assertEqual(
+            json.loads(photos[0]["reply_markup"]),
+            {"inline_keyboard": [[{"text": "🔄 Refresh QR", "callback_data": "/qr"}]]},
+        )
         png = photos[0]["photo_bytes"]
         self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
         w, h = struct.unpack("!II", png[16:24])
@@ -285,7 +307,9 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(cfg["last_state"], "WHITE_LOADING")
         self.assertEqual(cfg["white_count"], 0)
 
-        # Dense multi-column UI (ProductsFragment): avoids WHITE_LOADING loop
+        # Dense multi-column UI (ProductsFragment in Telcell): avoids WHITE_LOADING loop
+        cfg["vm_seen"] = True
+        self.env.write_config(cfg)
         other_seq = [
             self._step(ScreenFactory.dense_white_products_screen()) for _ in range(5)
         ]
@@ -901,6 +925,295 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
         self.assertTrue(env_ref.read_config()["qr_was_closed"])
         self.assertEqual(env_ref.read_config()["capture_mode"], "reset")
+
+    def test_cold_host_other_triggers_launch_vm_once_and_warm_skips_launcher(
+        self,
+    ) -> None:
+        # 1. Pure-black pre-wake frame (SCREEN_WAKING) or dark NotificationShade before
+        # VM/Telcell is seen must not poison vm_seen or block LAUNCH_VM on host OTHER.
+        self._seed_active_run(step_count=0, vm_seen=False, vm_launched=False)
+        pre_wake_black = MockBitmap(720, 1600, (0, 0, 0))
+        self.assertEqual(self._step(pre_wake_black), "WAIT")
+        wake_cfg = self.env.read_config()
+        self.assertEqual(wake_cfg["last_state"], "SCREEN_WAKING")
+        self.assertFalse(wake_cfg["vm_seen"])
+        self.assertFalse(wake_cfg.get("vm_booting", False))
+
+        host_home = MockBitmap(720, 1600, (90, 110, 140))
+        self.assertEqual(self._step(host_home), "WAIT")
+        self.assertEqual(self._step(host_home), "LAUNCH_VM")
+        cfg_launched = self.env.read_config()
+        self.assertTrue(cfg_launched["vm_launched"])
+        self.assertEqual(cfg_launched["other_count"], 0)
+        later = [self._step(host_home) for _ in range(5)]
+        self.assertEqual(later, ["WAIT", "WAIT", "CLICK_BACK", "WAIT", "RESET_TO_HOME"])
+
+        # 2. Warm Telcell resume starting on TICKET_LIST sets vm_seen=True, skips
+        # VM_LAUNCHER/LAUNCH_VM (even if transient OTHER appears), and finishes in 2s.
+        self.setUp()
+        self._seed_active_run(step_count=0, vm_seen=False, vm_launched=False)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.assertTrue(self.env.read_config()["vm_seen"])
+        self.assertFalse(self.env.read_config()["vm_launched"])
+        # Transient in-app OTHER after TICKET_LIST never triggers LAUNCH_VM
+        in_app_other = [self._step(host_home) for _ in range(5)]
+        self.assertEqual(
+            in_app_other, ["WAIT", "WAIT", "CLICK_BACK", "WAIT", "RESET_TO_HOME"]
+        )
+        self.assertFalse(self.env.read_config()["vm_launched"])
+
+        self.setUp()
+        self._seed_active_run(step_count=0, vm_seen=False, vm_launched=False)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        self.assertEqual(self.env.read_config()["step_count"], 2)
+
+    def test_next_in_queue_overlaps_delete_status_in_post_step(self) -> None:
+        self._seed_active_run(
+            active_chat_id=ADMIN_ID,
+            step_count=1,
+            queue=[{"chat_id": USER_2, "status_message_id": 2002}],
+        )
+        self.env.advance_time(200)
+        self.env.add_screenshot(
+            "Screenshot_001_Virtual Master.jpg",
+            ScreenFactory.qr_modal(loaded=True),
+            size=120_000,
+            with_thumbnail=True,
+        )
+        cmd = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        self.assertEqual(cmd, "CLOSE_MODAL")
+        # Before PostStep runs, only sendPhoto has executed; deleteMessage is deferred.
+        self.assertEqual([c["method"] for c in self.env.tg_calls], ["sendPhoto"])
+        mid_cfg = self.env.read_config()
+        self.assertEqual(mid_cfg["last_state"], "NEXT_IN_QUEUE")
+        self.assertEqual(mid_cfg["pending_delete_cid"], ADMIN_ID)
+        self.assertEqual(mid_cfg["pending_delete_mid"], 1001)
+
+        # PostStep overlaps old status deletion with queued user progress update.
+        run_bsh_script(
+            POST_STEP_SCRIPT,
+            self.env,
+            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["sendPhoto", "deleteMessage", "editMessageText"],
+        )
+        self.assertEqual(
+            self.env.tg_calls[1]["payload"], {"chat_id": ADMIN_ID, "message_id": 1001}
+        )
+        self.assertEqual(self.env.tg_calls[2]["payload"]["chat_id"], USER_2)
+        after_cfg = self.env.read_config()
+        self.assertEqual(after_cfg["pending_delete_cid"], 0)
+        self.assertEqual(after_cfg["pending_delete_mid"], 0)
+
+    def test_post_step_wait_settle_extends_during_vm_booting(self) -> None:
+        self._seed_active_run(step_count=1)
+        cfg = self.env.read_config()
+        cfg["vm_booting"] = False
+        self.env.write_config(cfg)
+        t0 = self.env.now_ms
+        run_bsh_script(
+            POST_STEP_SCRIPT,
+            self.env,
+            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": "WAIT"},
+        )
+        normal_dt = self.env.now_ms - t0
+        self.assertGreaterEqual(normal_dt, 180)
+        self.assertLess(normal_dt, 450)
+
+        cfg["vm_booting"] = True
+        self.env.write_config(cfg)
+        t1 = self.env.now_ms
+        run_bsh_script(
+            POST_STEP_SCRIPT,
+            self.env,
+            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": "WAIT"},
+        )
+        boot_dt = self.env.now_ms - t1
+        self.assertGreaterEqual(boot_dt, 500)
+
+    def test_in_place_refresh_media_progress_and_atomic_swap(self) -> None:
+        self._seed_active_run(
+            active_chat_id=ADMIN_ID,
+            status_message_id=777,
+            status_is_media=True,
+            progress_pct=10,
+            step_count=0,
+            vm_seen=True,
+        )
+        cmd = self._step(ScreenFactory.ticket_list(card_loaded=True))
+        self.assertEqual(cmd, "CLICK_TICKET_ROW")
+        run_bsh_script(
+            POST_STEP_SCRIPT,
+            self.env,
+            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+        )
+        # Even for Admin, media refresh advances progress on the inline button
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls], ["editMessageReplyMarkup"]
+        )
+        btn = self.env.tg_calls[0]["payload"]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertTrue(btn["text"].startswith("⏳ "))
+        self.assertEqual(btn["callback_data"], "noop")
+        self.assertEqual(self.env.tg_calls[0]["payload"]["message_id"], 777)
+
+        # Completing QR swaps media + caption + button via editMessageMedia
+        self.env.tg_calls.clear()
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        self.assertEqual([c["method"] for c in self.env.tg_calls], ["editMessageMedia"])
+        call = self.env.tg_calls[0]
+        self.assertEqual(int(call["chat_id"]), ADMIN_ID)
+        self.assertEqual(int(call["message_id"]), 777)
+        media = json.loads(call["media"])
+        expected_ts = datetime.fromtimestamp(self.env.now_ms / 1000.0).strftime(
+            "%H:%M:%S"
+        )
+        self.assertEqual(media["type"], "photo")
+        self.assertEqual(media["media"], "attach://photo")
+        self.assertEqual(media["caption"], f"🎫 QR Code • {expected_ts} (valid ~30s)")
+        self.assertEqual(
+            json.loads(call["reply_markup"]),
+            {"inline_keyboard": [[{"text": "🔄 Refresh QR", "callback_data": "/qr"}]]},
+        )
+        self.assertTrue(call["photo_bytes"].startswith(b"\x89PNG\r\n\x1a\n"))
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["last_state"], "QR_SENT")
+        self.assertFalse(cfg["status_is_media"])
+        self.assertEqual(cfg["pending_delete_mid"], 0)
+        self.assertEqual(cfg["busy_until"], 0)
+
+    def test_in_place_refresh_edit_media_400_fallback_and_500_retry_button(
+        self,
+    ) -> None:
+        # 1. HTTP 4xx on editMessageMedia falls back cleanly to sendPhoto
+        self._seed_active_run(
+            active_chat_id=ADMIN_ID,
+            status_message_id=777,
+            status_is_media=True,
+            progress_pct=10,
+            step_count=1,
+            vm_seen=True,
+        )
+        self.env.http_status_overrides["editMessageMedia"] = 400
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls], ["editMessageMedia", "sendPhoto"]
+        )
+        photo = self.env.tg_calls[1]
+        self.assertEqual(int(photo["chat_id"]), ADMIN_ID)
+        self.assertIn("🎫 QR Code • ", photo["caption"])
+        self.assertEqual(
+            json.loads(photo["reply_markup"]),
+            {"inline_keyboard": [[{"text": "🔄 Refresh QR", "callback_data": "/qr"}]]},
+        )
+
+        # 2. HTTP 5xx on editMessageMedia restores retry button via
+        # editMessageReplyMarkup
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=USER_2,
+            status_message_id=2002,
+            status_is_media=True,
+            progress_pct=10,
+            step_count=1,
+            vm_seen=True,
+        )
+        self.env.http_status_overrides["editMessageMedia"] = 500
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["editMessageMedia", "editMessageReplyMarkup", "sendMessage"],
+        )
+        retry_btn = self.env.tg_calls[1]["payload"]["reply_markup"]["inline_keyboard"][
+            0
+        ][0]
+        self.assertEqual(
+            retry_btn, {"text": "⚠️ Failed • 🔄 Retry", "callback_data": "/qr"}
+        )
+        self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 2002)
+        self.assertEqual(self.env.tg_calls[2]["payload"]["chat_id"], ADMIN_ID)
+        self.assertIn("HTTP 500", self.env.tg_calls[2]["payload"]["text"])
+
+    def test_queue_handoff_preserves_status_is_media(self) -> None:
+        # 1. Media active -> Text queued: preserves photo 777 (no deleteMessage)
+        self._seed_active_run(
+            active_chat_id=ADMIN_ID,
+            status_message_id=777,
+            status_is_media=True,
+            progress_pct=10,
+            step_count=1,
+            vm_seen=True,
+            queue=[
+                {"chat_id": USER_2, "status_message_id": 2002, "status_is_media": False}
+            ],
+        )
+        self.env.advance_time(200)
+        self.env.add_screenshot(
+            "Screenshot_001_Virtual Master.jpg",
+            ScreenFactory.qr_modal(loaded=True),
+            size=120_000,
+            with_thumbnail=True,
+        )
+        cmd = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        self.assertEqual(cmd, "CLOSE_MODAL")
+        mid_cfg = self.env.read_config()
+        self.assertFalse(mid_cfg["status_is_media"])
+        self.assertEqual(mid_cfg["pending_delete_mid"], 0)
+        run_bsh_script(
+            POST_STEP_SCRIPT,
+            self.env,
+            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["editMessageMedia", "editMessageText"],
+        )
+        self.assertEqual(self.env.tg_calls[1]["payload"]["chat_id"], USER_2)
+
+        # 2. Text active -> Media queued: deletes old text 2002 and updates 777 button
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=USER_2,
+            status_message_id=2002,
+            status_is_media=False,
+            progress_pct=10,
+            step_count=1,
+            vm_seen=True,
+            queue=[
+                {"chat_id": ADMIN_ID, "status_message_id": 777, "status_is_media": True}
+            ],
+        )
+        self.env.advance_time(200)
+        self.env.add_screenshot(
+            "Screenshot_002_Virtual Master.jpg",
+            ScreenFactory.qr_modal(loaded=True),
+            size=120_000,
+            with_thumbnail=True,
+        )
+        cmd2 = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
+        self.assertEqual(cmd2, "CLOSE_MODAL")
+        mid_cfg2 = self.env.read_config()
+        self.assertTrue(mid_cfg2["status_is_media"])
+        self.assertEqual(mid_cfg2["pending_delete_cid"], USER_2)
+        self.assertEqual(mid_cfg2["pending_delete_mid"], 2002)
+        run_bsh_script(
+            POST_STEP_SCRIPT,
+            self.env,
+            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd2},
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["sendPhoto", "deleteMessage", "editMessageReplyMarkup"],
+        )
+        q_btn = self.env.tg_calls[2]["payload"]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertTrue(q_btn["text"].startswith("⏳ "))
+        self.assertEqual(q_btn["callback_data"], "noop")
 
 
 if __name__ == "__main__":

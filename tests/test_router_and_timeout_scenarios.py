@@ -22,6 +22,9 @@ def _run_router(
     msg_text: str,
     update_id: str = "0",
     admin_id: str = ADMIN_ID,
+    callback_id: str = "",
+    callback_data: str = "",
+    callback_msg_id: str = "0",
 ) -> str:
     return run_bsh_script(
         ROUTER_SCRIPT,
@@ -33,6 +36,9 @@ def _run_router(
             "chat_id": chat_id,
             "update_id": update_id,
             "msg_text": msg_text,
+            "callback_id": callback_id,
+            "callback_data": callback_data,
+            "callback_msg_id": callback_msg_id,
         },
     )
 
@@ -47,8 +53,20 @@ def _dispatch_qr(
     msg_text: str,
     update_id: str = "0",
     admin_id: str = ADMIN_ID,
+    callback_id: str = "",
+    callback_data: str = "",
+    callback_msg_id: str = "0",
 ) -> str:
-    res = _run_router(env, chat_id, msg_text, update_id=update_id, admin_id=admin_id)
+    res = _run_router(
+        env,
+        chat_id,
+        msg_text,
+        update_id=update_id,
+        admin_id=admin_id,
+        callback_id=callback_id,
+        callback_data=callback_data,
+        callback_msg_id=callback_msg_id,
+    )
     if res == "RUN":
         _run_init_status(env)
     return res
@@ -488,6 +506,379 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(final_cfg["active_chat_id"], int(ADMIN_ID))
         self.assertEqual(final_cfg["capture_mode"], "reset")
         self.assertEqual(final_cfg["worker_pending_start_ms"], 0)
+
+    def test_callback_query_refresh_qr_routing_and_ack(self) -> None:
+        # 1. Idle inline "🔄 Refresh QR" callback triggers RUN and stores pending_cb_id;
+        # init_status answers the callback during wake settle and clears it.
+        res = _run_router(
+            self.env,
+            ADMIN_ID,
+            msg_text="🔄 Refresh QR",
+            update_id="501",
+            callback_id="cb-101",
+            callback_data="/qr",
+        )
+        self.assertEqual(res, "RUN")
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["last_update_id"], 501)
+        self.assertEqual(cfg["last_msg_text"], "/qr")
+        self.assertEqual(cfg["pending_cb_id"], "cb-101")
+        self.assertEqual(cfg["pending_delete_cid"], 0)
+        self.assertEqual(cfg["pending_delete_mid"], 0)
+        self.assertFalse(cfg["vm_seen"])
+        self.assertFalse(cfg["vm_launched"])
+        self.assertEqual(self.env.tg_calls, [])
+
+        self.assertEqual(_run_init_status(self.env), "SENT")
+        methods = [c["method"] for c in self.env.tg_calls]
+        self.assertEqual(methods, ["answerCallbackQuery", "sendMessage"])
+        self.assertEqual(
+            self.env.tg_calls[0]["payload"], {"callback_query_id": "cb-101"}
+        )
+        self.assertEqual(self.env.read_config()["pending_cb_id"], "")
+
+        # 2. Duplicate callback tap by active user <3s still answers callback query
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="🔄 Refresh QR",
+                update_id="502",
+                callback_id="cb-102",
+                callback_data="/qr",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            self.env.tg_calls,
+            [
+                {
+                    "method": "answerCallbackQuery",
+                    "status": 200,
+                    "payload": {"callback_query_id": "cb-102"},
+                }
+            ],
+        )
+
+        # 3. Queued user callback answers callback AND sends progress queue bar
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                msg_text="🔄 Refresh QR",
+                update_id="503",
+                callback_id="cb-103",
+                callback_data="/qr",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["answerCallbackQuery", "sendMessage"],
+        )
+        self.assertEqual(
+            self.env.tg_calls[0]["payload"], {"callback_query_id": "cb-103"}
+        )
+
+        # 4. Unauthorized callback answers callback AND sends unauthorized error
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                UNKNOWN_USER,
+                msg_text="",
+                update_id="504",
+                callback_id="cb-104",
+                callback_data="/qr",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["answerCallbackQuery", "sendMessage"],
+        )
+        self.assertIn("Unauthorized", self.env.tg_calls[1]["payload"]["text"])
+
+        # 5. Duplicate update_id skips all HTTP calls
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="504",
+                callback_id="cb-105",
+                callback_data="/qr",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(self.env.tg_calls, [])
+
+    def test_in_place_refresh_button_progress_noop_and_timeout(self) -> None:
+        # 1. Idle callback with message_id edits inline button to 10% noop bar
+        res = _run_router(
+            self.env,
+            ADMIN_ID,
+            msg_text="🔄 Refresh QR",
+            update_id="601",
+            callback_id="cb-201",
+            callback_data="/qr",
+            callback_msg_id="777",
+        )
+        self.assertEqual(res, "RUN")
+        cfg = self.env.read_config()
+        self.assertTrue(cfg["status_is_media"])
+        self.assertTrue(cfg["media_init_pending"])
+        self.assertEqual(cfg["status_message_id"], 777)
+        self.assertEqual(cfg["pending_cb_id"], "cb-201")
+        self.assertEqual(cfg["progress_pct"], 10)
+        self.assertEqual(self.env.tg_calls, [])
+
+        self.assertEqual(_run_init_status(self.env), "SENT")
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["answerCallbackQuery", "editMessageReplyMarkup"],
+        )
+        self.assertEqual(
+            self.env.tg_calls[0]["payload"], {"callback_query_id": "cb-201"}
+        )
+        btn = self.env.tg_calls[1]["payload"]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(btn["text"], "⏳ 🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%")
+        self.assertEqual(btn["callback_data"], "noop")
+        self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 777)
+        after_init = self.env.read_config()
+        self.assertFalse(after_init["media_init_pending"])
+        self.assertEqual(after_init["pending_cb_id"], "")
+
+        # 2. Tapping the progress button itself (callback_data="noop") shows toast only
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="602",
+                callback_id="cb-202",
+                callback_data="noop",
+                callback_msg_id="777",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            self.env.tg_calls,
+            [
+                {
+                    "method": "answerCallbackQuery",
+                    "status": 200,
+                    "payload": {
+                        "callback_query_id": "cb-202",
+                        "text": "⏳ Refresh already in progress...",
+                    },
+                }
+            ],
+        )
+
+        # 3. Same active user tapping >=3s later gets busy toast without chat spam
+        self.env.advance_time(3500)
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="🔄 Refresh QR",
+                update_id="603",
+                callback_id="cb-203",
+                callback_data="/qr",
+                callback_msg_id="777",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            self.env.tg_calls,
+            [
+                {
+                    "method": "answerCallbackQuery",
+                    "status": 200,
+                    "payload": {
+                        "callback_query_id": "cb-203",
+                        "text": "⏳ Your request is already in progress.",
+                    },
+                }
+            ],
+        )
+
+        # 4. Queued user tapping Refresh QR edits their button to queued status;
+        # repeat tap shows toast
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                msg_text="🔄 Refresh QR",
+                update_id="604",
+                callback_id="cb-204",
+                callback_data="/qr",
+                callback_msg_id="888",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["answerCallbackQuery", "editMessageReplyMarkup"],
+        )
+        q_btn = self.env.tg_calls[1]["payload"]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(q_btn["text"], "⏳ Queued (#1)...")
+        self.assertEqual(q_btn["callback_data"], "noop")
+        q_cfg = self.env.read_config()
+        self.assertEqual(
+            q_cfg["queue"],
+            [
+                {
+                    "chat_id": int(ALLOWED_USER),
+                    "status_message_id": 888,
+                    "status_is_media": True,
+                }
+            ],
+        )
+
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                msg_text="🔄 Refresh QR",
+                update_id="605",
+                callback_id="cb-205",
+                callback_data="/qr",
+                callback_msg_id="888",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            self.env.tg_calls,
+            [
+                {
+                    "method": "answerCallbackQuery",
+                    "status": 200,
+                    "payload": {
+                        "callback_query_id": "cb-205",
+                        "text": "⏳ You are already in the queue (#1).",
+                    },
+                }
+            ],
+        )
+
+        # 5. Timeout restores retry buttons via editMessageReplyMarkup (never
+        # editMessageText) and alerts Admin about affected queued regular users
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_timeout(self.env, "ABORT_TIMEOUT"), "SCREEN_OFF")
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["editMessageReplyMarkup", "editMessageReplyMarkup", "sendMessage"],
+        )
+        for call, expected_cid, expected_mid in zip(
+            self.env.tg_calls[:2], [int(ADMIN_ID), int(ALLOWED_USER)], [777, 888]
+        ):
+            self.assertEqual(call["payload"]["chat_id"], expected_cid)
+            self.assertEqual(call["payload"]["message_id"], expected_mid)
+            retry_btn = call["payload"]["reply_markup"]["inline_keyboard"][0][0]
+            self.assertEqual(retry_btn["text"], "❌ Timed out • 🔄 Retry")
+            self.assertEqual(retry_btn["callback_data"], "/qr")
+        self.assertEqual(self.env.tg_calls[2]["payload"]["chat_id"], int(ADMIN_ID))
+        self.assertIn(ALLOWED_USER, self.env.tg_calls[2]["payload"]["text"])
+        end_cfg = self.env.read_config()
+        self.assertFalse(end_cfg["status_is_media"])
+        self.assertFalse(end_cfg["media_init_pending"])
+        self.assertEqual(end_cfg["queue"], [])
+
+    def test_in_place_refresh_admin_reset_preemption_restores_retry_button(
+        self,
+    ) -> None:
+        # 1. Cold-path preemption (no live worker thread) defers notice to InitStatus
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                msg_text="🔄 Refresh QR",
+                update_id="701",
+                callback_id="cb-301",
+                callback_data="/qr",
+                callback_msg_id="901",
+            ),
+            "RUN",
+        )
+        stale_cfg = self.env.read_config()
+        stale_cfg["worker_active"] = False
+        stale_cfg["worker_pending_start_ms"] = 0
+        self.env.write_config(stale_cfg)
+        self.assertEqual(
+            _run_router(
+                self.env, ADMIN_ID, msg_text="🧹 Reset VM App", update_id="702"
+            ),
+            "RUN",
+        )
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_init_status(self.env), "SENT")
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["sendMessage", "editMessageReplyMarkup"],
+        )
+        self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 901)
+        self.assertEqual(
+            self.env.tg_calls[1]["payload"]["reply_markup"]["inline_keyboard"][0][0],
+            {"text": "❌ Cancelled • 🔄 Retry", "callback_data": "/qr"},
+        )
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_timeout(self.env, "DONE_RESET"), "SCREEN_OFF")
+        self.assertIn("VM app reset complete", self.env.tg_calls[-1]["payload"]["text"])
+
+        # 2. Cooperative preemption while worker is already active
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _dispatch_qr(
+                self.env,
+                ALLOWED_USER,
+                msg_text="🔄 Refresh QR",
+                update_id="703",
+                callback_id="cb-302",
+                callback_data="/qr",
+                callback_msg_id="902",
+            ),
+            "RUN",
+        )
+        self.assertEqual(
+            _run_router(
+                self.env,
+                THIRD_USER,
+                msg_text="🔄 Refresh QR",
+                update_id="704",
+                callback_id="cb-303",
+                callback_data="/qr",
+                callback_msg_id="903",
+            ),
+            "IGNORE",
+        )
+
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env, ADMIN_ID, msg_text="🧹 Reset VM App", update_id="705"
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["sendMessage", "editMessageReplyMarkup", "editMessageReplyMarkup"],
+        )
+        self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 902)
+        self.assertEqual(self.env.tg_calls[2]["payload"]["message_id"], 903)
+        for c in self.env.tg_calls[1:]:
+            self.assertEqual(
+                c["payload"]["reply_markup"]["inline_keyboard"][0][0],
+                {"text": "❌ Cancelled • 🔄 Retry", "callback_data": "/qr"},
+            )
 
 
 if __name__ == "__main__":

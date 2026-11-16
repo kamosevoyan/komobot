@@ -179,8 +179,8 @@ sys.exit(1)
 }
 
 accepted=0
-for _ in 1 2 3; do
-	sleep 2
+for _ in 1 2 3 4 5 6 7 8; do
+	sleep 1.5
 	if tap_ui_node "com.arlosoft.macrodroid:id/acceptButton"; then
 		echo "  Tapped Add Macro (acceptButton)"
 		accepted=1
@@ -192,8 +192,8 @@ if [[ "$accepted" -eq 0 ]]; then
 	adb shell input tap 637 1337
 fi
 
-for _ in 1 2; do
-	sleep 1.5
+for _ in 1 2 3 4; do
+	sleep 1
 	if tap_ui_node "OVERWRITE"; then
 		echo "  Confirmed OVERWRITE existing macro"
 		break

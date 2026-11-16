@@ -51,8 +51,18 @@ def adb(*args: str) -> str:
 
 
 def read_device_config() -> dict:
-    raw = adb("shell", "cat", CONFIG_DEVICE_PATH)
-    return json.loads(raw)
+    last_err: Exception | None = None
+    for _ in range(6):
+        raw = adb("shell", "cat", CONFIG_DEVICE_PATH)
+        if raw:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as exc:
+                last_err = exc
+        time.sleep(0.05)
+    if last_err is not None:
+        raise last_err
+    raise ValueError("Empty config JSON read from device")
 
 
 def get_wakefulness() -> str:
@@ -350,9 +360,7 @@ def scenario_inactivity_audit(ctx: ScenarioContext) -> str:
         val = adb("shell", "settings", "get", "global", scale)
         assert val in ("0", "0.0"), f"{scale}={val!r} (expected 0)"
 
-    nomedia = adb(
-        "shell", "test -f /storage/emulated/0/komobot_ss/.nomedia && echo ok"
-    )
+    nomedia = adb("shell", "test -f /storage/emulated/0/komobot_ss/.nomedia && echo ok")
     assert nomedia == "ok", "Missing /storage/emulated/0/komobot_ss/.nomedia"
 
     night_mode = adb("shell", "cmd uimode night")

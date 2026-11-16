@@ -15,6 +15,7 @@ import struct
 import threading
 import zlib
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 _KNOWN_CAST_TYPES = {
@@ -372,12 +373,17 @@ class MockAndroidEnv:
     ) -> tuple[int, str]:
         method = url_str.rsplit("/", 1)[-1]
         status = self.http_status_overrides.get(method, 200)
-        if method == "sendPhoto":
-            record = _parse_multipart_send_photo(body, content_type)
+        if method in ("sendPhoto", "editMessageMedia"):
+            record = _parse_multipart_form(body, content_type)
             self.tg_calls.append({"method": method, "status": status, **record})
             if status >= 400:
                 return status, json.dumps({"ok": False, "error_code": status})
-            return status, json.dumps({"ok": True, "result": {"message_id": 9999}})
+            mid = (
+                int(record.get("message_id", 9999))
+                if method == "editMessageMedia"
+                else 9999
+            )
+            return status, json.dumps({"ok": True, "result": {"message_id": mid}})
 
         payload = json.loads(body.decode("utf-8")) if body else {}
         self.tg_calls.append({"method": method, "status": status, "payload": payload})
@@ -389,7 +395,7 @@ class MockAndroidEnv:
         )
 
 
-def _parse_multipart_send_photo(body: bytes, content_type: str) -> dict[str, Any]:
+def _parse_multipart_form(body: bytes, content_type: str) -> dict[str, Any]:
     match = re.search(r"boundary=([^\s;]+)", content_type)
     boundary = match.group(1).encode("ascii") if match else b""
     parts = body.split(b"--" + boundary)
@@ -473,9 +479,7 @@ class _MockFile:
 
 
 class _MockByteArrayInputStream:
-    def __init__(
-        self, data: bytes, record: dict[str, Any] | None = None
-    ) -> None:
+    def __init__(self, data: bytes, record: dict[str, Any] | None = None) -> None:
         self._data = data
         self._read = False
         self._record = record
@@ -709,6 +713,27 @@ class _MockBitmapFactory:
         return entry.bitmap if entry else None
 
 
+class _MockLocale:
+    US = "en_US"
+
+
+class _MockDate:
+    def __init__(self, ms: int) -> None:
+        self.ms = ms
+
+
+class _MockSimpleDateFormat:
+    def __init__(self, pattern: str, locale: Any = None) -> None:
+        self._pattern = pattern
+        self._locale = locale
+
+    def format(self, date_obj: _MockDate) -> str:
+        dt = datetime.fromtimestamp(date_obj.ms / 1000.0)
+        if self._pattern == "HH:mm:ss":
+            return dt.strftime("%H:%M:%S")
+        raise ValueError(f"Unsupported date pattern: {self._pattern}")
+
+
 def _java_str(val: Any) -> str:
     if isinstance(val, bool):
         return "true" if val else "false"
@@ -785,6 +810,9 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
     def new_URL(spec: str) -> _MockURL:
         return _MockURL(env, spec)
 
+    def new_Date(ms: int | None = None) -> _MockDate:
+        return _MockDate(env.now_ms if ms is None else ms)
+
     return {
         "System": _MockSystem(env),
         "Thread": _MockThread(env),
@@ -796,6 +824,9 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
         "JSONArray": MockJSONArray,
         "StringBuilder": _MockStringBuilder,
         "ByteArrayOutputStream": _MockByteArrayOutputStream,
+        "SimpleDateFormat": _MockSimpleDateFormat,
+        "Date": new_Date,
+        "Locale": _MockLocale,
         "File": new_File,
         "FileInputStream": new_FileInputStream,
         "RandomAccessFile": new_RandomAccessFile,
