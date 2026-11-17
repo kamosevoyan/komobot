@@ -253,6 +253,45 @@ if [[ "$macro_enabled" -eq 0 ]]; then
 	exit 1
 fi
 
+# Optional: the Virtual Master guest ships an emulated fingerprint HAL that spins one CPU
+# core at ~100% from guest boot onwards. If the guest's adbd is reachable (guest USB
+# debugging enabled and this PC authorized, listening on host localhost:GUEST_ADB_PORT),
+# stop it. It returns after a guest reboot, so this only helps for the current boot.
+# Skip with SKIP_GUEST_TWEAKS=1.
+stop_guest_fps_hal() {
+	[[ "${SKIP_GUEST_TWEAKS:-0}" == "1" ]] && return 0
+	local host_serial guest_port local_port guest out
+	host_serial="$(adb get-serialno 2>/dev/null | tr -d '\r' || true)"
+	[[ -n "$host_serial" && "$host_serial" != "unknown" ]] || return 0
+	guest_port="${GUEST_ADB_PORT:-10001}"
+	local_port=15001
+	guest="127.0.0.1:${local_port}"
+	echo "==> Optional: stopping the runaway guest fingerprint HAL (set SKIP_GUEST_TWEAKS=1 to skip)..."
+	if adb -s "$host_serial" forward "tcp:${local_port}" "tcp:${guest_port}" >/dev/null 2>&1; then
+		timeout 10 adb connect "$guest" >/dev/null 2>&1 || true
+		out="$(timeout 20 adb -s "$guest" shell '
+state=$(getprop init.svc.vendor.fps_hal)
+if [ "$state" != running ]; then echo "idle:${state:-missing}"; exit 0; fi
+pid=$(getprop init.svc_debug_pid.vendor.fps_hal)
+setprop ctl.stop vendor.fps_hal
+sleep 1
+[ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+sleep 1
+echo "state:$(getprop init.svc.vendor.fps_hal)"' 2>/dev/null | tr -d '\r' || true)"
+		case "$out" in
+		"state:running") echo "  fps_hal is still running (could not stop it)" ;;
+		state:stopped) echo "  guest fps_hal stopped" ;;
+		idle:*) echo "  guest fps_hal already not running (${out#idle:}), nothing to do" ;;
+		*) echo "  guest ADB not reachable/authorized, skipping" ;;
+		esac
+		timeout 10 adb disconnect "$guest" >/dev/null 2>&1 || true
+		adb -s "$host_serial" forward --remove "tcp:${local_port}" >/dev/null 2>&1 || true
+	else
+		echo "  could not forward the guest ADB port, skipping"
+	fi
+}
+stop_guest_fps_hal || true
+
 sleep 1
 adb shell rm -f /storage/emulated/0/Download/Komobot_Controller.macro /data/local/tmp/md_ui.xml
 echo "==> Done deploying Komobot_Controller.macro to MacroDroid."

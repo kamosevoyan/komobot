@@ -227,6 +227,7 @@ Connect the phone over USB and run:
 5. Seed `/storage/emulated/0/Download/komobot_config.json` if absent (preserving existing device config across upgrades).
 6. Push `Komobot_Controller.macro`, wake the screen, launch MacroDroid's importer, tap `acceptButton`, and confirm `OVERWRITE` via `uiautomator` node lookup (with coordinate fallbacks).
 7. Verify the imported macro is **enabled** (MacroDroid sometimes imports it disabled, which silently drops every webhook): open the Macros tab, read `enabledSwitch` via `uiautomator`, switch it on if needed, and exit non-zero if it cannot be confirmed.
+8. *(Optional power saver)* If the Virtual Master guest has USB debugging enabled and this PC is authorized (guest `adbd` on host `localhost:10001`, override with `GUEST_ADB_PORT`), stop the guest's emulated `vendor.fps_hal` fingerprint HAL, which otherwise spins one CPU core at ~100% from guest boot. It returns after a guest reboot, so this only covers the current boot. Skip with `SKIP_GUEST_TWEAKS=1`; unreachable/unauthorized guest ADB is skipped silently.
 
 ### 3. Register the Telegram Webhook
 
