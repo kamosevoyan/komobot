@@ -339,6 +339,18 @@ class TestVisionScenarios(unittest.TestCase):
             len([c for c in self.env.tg_calls if c["method"] == "sendPhoto"]), 1
         )
 
+    def test_dashboard_high_layout_shift_waits_then_taps_low(self) -> None:
+        """Lazy promo cards push the Услуги row down; don't tap HIGH at once."""
+        self._seed_active_run(step_count=1)
+        self.assertEqual(self._step(ScreenFactory.dashboard("high")), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "DASH_LOADING")
+        self.assertEqual(
+            self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
+        )
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["last_state"], "DASHBOARD_LOW")
+        self.assertEqual(cfg.get("loading_count", 0), 0)
+
     def test_multi_user_queue_handoff_delivers_all_qrs(self) -> None:
         self._seed_active_run(
             step_count=1,
@@ -396,6 +408,10 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(self._step(ScreenFactory.vm_home(slot=2)), "LAUNCH_2")
         self.assertEqual(self.env.read_config()["last_state"], "VM_HOME_2")
 
+        # A stable HIGH layout is tapped only after a short settle wait.
+        for _ in range(3):
+            self.assertEqual(self._step(ScreenFactory.dashboard("high")), "WAIT")
+            self.assertEqual(self.env.read_config()["last_state"], "DASH_LOADING")
         self.assertEqual(
             self._step(ScreenFactory.dashboard("high")), "CLICK_TRANSPORT_HIGH"
         )

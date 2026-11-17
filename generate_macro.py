@@ -544,6 +544,24 @@ void notifyPreemptNotices(JSONArray notices) {
     }
 }"""
 
+_BSH_TIMING_HELPER = """void logTiming(String tag, long a, long b) {
+    try {
+        File f = new File("/storage/emulated/0/Download/komobot_timing.log");
+        String old = "";
+        if (f.exists()) {
+            FileInputStream fis = new FileInputStream(f);
+            old = readStream(fis);
+            fis.close();
+            if (old.length() > 12000) old = old.substring(old.length() - 8000);
+        }
+        String line = System.currentTimeMillis() + "\\t" + tag + "\\t" + a + "\\t" + b + ";";
+        FileOutputStream fos = new FileOutputStream(f);
+        fos.write((old + line).getBytes("UTF-8"));
+        fos.close();
+    } catch (Exception e) {
+    }
+}"""
+
 _BSH_WORKER_CONFIG_HELPERS = """JSONObject loadConfig() {
     File f = new File(configPath);
     if (f.exists()) {
@@ -1244,6 +1262,8 @@ def build_vision_script() -> str:
         + _BSH_TG_HTTP_HELPERS
         + "\n\n"
         + _BSH_WORKER_CONFIG_HELPERS
+        + "\n\n"
+        + _BSH_TIMING_HELPER
         + f"""
 
 JSONObject syncActiveConfig(JSONObject curCfg, String ssName, long ssMtime, boolean ssDel, boolean countStep) {{
@@ -1517,6 +1537,7 @@ if (!latestReady) {{
     latestReady = hasValidImageTrailer(latest);
 }}
 
+logTiming("CAPTURE", (long) stepCount, System.currentTimeMillis() - waitStart);
 String latestName = latest.getName();
 long latestMtime = latest.lastModified();
 cfg.put("last_ss_name", latestName);
@@ -2080,10 +2101,16 @@ try {{
             cfg.put("white_count", 0);
             return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
         }}
+        boolean useLow = (svcLow >= 3) || (svcHigh < 3 && isWhite(360, 1100) && !isWhite(360, 800));
+        if (!useLow && cfg.optInt("loading_count", 0) < 3) {{
+            // The HIGH Услуги row is often transient: lazy-loaded promo cards push it down
+            // right after the PIN. Wait briefly for the layout to settle before tapping.
+            cfg.put("white_count", 0);
+            return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
+        }}
         cfg.put("qr_was_closed", true);
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
-        boolean useLow = (svcLow >= 3) || (svcHigh < 3 && isWhite(360, 1100) && !isWhite(360, 800));
         cfg.put("last_state", useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH");
         String stepText = prepareStepStatus(cfg, cid, adminId, "📲 Opening Transport tickets...", 60);
         queueStepStatus(cfg, stepText);
@@ -2278,6 +2305,8 @@ def build_post_step_script() -> str:
         + _BSH_TG_HTTP_HELPERS
         + "\n\n"
         + _BSH_WORKER_CONFIG_HELPERS
+        + "\n\n"
+        + _BSH_TIMING_HELPER
         + """
 
 long t0 = System.currentTimeMillis();
@@ -2290,7 +2319,7 @@ else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
 else if (stepCmd.equals("CLICK_TRANSPORT_LOW") || stepCmd.equals("CLICK_TRANSPORT_HIGH")) waitMs = 750L;
 else if (stepCmd.equals("ENTER_PIN")) waitMs = 850L;
 else if (stepCmd.equals("CLICK_ENTER") || stepCmd.equals("LAUNCH_VM")) waitMs = 900L;
-else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 950L;
+else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 450L;
 else if (stepCmd.equals("LAUNCH_1") || stepCmd.equals("LAUNCH_2")) waitMs = 1100L;
 
 long cid = 0L;
@@ -2342,6 +2371,7 @@ if (rem > 0L) {
     } catch (Exception e) {
     }
 }
+logTiming("POST_" + stepCmd, waitMs, System.currentTimeMillis() - t0);
 return "OK";
 """
     )

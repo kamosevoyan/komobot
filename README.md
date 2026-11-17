@@ -44,7 +44,7 @@ flowchart TD
     VA -->|"PIN_PAD"| PIN["Extract pin_d1..d4 & Tap Calibrated PIN_COORDS (3x250ms)"]
     VA -->|"DASHBOARD_LOW / DASHBOARD_HIGH"| TR["Tap Услуги -> Транспорт"]
     VA -->|"BUY_TICKET_TAB"| TAB["Tap Доступно Tab (277, 200)"]
-    VA -->|"TICKET_LIST (mode == qr)"| ROW["Tap Ticket Row (360, 400; 950ms settle)"]
+    VA -->|"TICKET_LIST (mode == qr)"| ROW["Tap Ticket Row (360, 400; 450ms settle)"]
     VA -->|"TICKET_LIST (mode == reset & queue empty)"| RST["Set RESET, busy_until=0 -> BreakLoop (parked on Ticket List)"]
     VA -->|"TICKET_LIST (mode == reset & queue non-empty)"| RSTQ["Notify Admin Reset Complete + Pop User -> CLICK_TICKET_ROW"]
     VA -->|"STALE_QR (step 1) / Reset QR Modal"| CLOSE["Close Modal (626, 121)"]
@@ -143,7 +143,7 @@ Each iteration captures a host screenshot (`TakeScreenshotAction` with `uiOption
 | `DASHBOARD_LOW` / `DASHBOARD_HIGH` | Dashboard bottom nav bar orange/white; scans `Услуги` orange icon offsets (`1045..1105` vs `785..845`) | `CLICK_TRANSPORT_LOW` `(360, 1100)` or `CLICK_TRANSPORT_HIGH` `(360, 840)` + PostStep (`750ms` total) |
 | `BUY_TICKET_TAB` | `Проездной билет` opened on `Купить билет` tab (orange underline at `x=100, y=235` or buy card button `(550, 485)`) | `CLICK_AVAILABLE_TAB` -> Click `Доступно` `(277, 200)` + PostStep (`700ms` total) |
 | `TICKET_LOADING` | `Доступно` tab active on gray list background, ticket card still loading | Bounded `WAIT` via `loading_count` (`<= 9` -> `WAIT`; `10` -> `CLICK_BACK`; `11` -> `WAIT`; `>= 12` -> `RESET_TO_HOME`) |
-| `TICKET_LIST` (`mode == "qr"`) / `RESET` (`mode == "reset"`) | `Проездной билет -> Доступно` (`buyBtnOrange` or `availTabOrange`) with bright white ticket card at `(360, 400)`; sets `vm_seen=true` | `qr`: `CLICK_TICKET_ROW` `(360, 400)` + PostStep (`950ms` total). `reset` (empty queue): `DONE_RESET` -> `BreakFromLoopAction`. `reset` (queue non-empty): notifies Admin reset complete, pops `queue[0]` directly into `"qr"` (`CLICK_TICKET_ROW` + `80%` progress). |
+| `TICKET_LIST` (`mode == "qr"`) / `RESET` (`mode == "reset"`) | `Проездной билет -> Доступно` (`buyBtnOrange` or `availTabOrange`) with bright white ticket card at `(360, 400)`; sets `vm_seen=true` | `qr`: `CLICK_TICKET_ROW` `(360, 400)` + PostStep (`450ms` total). `reset` (empty queue): `DONE_RESET` -> `BreakFromLoopAction`. `reset` (queue non-empty): notifies Admin reset complete, pops `queue[0]` directly into `"qr"` (`CLICK_TICKET_ROW` + `80%` progress). |
 | `WHITE_LOADING` | White/blank transition screen (`>= 34/40` white grid samples in `x=120..600, y=240..1290`, avoiding dense multi-column UI) | Bounded `WAIT` via `white_count` (`<= 7` in `qr`, `<= 18` when `vm_booting` or `"reset"` -> `WAIT`; next -> `CLICK_BACK` `(151, 1553)`; +1 -> `WAIT`; +2 -> `RESET_TO_HOME` `(360, 1553)`) |
 | `OTHER` | Unrecognized host or in-app transition/overlay screen (`other_count`) | Host cold fallback (`!vm_booting && !vm_seen && !vm_launched && other_count == 2`): sets `vm_launched=true` and dispatches `LAUNCH_VM` (`com.clone.android.dual.space`, PostStep `900ms`). Otherwise warm/in-app: `<= 2` or `4` -> `WAIT`, `3` -> `CLICK_BACK`, `>= 5` -> `RESET_TO_HOME`. Cold VM boot (`vm_booting`): `<= 30` -> `WAIT`, `31` -> `CLICK_BACK`, `>= 32` -> `RESET_TO_HOME`. |
 
@@ -226,6 +226,7 @@ Connect the phone over USB and run:
 4. Whitelist `com.arlosoft.macrodroid` and `com.clone.android.dual.space` in `deviceidle`, grant `RUN_IN_BACKGROUND`, `RUN_ANY_IN_BACKGROUND`, and `WAKE_LOCK`, disable Doze, app standby, Phantom Process Killer monitoring (`settings_enable_monitor_phantom_procs false` and `max_phantom_processes 2147483647`), Wi-Fi sleep, lockscreen, system animations (`window`/`transition`/`animator = 0`), scheduled Light Mode (`cmd uimode night yes`, `ui_night_mode = 2`, `display_night_theme = 1`, `display_night_theme_scheduled = 0`), and Samsung Smart Capture, deny Virtual Master `TOAST_WINDOW` overlays, create `/storage/emulated/0/komobot_ss/.nomedia`, and clean old `/DCIM/Screenshots` thumbnail/trash files.
 5. Seed `/storage/emulated/0/Download/komobot_config.json` if absent (preserving existing device config across upgrades).
 6. Push `Komobot_Controller.macro`, wake the screen, launch MacroDroid's importer, tap `acceptButton`, and confirm `OVERWRITE` via `uiautomator` node lookup (with coordinate fallbacks).
+7. Verify the imported macro is **enabled** (MacroDroid sometimes imports it disabled, which silently drops every webhook): open the Macros tab, read `enabledSwitch` via `uiautomator`, switch it on if needed, and exit non-zero if it cannot be confirmed.
 
 ### 3. Register the Telegram Webhook
 

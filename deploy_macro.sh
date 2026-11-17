@@ -204,6 +204,55 @@ for _ in 1 2 3 4; do
 	fi
 done
 
+# MacroDroid sometimes imports the macro in the disabled state (e.g. after an ANR while
+# a webhook push arrives). A disabled macro silently drops every webhook, so verify it.
+macro_switch_state() {
+	local xml
+	xml="$(adb shell "uiautomator dump /data/local/tmp/md_ui.xml >/dev/null && cat /data/local/tmp/md_ui.xml" 2>/dev/null || true)"
+	python3 -c '
+import re, sys, xml.etree.ElementTree as ET
+xml_str = sys.stdin.read()
+idx = xml_str.find("<hierarchy")
+if idx < 0:
+    print("none")
+    sys.exit(0)
+root = ET.fromstring(xml_str[idx:])
+for node in root.iter("node"):
+    if node.attrib.get("resource-id", "") == "com.arlosoft.macrodroid:id/enabledSwitch":
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+        if m:
+            x1, y1, x2, y2 = map(int, m.groups())
+            print(node.attrib.get("checked", "false"), (x1 + x2) // 2, (y1 + y2) // 2)
+            sys.exit(0)
+print("none")
+' <<<"$xml" 2>/dev/null || echo none
+}
+
+echo "==> Verifying the macro is enabled in MacroDroid..."
+macro_enabled=0
+adb shell monkey -p com.arlosoft.macrodroid -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+sleep 1.5
+for _ in 1 2 3 4 5 6 7 8; do
+	state="$(macro_switch_state)"
+	set -- $state
+	if [[ "${1:-none}" == "true" ]]; then
+		macro_enabled=1
+		echo "  Komobot Controller is enabled"
+		break
+	elif [[ "${1:-none}" == "false" ]]; then
+		echo "  Macro is disabled, switching it on..."
+		adb shell input tap "$2" "$3"
+		sleep 1.5
+	else
+		tap_ui_node "com.arlosoft.macrodroid:id/navigation_macro_list" || true
+		sleep 1.5
+	fi
+done
+if [[ "$macro_enabled" -eq 0 ]]; then
+	echo "Error: could not confirm that Komobot Controller is enabled; enable it manually in MacroDroid." >&2
+	exit 1
+fi
+
 sleep 1
 adb shell rm -f /storage/emulated/0/Download/Komobot_Controller.macro /data/local/tmp/md_ui.xml
 echo "==> Done deploying Komobot_Controller.macro to MacroDroid."
