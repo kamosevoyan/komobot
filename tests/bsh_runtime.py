@@ -6,6 +6,7 @@ against an in-memory Android, Bitmap, filesystem, clock, and Telegram HTTP sandb
 
 from __future__ import annotations
 
+import base64
 import functools
 import json
 import keyword
@@ -31,6 +32,16 @@ _KNOWN_CAST_TYPES = {
     "Bitmap",
     "InputStream",
     "OutputStream",
+    "RSAPublicKey",
+    "RSAPrivateCrtKey",
+    "PrivateKey",
+    "PublicKey",
+    "BigInteger",
+    "KeyPair",
+    "KeyFactory",
+    "KeyPairGenerator",
+    "Cipher",
+    "Socket",
 }
 
 _KEYWORDS = {
@@ -44,6 +55,7 @@ _KEYWORDS = {
     "for",
     "while",
     "return",
+    "throw",
     "break",
     "continue",
     "new",
@@ -207,6 +219,7 @@ def _unwrap_json_value(val: Any) -> Any:
 
 class _CompressFormat:
     PNG = "PNG"
+    JPEG = "JPEG"
 
 
 class MockBitmap:
@@ -327,6 +340,10 @@ class MockAndroidEnv:
         self.next_message_id = 1000
         self.http_status_overrides: dict[str, int] = {}
         self.http_error_bodies: dict[str, dict[str, Any]] = {}
+        self.guest_adb_mode: str = "down"
+        self.guest_adb_commands: list[str] = []
+        self.guest_adb_responses: dict[str, str] = {}
+        self.guest_adb_pubkey_sent: bool = False
         self.lock = threading.RLock()
 
     def advance_time(self, ms: int) -> None:
@@ -521,7 +538,25 @@ class _MockByteArrayInputStream:
     def __init__(self, data: bytes, record: dict[str, Any] | None = None) -> None:
         self._data = data
         self._read = False
+        self._pos = 0
         self._record = record
+
+    def read(
+        self, buf: bytearray | None = None, off: int = 0, length: int | None = None
+    ) -> int:
+        if buf is None:
+            if self._pos >= len(self._data):
+                return -1
+            b = self._data[self._pos]
+            self._pos += 1
+            return b
+        n = len(buf) - off if length is None else int(length)
+        if self._pos >= len(self._data):
+            return -1
+        avail = min(n, len(self._data) - self._pos)
+        buf[off : off + avail] = self._data[self._pos : self._pos + avail]
+        self._pos += avail
+        return avail
 
     def read_all_lines(self) -> list[str]:
         if self._read:
@@ -582,11 +617,22 @@ class _MockBufferedReader:
 
 
 class _MockByteArrayOutputStream:
-    def __init__(self) -> None:
+    def __init__(self, size: int = 0) -> None:
+        del size
         self._buf = bytearray()
 
-    def write(self, data: bytes) -> None:
-        self._buf.extend(data)
+    def write(
+        self,
+        data: int | bytes | bytearray,
+        off: int | None = None,
+        length: int | None = None,
+    ) -> None:
+        if isinstance(data, int):
+            self._buf.append(data & 0xFF)
+        elif off is not None and length is not None:
+            self._buf.extend(data[off : off + length])
+        else:
+            self._buf.extend(data)
 
     def writeBytes(self, text: str) -> None:
         self._buf.extend(text.encode("latin1"))
@@ -599,6 +645,9 @@ class _MockByteArrayOutputStream:
 
     def toByteArray(self) -> bytes:
         return bytes(self._buf)
+
+    def size(self) -> int:
+        return len(self._buf)
 
 
 class _MockFileOutputStream:
@@ -613,8 +662,18 @@ class _MockFileOutputStream:
             if existing is not None:
                 self._buf.extend(existing.data)
 
-    def write(self, data: bytes) -> None:
-        self._buf.extend(data)
+    def write(
+        self,
+        data: int | bytes | bytearray,
+        off: int | None = None,
+        length: int | None = None,
+    ) -> None:
+        if isinstance(data, int):
+            self._buf.append(data & 0xFF)
+        elif off is not None and length is not None:
+            self._buf.extend(data[off : off + length])
+        else:
+            self._buf.extend(data)
 
     def flush(self) -> None:
         self._env.files[self._target.path] = VirtualFileEntry(
@@ -789,6 +848,312 @@ class _MockSimpleDateFormat:
         raise ValueError(f"Unsupported date pattern: {self._pattern}")
 
 
+class _MockAndroidBase64:
+    DEFAULT = 0
+    NO_WRAP = 2
+
+    @staticmethod
+    def encodeToString(data: bytes | bytearray, flags: int = 0) -> str:
+        del flags
+        return base64.b64encode(bytes(data)).decode("ascii")
+
+    @staticmethod
+    def decode(text: str, flags: int = 0) -> bytes:
+        del flags
+        return base64.b64decode(text.encode("ascii"))
+
+
+class _MockBigInteger:
+    def __init__(self, val: int) -> None:
+        self._val = int(val)
+
+    def shiftLeft(self, n: int) -> _MockBigInteger:
+        return _MockBigInteger(self._val << int(n))
+
+    def shiftRight(self, n: int) -> _MockBigInteger:
+        return _MockBigInteger(self._val >> int(n))
+
+    def mod(self, m: _MockBigInteger) -> _MockBigInteger:
+        return _MockBigInteger(self._val % m._val)
+
+    def modInverse(self, m: _MockBigInteger) -> _MockBigInteger:
+        return _MockBigInteger(pow(self._val, -1, m._val))
+
+    def negate(self) -> _MockBigInteger:
+        return _MockBigInteger(-self._val)
+
+    def multiply(self, other: _MockBigInteger) -> _MockBigInteger:
+        return _MockBigInteger(self._val * other._val)
+
+    def intValue(self) -> int:
+        v = self._val & 0xFFFFFFFF
+        return v - 0x100000000 if (v & 0x80000000) else v
+
+
+_MockBigInteger.ONE = _MockBigInteger(1)
+
+
+class _MockRSAPublicKey:
+    def __init__(self, n: int, e: int = 65537) -> None:
+        self._n = _MockBigInteger(n)
+        self._e = _MockBigInteger(e)
+
+    def getModulus(self) -> _MockBigInteger:
+        return self._n
+
+    def getPublicExponent(self) -> _MockBigInteger:
+        return self._e
+
+
+class _MockRSAPrivateKey:
+    def __init__(self, n: int, e: int = 65537) -> None:
+        self._n = n
+        self._e = e
+        self._encoded = json.dumps({"n": hex(n), "e": e}).encode("utf-8")
+
+    def getModulus(self) -> _MockBigInteger:
+        return _MockBigInteger(self._n)
+
+    def getPublicExponent(self) -> _MockBigInteger:
+        return _MockBigInteger(self._e)
+
+    def getEncoded(self) -> bytes:
+        return self._encoded
+
+
+class _MockKeyPair:
+    def __init__(self, priv: _MockRSAPrivateKey, pub: _MockRSAPublicKey) -> None:
+        self._priv = priv
+        self._pub = pub
+
+    def getPrivate(self) -> _MockRSAPrivateKey:
+        return self._priv
+
+    def getPublic(self) -> _MockRSAPublicKey:
+        return self._pub
+
+
+class _MockKeyPairGenerator:
+    def initialize(self, bits: int) -> None:
+        self._bits = bits
+
+    def generateKeyPair(self) -> _MockKeyPair:
+        n = (1 << 2047) | 0x65537ABCDEF12345
+        return _MockKeyPair(_MockRSAPrivateKey(n, 65537), _MockRSAPublicKey(n, 65537))
+
+    @staticmethod
+    def getInstance(alg: str) -> _MockKeyPairGenerator:
+        del alg
+        return _MockKeyPairGenerator()
+
+
+class _MockPKCS8EncodedKeySpec:
+    def __init__(self, data: bytes | bytearray) -> None:
+        self.data = bytes(data)
+
+
+class _MockRSAPublicKeySpec:
+    def __init__(self, modulus: _MockBigInteger, exponent: _MockBigInteger) -> None:
+        self.modulus = modulus
+        self.exponent = exponent
+
+
+class _MockKeyFactory:
+    @staticmethod
+    def getInstance(alg: str) -> _MockKeyFactory:
+        del alg
+        return _MockKeyFactory()
+
+    def generatePrivate(self, spec: _MockPKCS8EncodedKeySpec) -> _MockRSAPrivateKey:
+        obj = json.loads(spec.data.decode("utf-8"))
+        return _MockRSAPrivateKey(int(obj["n"], 16), int(obj["e"]))
+
+    def generatePublic(self, spec: _MockRSAPublicKeySpec) -> _MockRSAPublicKey:
+        return _MockRSAPublicKey(spec.modulus._val, spec.exponent._val)
+
+
+class _MockCipher:
+    ENCRYPT_MODE = 1
+
+    @staticmethod
+    def getInstance(transform: str) -> _MockCipher:
+        del transform
+        return _MockCipher()
+
+    def init(self, mode: int, key: _MockRSAPrivateKey) -> None:
+        del mode
+        self._key = key
+
+    def doFinal(self, data: bytes | bytearray) -> bytes:
+        return b"SIG:" + bytes(data[-20:])
+
+
+class _MockInetSocketAddress:
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = int(port)
+
+
+class _MockAdbOutputStream:
+    def __init__(self, sock: _MockSocket) -> None:
+        self._sock = sock
+        self._buf = bytearray()
+
+    def write(
+        self,
+        data: int | bytes | bytearray,
+        off: int | None = None,
+        length: int | None = None,
+    ) -> None:
+        if isinstance(data, int):
+            self._buf.append(data & 0xFF)
+        elif off is not None and length is not None:
+            self._buf.extend(data[off : off + length])
+        else:
+            self._buf.extend(data)
+
+    def flush(self) -> None:
+        self._sock._on_tx(bytes(self._buf))
+        self._buf.clear()
+
+
+class _MockAdbInputStream:
+    def __init__(self, sock: _MockSocket) -> None:
+        self._sock = sock
+
+    def read(
+        self, buf: bytearray | None = None, off: int = 0, length: int | None = None
+    ) -> int:
+        data = self._sock._rx
+        if self._sock._rx_pos >= len(data):
+            return -1
+        if buf is None:
+            b = data[self._sock._rx_pos]
+            self._sock._rx_pos += 1
+            return b
+        n = len(buf) - off if length is None else int(length)
+        avail = min(n, len(data) - self._sock._rx_pos)
+        buf[off : off + avail] = data[self._sock._rx_pos : self._sock._rx_pos + avail]
+        self._sock._rx_pos += avail
+        return avail
+
+
+class _MockSocket:
+    _A_CNXN = 0x4E584E43
+    _A_AUTH = 0x48545541
+    _A_OPEN = 0x4E45504F
+    _A_OKAY = 0x59414B4F
+    _A_CLSE = 0x45534C43
+    _A_WRTE = 0x45545257
+
+    def __init__(self, env: MockAndroidEnv) -> None:
+        self._env = env
+        self._tx = bytearray()
+        self._rx = bytearray()
+        self._rx_pos = 0
+        self._authed = False
+        self._remote_stream_id = 77
+        self._local_stream_id = 0
+        self._pending_close = False
+
+    def connect(self, addr: _MockInetSocketAddress, timeout_ms: int = 0) -> None:
+        del timeout_ms
+        if addr.host not in ("127.0.0.1", "localhost") or addr.port != 10001:
+            raise OSError(f"Unexpected ADB endpoint {addr.host}:{addr.port}")
+        if self._env.guest_adb_mode == "down":
+            raise OSError("Connection refused: 127.0.0.1:10001")
+
+    def setSoTimeout(self, ms: int) -> None:
+        del ms
+
+    def getOutputStream(self) -> _MockAdbOutputStream:
+        return _MockAdbOutputStream(self)
+
+    def getInputStream(self) -> _MockAdbInputStream:
+        return _MockAdbInputStream(self)
+
+    def close(self) -> None:
+        pass
+
+    def _queue_pkt(self, cmd: int, arg0: int, arg1: int, data: bytes = b"") -> None:
+        csum = sum(data) & 0xFFFFFFFF
+        magic = cmd ^ 0xFFFFFFFF
+        self._rx.extend(
+            struct.pack("<6I", cmd, arg0, arg1, len(data), csum, magic) + data
+        )
+
+    def _on_tx(self, chunk: bytes) -> None:
+        self._tx.extend(chunk)
+        while len(self._tx) >= 24:
+            cmd, arg0, arg1, length, csum, magic = struct.unpack(
+                "<6I", bytes(self._tx[:24])
+            )
+            if len(self._tx) < 24 + length:
+                break
+            payload = bytes(self._tx[24 : 24 + length])
+            del self._tx[: 24 + length]
+            assert magic == (cmd ^ 0xFFFFFFFF), f"Bad ADB magic: {magic:#x}"
+            assert csum == (sum(payload) & 0xFFFFFFFF), "Bad ADB checksum"
+
+            if cmd == self._A_CNXN:
+                self._queue_pkt(self._A_AUTH, 1, 0, b"01234567890123456789")
+            elif cmd == self._A_AUTH and arg0 == 2:
+                if self._env.guest_adb_mode == "ok":
+                    self._authed = True
+                    self._queue_pkt(
+                        self._A_CNXN, 0x01000001, 1048576, b"device::model=Pixel_4\x00"
+                    )
+                else:
+                    self._queue_pkt(self._A_AUTH, 1, 0, b"01234567890123456789")
+            elif cmd == self._A_AUTH and arg0 == 3:
+                self._env.guest_adb_pubkey_sent = True
+                if self._env.guest_adb_mode == "ok":
+                    self._authed = True
+                    self._queue_pkt(
+                        self._A_CNXN, 0x01000001, 1048576, b"device::model=Pixel_4\x00"
+                    )
+            elif cmd == self._A_OPEN:
+                if not self._authed:
+                    raise OSError("ADB stream opened before authentication")
+                self._local_stream_id = arg0
+                spec = payload.rstrip(b"\x00").decode("utf-8")
+                shell_cmd = spec[6:] if spec.startswith("shell:") else spec
+                self._env.guest_adb_commands.append(shell_cmd)
+                self._queue_pkt(self._A_OKAY, self._remote_stream_id, arg0)
+                out_str = self._resolve_shell_output(shell_cmd)
+                if out_str:
+                    self._queue_pkt(
+                        self._A_WRTE,
+                        self._remote_stream_id,
+                        arg0,
+                        out_str.encode("utf-8"),
+                    )
+                    self._pending_close = True
+                else:
+                    self._queue_pkt(self._A_CLSE, self._remote_stream_id, arg0)
+            elif cmd == self._A_OKAY and self._pending_close:
+                self._pending_close = False
+                self._queue_pkt(
+                    self._A_CLSE, self._remote_stream_id, self._local_stream_id
+                )
+
+    def _resolve_shell_output(self, shell_cmd: str) -> str:
+        for pat, resp in self._env.guest_adb_responses.items():
+            if pat in shell_cmd:
+                return resp
+        if "am force-stop" in shell_cmd:
+            return ""
+        if "setprop ctl.stop vendor.fps_hal" in shell_cmd:
+            return "OK\n"
+        if "dumpsys activity" in shell_cmd:
+            return (
+                "mResumedActivity=ActivityRecord{u0 "
+                "ru.deltapay.puntopago.telcell/.activities.main.MainActivity}\n"
+                "HomeFragment\n"
+            )
+        return ""
+
+
 def _java_str(val: Any) -> str:
     if isinstance(val, bool):
         return "true" if val else "false"
@@ -874,6 +1239,21 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
     def new_Date(ms: int | None = None) -> _MockDate:
         return _MockDate(env.now_ms if ms is None else ms)
 
+    def new_Socket() -> _MockSocket:
+        return _MockSocket(env)
+
+    def new_String(data: Any = "", *rest: Any) -> str:
+        if isinstance(data, (bytes, bytearray)):
+            if len(rest) == 1 and isinstance(rest[0], str):
+                return bytes(data).decode(rest[0], errors="replace")
+            if len(rest) >= 2 and isinstance(rest[0], int) and isinstance(rest[1], int):
+                enc = rest[2] if len(rest) > 2 and isinstance(rest[2], str) else "utf-8"
+                return bytes(data[rest[0] : rest[0] + rest[1]]).decode(
+                    enc, errors="replace"
+                )
+            return bytes(data).decode("utf-8", errors="replace")
+        return str(data)
+
     return {
         "System": _MockSystem(env),
         "Thread": _MockThread(env),
@@ -888,6 +1268,17 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
         "SimpleDateFormat": _MockSimpleDateFormat,
         "Date": new_Date,
         "Locale": _MockLocale,
+        "Base64": _MockAndroidBase64,
+        "BigInteger": _MockBigInteger,
+        "KeyPairGenerator": _MockKeyPairGenerator,
+        "KeyFactory": _MockKeyFactory,
+        "PKCS8EncodedKeySpec": _MockPKCS8EncodedKeySpec,
+        "RSAPublicKeySpec": _MockRSAPublicKeySpec,
+        "Cipher": _MockCipher,
+        "Socket": new_Socket,
+        "InetSocketAddress": _MockInetSocketAddress,
+        "IOException": OSError,
+        "String": new_String,
         "File": new_File,
         "FileInputStream": new_FileInputStream,
         "RandomAccessFile": new_RandomAccessFile,
@@ -917,7 +1308,7 @@ def _tokenize(src: str) -> list[_Tok]:
     i = 0
     n = len(src)
     two_char = {"&&", "||", "==", "!=", "<=", ">=", "++", "--", "+=", "-=", ">>", "<<"}
-    single_char = set("{}()[];,.?:+-*/%&|!<>=")
+    single_char = set("{}()[];,.?:+-*/%&|^!<>=")
     while i < n:
         ch = src[i]
         if ch.isspace():
@@ -1216,6 +1607,12 @@ class _BshToPyCompiler:
         if self.match("IDENT", "for"):
             self._parse_for_stmt()
             return
+        if self.match("IDENT", "throw"):
+            self.eat("IDENT", "throw")
+            val = self.parse_expr()
+            self.eat("OP", ";")
+            self.em.emit(f"raise {val}")
+            return
         if self.match("IDENT", "return"):
             self.eat("IDENT", "return")
             if self.match("OP", ";"):
@@ -1333,10 +1730,24 @@ class _BshToPyCompiler:
         return left
 
     def parse_and(self) -> str:
-        left = self.parse_bit_and()
+        left = self.parse_bit_or()
         while self.match("OP", "&&"):
             self.eat("OP", "&&")
-            left = f"({left} and {self.parse_bit_and()})"
+            left = f"({left} and {self.parse_bit_or()})"
+        return left
+
+    def parse_bit_or(self) -> str:
+        left = self.parse_bit_xor()
+        while self.match("OP", "|"):
+            self.eat("OP", "|")
+            left = f"({left} | {self.parse_bit_xor()})"
+        return left
+
+    def parse_bit_xor(self) -> str:
+        left = self.parse_bit_and()
+        while self.match("OP", "^"):
+            self.eat("OP", "^")
+            left = f"({left} ^ {self.parse_bit_and()})"
         return left
 
     def parse_bit_and(self) -> str:
@@ -1475,6 +1886,12 @@ class _BshToPyCompiler:
                 type_name = self.eat("IDENT").val
                 if self.match("OP", "["):
                     self.eat("OP", "[")
+                    if not self.match("OP", "]"):
+                        size_expr = self.parse_expr()
+                        self.eat("OP", "]")
+                        if type_name == "byte":
+                            return f"bytearray({size_expr})"
+                        return f"([0] * ({size_expr}))"
                     self.eat("OP", "]")
                     self.eat("OP", "{")
                     elems: list[str] = []

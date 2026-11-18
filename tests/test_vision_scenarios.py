@@ -55,6 +55,13 @@ class ScreenFactory:
         return bmp
 
     @classmethod
+    def anr_dialog(cls) -> MockBitmap:
+        bmp, rect = cls.scaled(720, 1600, (18, 18, 18))
+        rect(4, 1085, 716, 1510, 43, 43, 43)
+        rect(22, 1255, 698, 1465, 74, 74, 74)
+        return bmp
+
+    @classmethod
     def vm_home(cls, slot: int = 1) -> MockBitmap:
         bmp, rect = cls.scaled(720, 1600, (60, 60, 60))
         rect(300, 750, 420, 850, 20, 20, 20)
@@ -1369,6 +1376,97 @@ class TestVisionScenarios(unittest.TestCase):
             "QR_FAIL_UPLOAD",
             self.env.read_text("/storage/emulated/0/Download/komobot_events.log"),
         )
+
+    def test_guest_adb_fast_reset_fps_hal_kill_and_fallback(self) -> None:
+        # Generate/pair RSA keypair once via adm:adbpair in router
+        router_script = gm.build_router_script()
+        self.env.guest_adb_mode = "ok"
+        self.assertEqual(
+            run_bsh_script(
+                router_script,
+                self.env,
+                {
+                    "bot_token": "test-token",
+                    "app_name": LOCAL_VARS["app_name"],
+                    "admin_id": str(ADMIN_ID),
+                    "chat_id": str(ADMIN_ID),
+                    "update_id": "0",
+                    "msg_text": "",
+                    "callback_id": "cb-pair",
+                    "callback_data": "adm:adbpair",
+                    "callback_msg_id": "10",
+                },
+            ),
+            "IGNORE",
+        )
+
+        # 1. Warm QR fast path makes ZERO guest ADB calls
+        self._seed_active_run(mode="qr", step_count=0)
+        self.env.guest_adb_commands.clear()
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        self.assertEqual(self.env.guest_adb_commands, [])
+
+        # 2. Cold VM recovery stops vendor.fps_hal once upon reaching VM_HOME
+        self._seed_active_run(mode="qr", vm_seen=False)
+        cfg_cold = self.env.read_config()
+        cfg_cold["vm_booting"] = True
+        cfg_cold["fps_hal_checked"] = False
+        self.env.write_config(cfg_cold)
+        self.env.guest_adb_commands.clear()
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "LAUNCH_1")
+        self.assertIn("setprop ctl.stop vendor.fps_hal", self.env.guest_adb_commands)
+        self.assertTrue(self.env.read_config()["fps_hal_checked"])
+
+        # 3. Reset with Guest ADB connected runs am force-stop + am start directly
+        self._seed_active_run(mode="reset")
+        cfg_rst = self.env.read_config()
+        cfg_rst["adb_reset_tried"] = False
+        self.env.write_config(cfg_rst)
+        self.env.guest_adb_commands.clear()
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "WAIT")
+        rst_cfg = self.env.read_config()
+        self.assertEqual(rst_cfg["last_state"], "ADB_FORCE_RESTART")
+        self.assertEqual(rst_cfg["reset_stage"], 2)
+        self.assertTrue(any("am force-stop" in c for c in self.env.guest_adb_commands))
+
+        # 4. Dropped-to-launcher OTHER frame (other_count == 2) relaunches via ADB
+        self._seed_active_run(mode="qr", vm_seen=True)
+        cfg_oth = self.env.read_config()
+        cfg_oth["other_count"] = 1
+        cfg_oth["adb_relaunch_tried"] = False
+        self.env.write_config(cfg_oth)
+        self.env.guest_adb_commands.clear()
+        self.env.guest_adb_responses["dumpsys activity activities"] = (
+            "topResumedActivity=ActivityRecord{u0 "
+            "com.android.launcher3/.uioverrides.QuickstepLauncher}\n"
+        )
+        self.assertEqual(self._step(MockBitmap(720, 1600, (120, 140, 160))), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "ADB_RELAUNCH")
+        self.assertEqual(self.env.read_config()["other_count"], 0)
+        self.assertTrue(any("am start" in c for c in self.env.guest_adb_commands))
+
+        # 5. Unauthorized Guest ADB falls back to CLOSE_MODAL / OPEN_RECENTS on reset
+        self.env.guest_adb_mode = "unauthorized"
+        self._seed_active_run(mode="reset")
+        cfg_fb = self.env.read_config()
+        cfg_fb["adb_reset_tried"] = False
+        self.env.write_config(cfg_fb)
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "OPEN_RECENTS")
+
+    def test_anr_dialog_is_dismissed_with_wait_and_bounded(self) -> None:
+        self._seed_active_run(mode="qr")
+        for attempt in range(1, 5):
+            self.assertEqual(self._step(ScreenFactory.anr_dialog()), "DISMISS_ANR")
+            self.assertEqual(self.env.read_config()["anr_count"], attempt)
+        self.assertEqual(self.env.read_config()["last_state"], "ANR_DIALOG")
+        # Bounded: a stuck lookalike never loops forever on blind taps
+        self.assertNotEqual(self._step(ScreenFactory.anr_dialog()), "DISMISS_ANR")
+        # Normal screens never match the detector
+        self.assertNotEqual(self._step(ScreenFactory.ticket_list()), "DISMISS_ANR")
 
 
 if __name__ == "__main__":

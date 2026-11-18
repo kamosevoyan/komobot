@@ -149,7 +149,7 @@ adb shell "input keyevent 224; wm dismiss-keyguard 2>/dev/null || true; sleep 0.
 tap_ui_node() {
 	local pattern="$1"
 	local xml
-	xml="$(adb shell "uiautomator dump /data/local/tmp/md_ui.xml >/dev/null && cat /data/local/tmp/md_ui.xml" 2>/dev/null || true)"
+	xml="$(adb shell "uiautomator dump --compressed /data/local/tmp/md_ui.xml >/dev/null && cat /data/local/tmp/md_ui.xml" 2>/dev/null || true)"
 	local coords
 	coords="$(python3 -c '
 import re, sys, xml.etree.ElementTree as ET
@@ -159,6 +159,14 @@ if idx < 0:
     sys.exit(1)
 root = ET.fromstring(xml_str[idx:])
 pat = sys.argv[1].lower()
+for node in root.iter("node"):
+    rid = node.attrib.get("resource-id", "").lower()
+    if rid == "android:id/aerr_wait":
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+        if m and pat != "android:id/aerr_wait":
+            x1, y1, x2, y2 = map(int, m.groups())
+            print("ANR_WAIT", (x1 + x2) // 2, (y1 + y2) // 2)
+            sys.exit(0)
 for node in root.iter("node"):
     rid = node.attrib.get("resource-id", "").lower()
     txt = node.attrib.get("text", "").lower()
@@ -171,7 +179,12 @@ for node in root.iter("node"):
             sys.exit(0)
 sys.exit(1)
 ' "$pattern" <<<"$xml" 2>/dev/null || true)"
-	if [[ -n "$coords" ]]; then
+	if [[ "$coords" == ANR_WAIT* ]]; then
+		set -- $coords
+		adb shell input tap "$2" "$3"
+		sleep 1
+		return 1
+	elif [[ -n "$coords" ]]; then
 		adb shell input tap $coords
 		return 0
 	fi
@@ -192,15 +205,19 @@ if [[ "$accepted" -eq 0 ]]; then
 	adb shell input tap 637 1337
 fi
 
-for _ in 1 2 3 4; do
+for _ in 1 2 3 4 5 6; do
 	sleep 1
 	if tap_ui_node "OVERWRITE"; then
 		echo "  Confirmed OVERWRITE existing macro"
+		sleep 1.5
 		break
 	elif tap_ui_node "Import Macro"; then
 		echo "  Import Macro dialog detected, tapping OVERWRITE fallback (537, 868)"
 		adb shell input tap 537 868
+		sleep 1.5
 		break
+	elif tap_ui_node "com.arlosoft.macrodroid:id/acceptButton"; then
+		echo "  Re-tapped Add Macro (acceptButton)"
 	fi
 done
 
@@ -208,7 +225,7 @@ done
 # a webhook push arrives). A disabled macro silently drops every webhook, so verify it.
 macro_switch_state() {
 	local xml
-	xml="$(adb shell "uiautomator dump /data/local/tmp/md_ui.xml >/dev/null && cat /data/local/tmp/md_ui.xml" 2>/dev/null || true)"
+	xml="$(adb shell "uiautomator dump --compressed /data/local/tmp/md_ui.xml >/dev/null && cat /data/local/tmp/md_ui.xml" 2>/dev/null || true)"
 	python3 -c '
 import re, sys, xml.etree.ElementTree as ET
 xml_str = sys.stdin.read()
@@ -217,13 +234,18 @@ if idx < 0:
     print("none")
     sys.exit(0)
 root = ET.fromstring(xml_str[idx:])
+has_nav = False
 for node in root.iter("node"):
-    if node.attrib.get("resource-id", "") == "com.arlosoft.macrodroid:id/enabledSwitch":
-        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
-        if m:
-            x1, y1, x2, y2 = map(int, m.groups())
-            print(node.attrib.get("checked", "false"), (x1 + x2) // 2, (y1 + y2) // 2)
-            sys.exit(0)
+    if node.attrib.get("resource-id", "") == "com.arlosoft.macrodroid:id/navigation_macro_list":
+        has_nav = True
+for rid_target in ("com.arlosoft.macrodroid:id/enabledSwitch", "com.arlosoft.macrodroid:id/group_on_off_button"):
+    for node in root.iter("node"):
+        if has_nav and node.attrib.get("resource-id", "") == rid_target:
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+            if m:
+                x1, y1, x2, y2 = map(int, m.groups())
+                print(node.attrib.get("checked", "false"), (x1 + x2) // 2, (y1 + y2) // 2)
+                sys.exit(0)
 print("none")
 ' <<<"$xml" 2>/dev/null || echo none
 }
@@ -291,6 +313,25 @@ echo "state:$(getprop init.svc.vendor.fps_hal)"' 2>/dev/null | tr -d '\r' || tru
 	fi
 }
 stop_guest_fps_hal || true
+
+# Leave MacroDroid's UI: if its activity stays foreground while a webhook run starts, the
+# focus/screen-on churn can trigger "MacroDroid isn't responding" and that dialog eats taps.
+echo "==> Returning to Home and clearing any ANR dialog..."
+for _ in 1 2 3; do
+	anr_xy="$(adb shell "uiautomator dump --compressed /data/local/tmp/md_anr.xml >/dev/null 2>&1 && cat /data/local/tmp/md_anr.xml" 2>/dev/null | tr -d '\r' | python3 -c '
+import re, sys
+xml = sys.stdin.read()
+m = re.search(r"resource-id=\"android:id/aerr_wait\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"", xml)
+if m:
+    x1, y1, x2, y2 = map(int, m.groups())
+    print((x1 + x2) // 2, (y1 + y2) // 2)
+' 2>/dev/null || true)"
+	[[ -z "$anr_xy" ]] && break
+	echo "  ANR dialog found, tapping Wait"
+	adb shell input tap $anr_xy
+	sleep 1
+done
+adb shell "input keyevent KEYCODE_HOME" || true
 
 sleep 1
 adb shell rm -f /storage/emulated/0/Download/Komobot_Controller.macro /data/local/tmp/md_ui.xml

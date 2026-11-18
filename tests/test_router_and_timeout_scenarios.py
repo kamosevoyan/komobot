@@ -1372,6 +1372,89 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             self.env.read_config()["user_stats"][ALLOWED_USER]["fail"], 1
         )
 
+    def test_guest_adb_dashboard_status_and_pairing_flow(self) -> None:
+        # 1. Before keys exist, Dashboard Overview shows 🟡 Pair Needed & Pair button
+        self.env.guest_adb_mode = "down"
+        self.assertEqual(
+            _run_router(self.env, ADMIN_ID, "📊 Admin Dashboard", update_id="950"),
+            "IGNORE",
+        )
+        ov_text = self.env.tg_calls[0]["payload"]["text"]
+        ov_kb = [
+            b["callback_data"]
+            for row in self.env.tg_calls[0]["payload"]["reply_markup"][
+                "inline_keyboard"
+            ]
+            for b in row
+        ]
+        self.assertIn("Guest ADB: 🟡 Pair Needed", ov_text)
+        self.assertIn("adm:adbpair", ov_kb)
+
+        # 2. Pairing against unauthorized guest creates RSA keys & sends AUTH(3)
+        self.env.guest_adb_mode = "unauthorized"
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="951",
+                callback_id="cb-951",
+                callback_data="adm:adbpair",
+                callback_msg_id="601",
+            ),
+            "IGNORE",
+        )
+        self.assertTrue(self.env.guest_adb_pubkey_sent)
+        self.assertIn(
+            "/storage/emulated/0/Download/komobot_adb_key.pk8", self.env.files
+        )
+        self.assertIn(
+            "/storage/emulated/0/Download/komobot_adb_key.pub", self.env.files
+        )
+        self.assertIn("Always allow", self.env.tg_calls[0]["payload"]["text"])
+        self.assertIn(
+            "ADB_PAIR_SENT",
+            self.env.read_text("/storage/emulated/0/Download/komobot_events.log"),
+        )
+        self.assertIn(
+            "Guest ADB: 🟡 Pair Needed", self.env.tg_calls[1]["payload"]["text"]
+        )
+
+        # 3. Once trusted in VM, adm:home reports 🟢 Connected & adm:adbpair confirms
+        self.env.guest_adb_mode = "ok"
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="952",
+                callback_id="cb-952",
+                callback_data="adm:home",
+                callback_msg_id="601",
+            ),
+            "IGNORE",
+        )
+        self.assertIn(
+            "Guest ADB: 🟢 Connected", self.env.tg_calls[1]["payload"]["text"]
+        )
+
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="953",
+                callback_id="cb-953",
+                callback_data="adm:adbpair",
+                callback_msg_id="601",
+            ),
+            "IGNORE",
+        )
+        self.assertIn("already paired", self.env.tg_calls[0]["payload"]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

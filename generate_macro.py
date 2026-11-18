@@ -458,31 +458,23 @@ JSONObject postMultipartRaw(String endpoint, long cid, long mid, JSONObject extr
     res.put("desc", "");
     HttpURLConnection conn = null;
     try {
-        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + endpoint);
-        conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(timeoutMs);
-        conn.setReadTimeout(timeoutMs);
-        conn.setDoOutput(true);
         String boundary = "*****" + System.currentTimeMillis() + "*****";
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        conn.setRequestProperty("Connection", "keep-alive");
-        DataOutputStream req = new DataOutputStream(conn.getOutputStream());
+        ByteArrayOutputStream bodyBuf = new ByteArrayOutputStream(fileBytes.length + 1024);
+        DataOutputStream req = new DataOutputStream(bodyBuf);
 
         writeFormField(req, boundary, "chat_id", cid + "");
         if (mid > 0L) {
             writeFormField(req, boundary, "message_id", mid + "");
         }
         if (extraFields != null) {
-            JSONArray keys = extraFields.names();
-            if (keys != null) {
-                for (int i = 0; i < keys.length(); i++) {
-                    String k = keys.optString(i, "");
-                    String v = extraFields.optString(k, "");
-                    if (k.length() > 0 && v.length() > 0) {
-                        writeFormField(req, boundary, k, v);
-                    }
-                }
+            if (extraFields.has("media")) {
+                writeFormField(req, boundary, "media", extraFields.optString("media", ""));
+            }
+            if (extraFields.has("caption")) {
+                writeFormField(req, boundary, "caption", extraFields.optString("caption", ""));
+            }
+            if (extraFields.has("reply_markup")) {
+                writeFormField(req, boundary, "reply_markup", extraFields.optString("reply_markup", ""));
             }
         }
 
@@ -493,6 +485,20 @@ JSONObject postMultipartRaw(String endpoint, long cid, long mid, JSONObject extr
         req.writeBytes("\\r\\n--" + boundary + "--\\r\\n");
         req.flush();
         req.close();
+        byte[] bodyBytes = bodyBuf.toByteArray();
+
+        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + endpoint);
+        conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        conn.setRequestProperty("Connection", filename.endsWith(".jpg") ? "close" : "keep-alive");
+        OutputStream os = conn.getOutputStream();
+        os.write(bodyBytes);
+        os.flush();
+        os.close();
 
         int code = conn.getResponseCode();
         InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
@@ -947,15 +953,317 @@ void saveConfig(JSONObject cfg) {
     }
 }"""
 
+_BSH_GUEST_ADB_HELPERS = """String adbPrivPath = "/storage/emulated/0/Download/komobot_adb_key.pk8";
+String adbPubPath = "/storage/emulated/0/Download/komobot_adb_key.pub";
+
+void adbWriteLe32(OutputStream os, int v) throws Exception {
+    os.write(v & 0xff);
+    os.write((v >> 8) & 0xff);
+    os.write((v >> 16) & 0xff);
+    os.write((v >> 24) & 0xff);
+}
+
+int adbReadLe32(byte[] b, int off) {
+    return (b[off] & 0xff)
+        | ((b[off + 1] & 0xff) << 8)
+        | ((b[off + 2] & 0xff) << 16)
+        | ((b[off + 3] & 0xff) << 24);
+}
+
+byte[] adbReadFileBytes(String path) {
+    try {
+        File f = new File(path);
+        if (!f.exists()) return null;
+        FileInputStream fis = new FileInputStream(f);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buf = new byte[512];
+        int r;
+        while ((r = fis.read(buf, 0, 512)) > 0) {
+            baos.write(buf, 0, r);
+        }
+        fis.close();
+        return baos.toByteArray();
+    } catch (Exception e) {
+        return null;
+    }
+}
+
+void adbWriteFileBytes(String path, byte[] data) throws Exception {
+    File outFile = new File(path);
+    if (outFile.getParentFile() != null && !outFile.getParentFile().exists()) {
+        outFile.getParentFile().mkdirs();
+    }
+    FileOutputStream fos = new FileOutputStream(outFile);
+    fos.write(data);
+    fos.flush();
+    fos.close();
+}
+
+byte[] adbEncodePubKey(RSAPublicKey pub, String comment) throws Exception {
+    int words = 64;
+    BigInteger n = pub.getModulus();
+    BigInteger r32 = BigInteger.ONE.shiftLeft(32);
+    BigInteger n0inv = n.mod(r32).modInverse(r32).negate().mod(r32);
+    BigInteger r = BigInteger.ONE.shiftLeft(words * 32);
+    BigInteger rr = r.multiply(r).mod(n);
+
+    ByteArrayOutputStream out = new ByteArrayOutputStream(524);
+    adbWriteLe32(out, words);
+    adbWriteLe32(out, n0inv.intValue());
+    BigInteger tmpN = n;
+    for (int i = 0; i < words; i++) {
+        adbWriteLe32(out, tmpN.mod(r32).intValue());
+        tmpN = tmpN.shiftRight(32);
+    }
+    BigInteger tmpRR = rr;
+    for (int i = 0; i < words; i++) {
+        adbWriteLe32(out, tmpRR.mod(r32).intValue());
+        tmpRR = tmpRR.shiftRight(32);
+    }
+    adbWriteLe32(out, pub.getPublicExponent().intValue());
+    String b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+    ByteArrayOutputStream pubOut = new ByteArrayOutputStream(b64.length() + comment.length() + 4);
+    byte[] txtBytes = (b64 + " " + comment).getBytes("UTF-8");
+    pubOut.write(txtBytes, 0, txtBytes.length);
+    pubOut.write(0);
+    return pubOut.toByteArray();
+}
+
+boolean adbEnsureKeys(boolean allowCreate) {
+    byte[] pk8 = adbReadFileBytes(adbPrivPath);
+    byte[] pub = adbReadFileBytes(adbPubPath);
+    if (pk8 != null && pk8.length > 0 && pub != null && pub.length > 0) {
+        return true;
+    }
+    if (!allowCreate) return false;
+    try {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        adbWriteFileBytes(adbPrivPath, kp.getPrivate().getEncoded());
+        adbWriteFileBytes(adbPubPath, adbEncodePubKey((RSAPublicKey) kp.getPublic(), "komobot@host"));
+        return true;
+    } catch (Exception e) {
+        return false;
+    }
+}
+
+byte[] adbSignToken(byte[] pk8, byte[] token) throws Exception {
+    KeyFactory kf = KeyFactory.getInstance("RSA");
+    PrivateKey priv = kf.generatePrivate(new PKCS8EncodedKeySpec(pk8));
+    byte[] prefix = new byte[]{
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
+        0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14
+    };
+    ByteArrayOutputStream di = new ByteArrayOutputStream(36);
+    di.write(prefix, 0, prefix.length);
+    di.write(token, 0, token.length);
+    Cipher cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
+    cipher.init(Cipher.ENCRYPT_MODE, priv);
+    return cipher.doFinal(di.toByteArray());
+}
+
+void adbWritePkt(OutputStream os, int cmd, int arg0, int arg1, byte[] payload) throws Exception {
+    int len = (payload == null) ? 0 : payload.length;
+    int csum = 0;
+    if (payload != null) {
+        for (int i = 0; i < len; i++) {
+            csum = csum + (payload[i] & 0xff);
+        }
+    }
+    ByteArrayOutputStream hdr = new ByteArrayOutputStream(24);
+    adbWriteLe32(hdr, cmd);
+    adbWriteLe32(hdr, arg0);
+    adbWriteLe32(hdr, arg1);
+    adbWriteLe32(hdr, len);
+    adbWriteLe32(hdr, csum);
+    adbWriteLe32(hdr, cmd ^ 0xffffffff);
+    os.write(hdr.toByteArray());
+    if (len > 0) os.write(payload);
+    os.flush();
+}
+
+byte[] adbReadExact(InputStream is, int n) throws Exception {
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    byte[] buf = new byte[512];
+    int rem = n;
+    while (rem > 0) {
+        int want = (rem < 512) ? rem : 512;
+        int r = is.read(buf, 0, want);
+        if (r < 0) throw new IOException("ADB EOF");
+        baos.write(buf, 0, r);
+        rem = rem - r;
+    }
+    return baos.toByteArray();
+}
+
+byte[] adbNullBytes(String s) throws Exception {
+    byte[] raw = s.getBytes("UTF-8");
+    ByteArrayOutputStream b = new ByteArrayOutputStream(raw.length + 1);
+    b.write(raw, 0, raw.length);
+    b.write(0);
+    return b.toByteArray();
+}
+
+JSONObject adbReadPkt(InputStream is, ByteArrayOutputStream dataOut) throws Exception {
+    byte[] hdr = adbReadExact(is, 24);
+    int cmd = adbReadLe32(hdr, 0);
+    int arg0 = adbReadLe32(hdr, 4);
+    int arg1 = adbReadLe32(hdr, 8);
+    int len = adbReadLe32(hdr, 12);
+    if (len < 0 || len > 1048576) throw new IOException("Bad ADB len: " + len);
+    if (len > 0) {
+        byte[] data = adbReadExact(is, len);
+        dataOut.write(data, 0, data.length);
+    }
+    JSONObject pkt = new JSONObject();
+    pkt.put("cmd", cmd);
+    pkt.put("arg0", arg0);
+    pkt.put("arg1", arg1);
+    return pkt;
+}
+
+JSONObject guestAdbShell(String cmdStr, int timeoutMs, boolean allowPairPrompt) {
+    JSONObject res = new JSONObject();
+    res.put("ok", false);
+    res.put("state", "OFFLINE");
+    res.put("out", "");
+    res.put("err", "");
+    Socket sock = null;
+    try {
+        if (!adbEnsureKeys(allowPairPrompt)) {
+            if (!allowPairPrompt) {
+                res.put("state", "UNPAIRED");
+            }
+            return res;
+        }
+        byte[] pk8 = adbReadFileBytes(adbPrivPath);
+        byte[] pub = adbReadFileBytes(adbPubPath);
+        if (pk8 == null || pub == null) {
+            res.put("state", "UNPAIRED");
+            return res;
+        }
+
+        int A_CNXN = 0x4e584e43;
+        int A_AUTH = 0x48545541;
+        int A_OPEN = 0x4e45504f;
+        int A_OKAY = 0x59414b4f;
+        int A_CLSE = 0x45534c43;
+        int A_WRTE = 0x45545257;
+
+        sock = new Socket();
+        sock.connect(new InetSocketAddress("127.0.0.1", 10001), 450);
+        sock.setSoTimeout(timeoutMs);
+        OutputStream os = sock.getOutputStream();
+        InputStream is = sock.getInputStream();
+
+        adbWritePkt(os, A_CNXN, 0x01000001, 1048576, adbNullBytes("host::"));
+        boolean authed = false;
+        boolean sentSig = false;
+        for (int tries = 0; tries < 4; tries++) {
+            ByteArrayOutputStream pDataOut = new ByteArrayOutputStream();
+            JSONObject pkt = adbReadPkt(is, pDataOut);
+            int pCmd = pkt.optInt("cmd", 0);
+            int pArg0 = pkt.optInt("arg0", 0);
+            byte[] pData = pDataOut.toByteArray();
+            if (pCmd == A_CNXN) {
+                authed = true;
+                break;
+            }
+            if (pCmd == A_AUTH && pArg0 == 1) {
+                if (!sentSig) {
+                    byte[] sig = adbSignToken(pk8, pData);
+                    adbWritePkt(os, A_AUTH, 2, 0, sig);
+                    sentSig = true;
+                } else if (allowPairPrompt) {
+                    adbWritePkt(os, A_AUTH, 3, 0, pub);
+                    res.put("state", "PAIR_PROMPT_SENT");
+                    sock.close();
+                    return res;
+                } else {
+                    res.put("state", "UNAUTHORIZED");
+                    sock.close();
+                    return res;
+                }
+            }
+        }
+        if (!authed) {
+            res.put("state", "UNAUTHORIZED");
+            sock.close();
+            return res;
+        }
+        if (cmdStr == null || cmdStr.length() == 0) {
+            res.put("ok", true);
+            res.put("state", "OK");
+            sock.close();
+            return res;
+        }
+
+        adbWritePkt(os, A_OPEN, 1, 0, adbNullBytes("shell:" + cmdStr));
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        int remoteId = 0;
+        for (int loops = 0; loops < 512; loops++) {
+            ByteArrayOutputStream pDataOut = new ByteArrayOutputStream();
+            JSONObject pkt = adbReadPkt(is, pDataOut);
+            int pCmd = pkt.optInt("cmd", 0);
+            int r0 = pkt.optInt("arg0", 0);
+            int r1 = pkt.optInt("arg1", 0);
+            byte[] pData = pDataOut.toByteArray();
+            if (pCmd == A_OKAY && r1 == 1) {
+                remoteId = r0;
+            } else if (pCmd == A_WRTE && r1 == 1) {
+                if (outBuf.size() < 262144 && pData.length > 0) {
+                    outBuf.write(pData, 0, pData.length);
+                }
+                adbWritePkt(os, A_OKAY, 1, r0, null);
+            } else if (pCmd == A_CLSE && r1 == 1) {
+                adbWritePkt(os, A_CLSE, 1, r0, null);
+                break;
+            }
+        }
+        sock.close();
+        res.put("ok", true);
+        res.put("state", "OK");
+        res.put("out", new String(outBuf.toByteArray(), "UTF-8"));
+        return res;
+    } catch (Exception e) {
+        res.put("err", e + "");
+        try {
+            if (sock != null) sock.close();
+        } catch (Exception ignored) {
+        }
+        return res;
+    }
+}
+
+String guestAdbStatusLabel() {
+    JSONObject r = guestAdbShell("", 600, false);
+    String st = r.optString("state", "OFFLINE");
+    if (st.equals("OK")) return "🟢 Connected";
+    if (st.equals("UNAUTHORIZED") || st.equals("UNPAIRED")) return "🟡 Pair Needed";
+    return "🔴 VM Offline";
+}"""
+
 
 def build_router_script() -> str:
     """BeanShell Java 7 script for Telegram routing, auth, and user management."""
-    return f"""import java.io.*;
+    return f"""import android.util.Base64;
+import java.io.*;
+import java.math.BigInteger;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URL;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import javax.crypto.Cipher;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -1001,6 +1309,8 @@ try {{
 {_BSH_TG_HTTP_HELPERS}
 
 {_BSH_AUDIT_HELPERS}
+
+{_BSH_GUEST_ADB_HELPERS}
 
 JSONObject loadConfig() {{
     File f = new File(configPath);
@@ -1394,6 +1704,7 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     sb.append("👑 Komobot Admin Dashboard\\n\\n");
     sb.append("• Access: ").append(pubAccess ? "🟢 ENABLED (Public)" : "🔴 LOCKED (Admin only)").append("\\n");
     sb.append("• Status: ").append(runStatus).append("\\n");
+    sb.append("• Guest ADB: ").append(guestAdbStatusLabel()).append("\\n");
     sb.append("• Users: ").append(userCnt).append(" authorized\\n\\n");
     sb.append("📊 Today (").append(day).append("): ")
       .append(dReq).append(" req | ✅ ").append(dOk).append(" | ❌ ").append(dFail).append("\\n");
@@ -1419,6 +1730,9 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     r4.put(makeBtn("📎 Export Log File", "adm:export"));
     r4.put(makeBtn("🗑️ Reset Stats", "adm:clrstats"));
     rows.put(r4);
+    JSONArray r5 = new JSONArray();
+    r5.put(makeBtn("🔗 Pair Guest ADB", "adm:adbpair"));
+    rows.put(r5);
     out.put("text", sb.toString());
     out.put("markup", wrapInlineKb(rows));
     return out;
@@ -1743,6 +2057,21 @@ synchronized (System.class) {{
                     exportAuditDoc = true;
                     callbackToast = "📎 Exporting log file...";
                     renderCard = false;
+                }} else if (sub.equals("adbpair")) {{
+                    JSONObject pRes = guestAdbShell("", 1000, true);
+                    String pState = pRes.optString("state", "OFFLINE");
+                    if (pState.equals("OK")) {{
+                        callbackToast = "🟢 Guest ADB already paired!";
+                    }} else if (pState.equals("PAIR_PROMPT_SENT")) {{
+                        callbackToast = "📱 Tap Always allow inside Virtual Master, then Refresh!";
+                        auditLevel = "ADMIN";
+                        auditEvent = "ADB_PAIR_SENT";
+                        auditUserDisp = formatUserDisplay(cfg, cid);
+                        auditDetail = "port=10001";
+                    }} else {{
+                        callbackToast = "🔴 Guest VM offline (" + pState + ")";
+                    }}
+                    viewTab = "home";
                 }}
                 if (renderCard) {{
                     JSONObject view = renderDashboard(cfg, viewTab, viewPage, viewUid, adminId);
@@ -2029,6 +2358,9 @@ synchronized (System.class) {{
                         cfg.put("state_trace", "INIT");
                         cfg.put("queue", new JSONArray());
                         cfg.put("qr_was_closed", false);
+                        cfg.put("adb_reset_tried", false);
+                        cfg.put("adb_relaunch_tried", false);
+                        cfg.put("fps_hal_checked", false);
                         cfg.put("reset_notified", false);
                         cfg.put("reset_stage", 0);
                         cfg.put("reset_kills", 0);
@@ -2377,12 +2709,23 @@ def build_vision_script() -> str:
     return (
         "import android.graphics.Bitmap;\n"
         "import android.graphics.BitmapFactory;\n"
+        "import android.util.Base64;\n"
         "import java.io.*;\n"
+        "import java.math.BigInteger;\n"
         "import java.net.HttpURLConnection;\n"
+        "import java.net.InetSocketAddress;\n"
+        "import java.net.Socket;\n"
         "import java.net.URL;\n"
+        "import java.security.KeyFactory;\n"
+        "import java.security.KeyPair;\n"
+        "import java.security.KeyPairGenerator;\n"
+        "import java.security.PrivateKey;\n"
+        "import java.security.interfaces.RSAPublicKey;\n"
+        "import java.security.spec.PKCS8EncodedKeySpec;\n"
         "import java.text.SimpleDateFormat;\n"
         "import java.util.Date;\n"
         "import java.util.Locale;\n"
+        "import javax.crypto.Cipher;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
@@ -2399,6 +2742,8 @@ def build_vision_script() -> str:
         + _BSH_AUDIT_HELPERS
         + "\n\n"
         + _BSH_TIMING_HELPER
+        + "\n\n"
+        + _BSH_GUEST_ADB_HELPERS
         + f"""
 
 JSONObject syncActiveConfig(JSONObject curCfg, String ssName, long ssMtime, boolean ssDel, boolean countStep) {{
@@ -2730,6 +3075,9 @@ try {{
         int r = getR(x, y); int g = getG(x, y); int b = getB(x, y);
         return r >= 225 && r <= 249 && g >= 225 && g <= 249 && b >= 228 && b <= 252 && Math.abs(r - g) <= 6;
     }}
+    boolean nearRgb(int x, int y, int r, int g, int b, int tol) {{
+        return Math.abs(getR(x, y) - r) <= tol && Math.abs(getG(x, y) - g) <= tol && Math.abs(getB(x, y) - b) <= tol;
+    }}
     boolean isPopupCorner(int x, int y) {{
         int r = getR(x, y); int g = getG(x, y); int b = getB(x, y);
         return r >= 15 && r <= 42 && g >= 10 && g <= 35 && b >= 20 && b <= 48;
@@ -2775,10 +3123,79 @@ try {{
         if (nextPct > capPct) nextPct = capPct;
         return prepareStepStatus(cfg, targetCid, adminId, null, nextPct);
     }}
+    void maybeStopGuestFpsHal(JSONObject cfg, boolean wasVmBooting) {{
+        if (wasVmBooting && !cfg.optBoolean("fps_hal_checked", false)) {{
+            cfg.put("fps_hal_checked", true);
+            guestAdbShell("setprop ctl.stop vendor.fps_hal", 700, false);
+        }}
+    }}
+    String tryAdbFastReset(JSONObject cfg, long cid, long adminId) throws Exception {{
+        if (cfg.optBoolean("adb_reset_tried", false)) return null;
+        cfg.put("adb_reset_tried", true);
+        String targetPkg = (appName != null && appName.length() > 0) ? appName : "ru.deltapay.puntopago.telcell";
+        String cmd = "am force-stop " + targetPkg
+            + " && (am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "
+            + targetPkg + "/.activities.activation.ActivationActivity"
+            + " || monkey -p " + targetPkg + " -c android.intent.category.LAUNCHER 1)";
+        JSONObject adbRes = guestAdbShell(cmd, 2200, false);
+        if (!adbRes.optBoolean("ok", false)) return null;
+        cfg.put("reset_stage", 2);
+        cfg.put("reset_recents_checked", true);
+        cfg.put("reset_open_tries", 0);
+        cfg.put("vm_booting", false);
+        cfg.put("vm_seen", true);
+        cfg.put("fps_hal_checked", true);
+        guestAdbShell("setprop ctl.stop vendor.fps_hal", 700, false);
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        setVisionState(cfg, "ADB_FORCE_RESTART");
+        String stepText = prepareStepStatus(cfg, cid, adminId, "🧹 Force-restarting Telcell via ADB...", 35);
+        queueStepStatus(cfg, stepText);
+        saveConfig(cfg);
+        return "WAIT";
+    }}
+    String tryAdbRecoverState(JSONObject cfg, long cid, long adminId, boolean isVmBooting) throws Exception {{
+        if (isVmBooting || cfg.optBoolean("adb_relaunch_tried", false)) return null;
+        String targetPkg = (appName != null && appName.length() > 0) ? appName : "ru.deltapay.puntopago.telcell";
+        JSONObject res = guestAdbShell("dumpsys activity activities | grep -E 'mResumedActivity|topResumed' | head -n 3", 900, false);
+        if (!res.optBoolean("ok", false)) return null;
+        String out = res.optString("out", "");
+        if (out.length() == 0) return null;
+        if (out.indexOf(targetPkg) < 0 && cfg.optBoolean("vm_seen", false)) {{
+            cfg.put("adb_relaunch_tried", true);
+            String launchCmd = "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "
+                + targetPkg + "/.activities.activation.ActivationActivity"
+                + " || monkey -p " + targetPkg + " -c android.intent.category.LAUNCHER 1";
+            JSONObject lRes = guestAdbShell(launchCmd, 1500, false);
+            if (lRes.optBoolean("ok", false)) {{
+                cfg.put("other_count", 0);
+                resetWaitCounters(cfg);
+                setVisionState(cfg, "ADB_RELAUNCH");
+                queueStepStatus(cfg, null);
+                saveConfig(cfg);
+                return "WAIT";
+            }}
+        }} else if (out.indexOf("MainActivity") >= 0) {{
+            JSONObject fragRes = guestAdbShell(
+                "dumpsys activity " + targetPkg + "/.activities.main.MainActivity | grep -E 'TransportTicketDetailsFragment|TransportTicketsContainerFragment|HomeFragment' | tail -n 6",
+                900, false);
+            if (fragRes.optBoolean("ok", false)) {{
+                String fOut = fragRes.optString("out", "");
+                if (fOut.indexOf("TransportTicketDetailsFragment") >= 0) setVisionState(cfg, "ADB_QR_FRAG");
+                else if (fOut.indexOf("TransportTicketsContainerFragment") >= 0) setVisionState(cfg, "ADB_TICKET_FRAG");
+                else if (fOut.indexOf("HomeFragment") >= 0) setVisionState(cfg, "ADB_HOME_FRAG");
+            }}
+        }}
+        return null;
+    }}
     String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits, int waitCapPct, long cid, long adminId) throws Exception {{
         int cnt = cfg.optInt(countKey, 0) + 1;
         cfg.put(countKey, cnt);
         setVisionState(cfg, stateName);
+        if (cnt == maxWaits && !cfg.optBoolean("vm_booting", false)) {{
+            String adbRec = tryAdbRecoverState(cfg, cid, adminId, false);
+            if (adbRec != null) return adbRec;
+        }}
         if (cnt <= maxWaits) {{
             String waitText = prepareWaitNudge(cfg, cid, adminId, cnt, waitCapPct);
             queueStepStatus(cfg, waitText);
@@ -2799,6 +3216,8 @@ try {{
         return "RESET_TO_HOME";
     }}
     String handleResetInApp(JSONObject cfg, long cid, long adminId) throws Exception {{
+        String fastReset = tryAdbFastReset(cfg, cid, adminId);
+        if (fastReset != null) return fastReset;
         cfg.put("vm_booting", false);
         int openTries = cfg.optInt("reset_open_tries", 0) + 1;
         cfg.put("reset_open_tries", openTries);
@@ -2829,6 +3248,40 @@ try {{
         cfg.put("reset_stage", 1);
         saveConfig(cfg);
         return "RESET_TO_HOME";
+    }}
+
+    // 0. Android "MacroDroid isn't responding" system dialog (One UI bottom sheet with stacked
+    // full-width "Close app" / "Wait" pills). It swallows every tap, so tap "Wait" first.
+    int anrCardR = getR(360, 1115);
+    int anrCardG = getG(360, 1115);
+    int anrCardB = getB(360, 1115);
+    boolean anrCardUniform = nearRgb(60, 1115, anrCardR, anrCardG, anrCardB, 10)
+        && nearRgb(660, 1115, anrCardR, anrCardG, anrCardB, 10)
+        && nearRgb(60, 1235, anrCardR, anrCardG, anrCardB, 10)
+        && nearRgb(660, 1235, anrCardR, anrCardG, anrCardB, 10);
+    int anrPillR = getR(60, 1300);
+    int anrPillG = getG(60, 1300);
+    int anrPillB = getB(60, 1300);
+    boolean anrPillUniform = nearRgb(660, 1300, anrPillR, anrPillG, anrPillB, 10)
+        && nearRgb(60, 1420, anrPillR, anrPillG, anrPillB, 10)
+        && nearRgb(660, 1420, anrPillR, anrPillG, anrPillB, 10);
+    int anrCardPillDiff = Math.abs(anrCardR - anrPillR) + Math.abs(anrCardG - anrPillG) + Math.abs(anrCardB - anrPillB);
+    int anrEdgeDiff = Math.abs(getR(1, 1300) - anrCardR) + Math.abs(getG(1, 1300) - anrCardG) + Math.abs(getB(1, 1300) - anrCardB);
+    int anrCount = cfg.optInt("anr_count", 0);
+    if (anrCardUniform && anrPillUniform && anrCardPillDiff >= 15 && anrEdgeDiff >= 20
+        && Math.abs(anrCardR - anrCardG) < 14 && Math.abs(anrCardG - anrCardB) < 16 && anrCount < 4) {{
+        cfg.put("anr_count", anrCount + 1);
+        setVisionState(cfg, "ANR_DIALOG");
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        queueStepStatus(cfg, null);
+        saveConfig(cfg);
+        appendAuditLog("WARN", "ANR_DIALOG_DISMISSED", cid, formatUserDisplay(cfg, cid),
+            "attempt=" + (anrCount + 1) + " step=" + stepCount + " mode=" + mode);
+        return "DISMISS_ANR";
+    }}
+    if (anrCount > 0 && !(anrCardUniform && anrPillUniform)) {{
+        cfg.put("anr_count", 0);
     }}
 
     // 1. Check VM Launcher vs VM Boot Loading (ignore pure-black pre-wake frames)
@@ -2942,16 +3395,26 @@ try {{
         if (o1 >= 15 || o2 >= 15) {{
             cfg.put("vm_booting", false);
             cfg.put("vm_seen", true);
+            maybeStopGuestFpsHal(cfg, vmBooting);
             cfg.put("other_count", 0);
             cfg.put("reset_open_tries", 0);
             resetWaitCounters(cfg);
             if (mode.equals("reset") && resetStage == 0 && !resetRecentsChecked && resetKills == 0) {{
+                String fastReset = tryAdbFastReset(cfg, cid, adminId);
+                if (fastReset != null) return fastReset;
                 cfg.put("reset_recents_checked", true);
                 setVisionState(cfg, "RESET_CHECK_RECENTS");
                 String stepText = prepareStepStatus(cfg, cid, adminId, "🧹 Checking running VM apps...", 20);
                 queueStepStatus(cfg, stepText);
                 saveConfig(cfg);
                 return "OPEN_RECENTS";
+            }}
+            String prevHomeState = cfg.optString("last_state", "");
+            if (prevHomeState.equals("ADB_FORCE_RESTART") || prevHomeState.equals("ADB_RELAUNCH")) {{
+                setVisionState(cfg, (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
+                queueStepStatus(cfg, null);
+                saveConfig(cfg);
+                return "WAIT";
             }}
             if (mode.equals("reset")) {{
                 cfg.put("reset_stage", 2);
@@ -2965,17 +3428,16 @@ try {{
         }}
     }}
 
-    // 5. Reset Phase 0 in-app intercept (skip during VM cold boot splash so VM reaches Home)
-    if (mode.equals("reset") && resetStage == 0 && !vmBooting) {{
-        return handleResetInApp(cfg, cid, adminId);
-    }}
-
     // 6. Check QR Code Modal
     if (getR(30, 400) < 110 && getG(30, 400) < 110 && getB(30, 400) < 110 &&
         isWhite(150, 400) && isWhite(570, 400) && isWhite(130, 590) && isWhite(590, 590)) {{
         cfg.put("vm_booting", false);
         cfg.put("vm_seen", true);
         if (mode.equals("reset")) {{
+            if (resetStage == 0) {{
+                String fastReset = tryAdbFastReset(cfg, cid, adminId);
+                if (fastReset != null) return fastReset;
+            }}
             cfg.put("qr_was_closed", true);
             setVisionState(cfg, "RESET_CLOSE_QR");
             cfg.put("other_count", 0);
@@ -3039,13 +3501,13 @@ try {{
             Bitmap qrBmp = Bitmap.createBitmap(bmp, cx, cy, cw, ch);
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             qrBmp.compress(Bitmap.CompressFormat.PNG, 100, baos);
-            qrBmp.recycle();
             boolean statusIsMedia = cfg.optBoolean("status_is_media", false);
             long targetEditMid = (statusIsMedia && statusMsgId > 0L) ? statusMsgId : 0L;
             String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
             String caption = "🎫 QR Code • " + ts + " (valid ~30s)";
             String qrMarkup = makeInlineButtonMarkup("🔄 Refresh QR", "/qr").toString();
             boolean usedFallback = false;
+            int uploadRetries = 0;
             JSONObject upRes = uploadQrMultipart(cid, targetEditMid, baos.toByteArray(), "qr.png", caption, qrMarkup);
             int code = upRes.optInt("code", -1);
             String lastUploadDesc = upRes.optString("desc", "");
@@ -3055,6 +3517,33 @@ try {{
                 code = upRes.optInt("code", -1);
                 lastUploadDesc = upRes.optString("desc", "");
             }}
+            if ((targetEditMid == 0L || usedFallback) && (code < 0 || code >= 500)) {{
+                // Telegram's multipart endpoints intermittently answer 500; retry with backoff,
+                // alternating PNG and the (smaller) JPEG encoding.
+                ByteArrayOutputStream jpgBaos = new ByteArrayOutputStream();
+                qrBmp.compress(Bitmap.CompressFormat.JPEG, 92, jpgBaos);
+                byte[] jpgBytes = jpgBaos.toByteArray();
+                byte[] pngBytes = baos.toByteArray();
+                JSONObject extraRetry = new JSONObject();
+                extraRetry.put("caption", caption);
+                extraRetry.put("reply_markup", qrMarkup);
+                long retryStartMs = System.currentTimeMillis();
+                for (int ri = 0; ri < 8 && (code < 0 || code >= 500); ri++) {{
+                    if (System.currentTimeMillis() - retryStartMs > 14000L) break;
+                    try {{
+                        Thread.sleep(300L + 250L * ri);
+                    }} catch (Exception ignored) {{
+                    }}
+                    boolean useJpg = (ri % 2 == 0);
+                    upRes = postMultipartRaw("sendPhoto", cid, 0L, extraRetry, "photo",
+                        useJpg ? "qr.jpg" : "qr.png", useJpg ? "image/jpeg" : "image/png",
+                        useJpg ? jpgBytes : pngBytes, 15000);
+                    code = upRes.optInt("code", -1);
+                    lastUploadDesc = upRes.optString("desc", "");
+                    uploadRetries = ri + 1;
+                }}
+            }}
+            qrBmp.recycle();
             long popNextCid = 0L;
             long popNextMid = 0L;
             String nextText = null;
@@ -3146,7 +3635,7 @@ try {{
                 recordUsageSafe(cid, "ok", elapsedMs, usedFallback ? "QR_SENT_FALLBACK" : "QR_SENT", "");
                 appendAuditLog("OK", "QR_SENT", cid, formatUserDisplay(cfg, cid),
                     "trigger=" + activeTrig + " steps=" + stepCount + " elapsed=" + formatSec(elapsedMs)
-                    + (usedFallback ? " fallback=sendPhoto" : "") + " trace=" + finTrace);
+                    + (usedFallback ? " fallback=sendPhoto" : "") + (uploadRetries > 0 ? (" upload_retries=" + uploadRetries) : "") + " trace=" + finTrace);
             }} else {{
                 String errText = (cid == adminId)
                     ? "❌ Failed to upload QR (HTTP " + code + ")."
@@ -3156,7 +3645,7 @@ try {{
                 String finTrace = (baseTrace.length() > 0) ? (baseTrace + ">QR_ERR") : "QR_ERR";
                 recordUsageSafe(cid, "fail", elapsedMs, "UPLOAD_HTTP_" + code, lastUploadDesc);
                 appendAuditLog("FAIL", "QR_FAIL_UPLOAD", cid, formatUserDisplay(cfg, cid),
-                    reasonDesc + " trigger=" + activeTrig + " steps=" + stepCount + " elapsed=" + formatSec(elapsedMs) + " trace=" + finTrace);
+                    reasonDesc + " retries=" + uploadRetries + " trigger=" + activeTrig + " steps=" + stepCount + " elapsed=" + formatSec(elapsedMs) + " trace=" + finTrace);
                 if (adminId > 0L) {{
                     sendMsg(adminId,
                         buildFailureAlert(cfg, "🚨 QR Upload Failed", cid, activeTrig, reasonDesc, elapsedMs, stepCount, "QR_MODAL", finTrace, snapOther, snapWhite, snapLoad, ""),
@@ -3187,6 +3676,7 @@ try {{
         if (pinLogo >= 10) {{
             cfg.put("vm_booting", false);
             cfg.put("vm_seen", true);
+            maybeStopGuestFpsHal(cfg, vmBooting);
             if (mode.equals("reset") && resetStage == 0) {{
                 return handleResetInApp(cfg, cid, adminId);
             }}
@@ -3216,6 +3706,7 @@ try {{
     if (dashNav) {{
         cfg.put("vm_booting", false);
         cfg.put("vm_seen", true);
+        maybeStopGuestFpsHal(cfg, vmBooting);
         if (mode.equals("reset") && resetStage == 0) {{
             return handleResetInApp(cfg, cid, adminId);
         }}
@@ -3250,7 +3741,8 @@ try {{
             saveConfig(cfg);
             return "WAIT";
         }}
-        if (!useLow && cfg.optInt("loading_count", 0) < 3) {{
+        int minDashHighWaits = mode.equals("reset") ? 6 : 3;
+        if (!useLow && cfg.optInt("loading_count", 0) < minDashHighWaits) {{
             // The HIGH Услуги row is often transient: lazy-loaded promo cards push it down
             // right after the PIN. Wait briefly for the layout to settle before tapping.
             cfg.put("white_count", 0);
@@ -3273,6 +3765,7 @@ try {{
     if ((buyBtnOrange || availTabOrange) && ticketBgGray) {{
         cfg.put("vm_booting", false);
         cfg.put("vm_seen", true);
+        maybeStopGuestFpsHal(cfg, vmBooting);
         if (mode.equals("reset") && resetStage == 0) {{
             return handleResetInApp(cfg, cid, adminId);
         }}
@@ -3337,8 +3830,10 @@ try {{
             }}
             long rstNow = System.currentTimeMillis();
             long rstElapsed = (rstStartMs > 0L && rstNow >= rstStartMs) ? (rstNow - rstStartMs) : 0L;
+            String rstTrace = cfg.optString("state_trace", "");
             appendAuditLog("ADMIN", "RESET_DONE", cid, formatUserDisplay(cfg, cid),
-                "steps=" + stepCount + " elapsed=" + formatSec(rstElapsed) + " queued_handoff=" + hasNext);
+                "steps=" + stepCount + " elapsed=" + formatSec(rstElapsed) + " queued_handoff=" + hasNext
+                + (rstTrace.length() > 0 ? (" trace=" + rstTrace) : ""));
             if (hasNext) {{
                 updateStatus(cid, statusMsgId, "✅ VM app reset complete — Telcell restarted & ready.");
                 return "CLICK_TICKET_ROW";
@@ -3412,6 +3907,9 @@ try {{
     }}
 
     // 11. Unknown / transition screen
+    if (cfg.optBoolean("vm_seen", false) && !vmBooting && mode.equals("reset") && resetStage == 0) {{
+        return handleResetInApp(cfg, cid, adminId);
+    }}
     long rowTapAge = System.currentTimeMillis() - cfg.optLong("row_tap_ms", 0L);
     if (cfg.optLong("row_tap_ms", 0L) > 0L && rowTapAge < 6000L) {{
         // Telcell is still opening the QR after the row tap; do not count these
@@ -3422,6 +3920,17 @@ try {{
     }}
     int otherCount = cfg.optInt("other_count", 0) + 1;
     cfg.put("other_count", otherCount);
+    if (otherCount == 3) {{
+        try {{
+            FileOutputStream dumpFos = new FileOutputStream("/storage/emulated/0/Download/komobot_other_frame.png");
+            bmp.compress(Bitmap.CompressFormat.PNG, 90, dumpFos);
+            dumpFos.flush();
+            dumpFos.close();
+            appendAuditLog("WARN", "OTHER_FRAME_SAVED", cid, formatUserDisplay(cfg, cid),
+                "step=" + stepCount + " prev=" + cfg.optString("last_state", "") + " file=Download/komobot_other_frame.png");
+        }} catch (Exception dumpEx) {{
+        }}
+    }}
     setVisionState(cfg, "OTHER");
     resetWaitCounters(cfg);
     queueStepStatus(cfg, null);
@@ -3432,6 +3941,10 @@ try {{
         cfg.put("other_count", 0);
         saveConfig(cfg);
         return "LAUNCH_VM";
+    }}
+    if (cfg.optBoolean("vm_seen", false) && !vmBooting && otherCount == 2) {{
+        String adbRec = tryAdbRecoverState(cfg, cid, adminId, vmBooting);
+        if (adbRec != null) return adbRec;
     }}
     if (vmBooting) {{
         if (otherCount <= 30) {{
@@ -3484,7 +3997,7 @@ def build_post_step_script() -> str:
 long t0 = System.currentTimeMillis();
 long waitMs = 350L;
 if (stepCmd.equals("WAIT")) waitMs = 180L;
-else if (stepCmd.equals("DISMISS_POPUP")) waitMs = 350L;
+else if (stepCmd.equals("DISMISS_POPUP") || stepCmd.equals("DISMISS_ANR")) waitMs = 350L;
 else if (stepCmd.equals("CLOSE_MODAL") || stepCmd.equals("CLICK_BACK") || stepCmd.equals("RESET_TO_HOME")) waitMs = 450L;
 else if (stepCmd.equals("OPEN_RECENTS") || stepCmd.equals("SWIPE_KILL_RECENT")) waitMs = 550L;
 else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
@@ -3506,6 +4019,9 @@ synchronized (System.class) {
         && cfg.optInt("step_count", 0) <= 2) {
         // The first capture already blocked for the display to unblock.
         waitMs = 80L;
+    } else if (stepCmd.equals("WAIT") && (cfg.optString("last_state", "").equals("ADB_FORCE_RESTART")
+        || cfg.optString("last_state", "").equals("ADB_RELAUNCH"))) {
+        waitMs = 900L;
     } else if (stepCmd.equals("WAIT") && cfg.optBoolean("vm_booting", false)) {
         waitMs = 500L;
     }
@@ -3868,6 +4384,7 @@ def build_macro(
     add_cmd_branch("ABORT_TIMEOUT", [make_break_loop(sg)])
     add_cmd_branch("CLICK_ENTER", [make_click_xy(sg, 627, 250)])
     add_cmd_branch("DISMISS_POPUP", [make_click_xy(sg, 100, 200)])
+    add_cmd_branch("DISMISS_ANR", [make_click_xy(sg, 360, 1412)])
     add_cmd_branch("OPEN_RECENTS", [make_click_xy(sg, 567, 1553)])
     add_cmd_branch(
         "SWIPE_KILL_RECENT", [make_gesture_swipe(sg, 360, 900, 360, 200, 200)]
