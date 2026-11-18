@@ -89,12 +89,15 @@ class TestMacroStructure(unittest.TestCase):
             "callback_id",
             "callback_msg_id",
             "chat_id",
+            "forward_user_id",
             "msg_text",
             "pin_d1",
             "pin_d2",
             "pin_d3",
             "pin_d4",
             "screen_action",
+            "sender_name",
+            "sender_username",
             "step_cmd",
             "update_id",
             "webhook_body",
@@ -271,7 +274,7 @@ class TestMacroStructure(unittest.TestCase):
 
     def test_stage1_webhook_regex_extractors(self) -> None:
         extractors: dict[str, tuple[str, str]] = {}
-        for action in self.actions[:6]:
+        for action in self.actions[:9]:
             self.assertEqual(action["m_classType"], "TextManipulationAction")
             suffix = action["m_text"].split("{lv=webhook_body}", 1)[1]
             regex = action["m_textManipulation"]["params"][0]
@@ -290,6 +293,12 @@ class TestMacroStructure(unittest.TestCase):
                 "update_id": 100001,
                 "message": {
                     "message_id": 42,
+                    "from": {
+                        "id": 111222333,
+                        "is_bot": False,
+                        "first_name": "Kamo",
+                        "username": "kamo_s",
+                    },
                     "chat": {"id": 111222333},
                     "text": "📸 Take QR Screenshot",
                 },
@@ -305,6 +314,9 @@ class TestMacroStructure(unittest.TestCase):
                 "callback_id": "",
                 "callback_data": "",
                 "callback_msg_id": "42",
+                "sender_name": "Kamo",
+                "sender_username": "kamo_s",
+                "forward_user_id": "0",
             },
         )
 
@@ -320,6 +332,9 @@ class TestMacroStructure(unittest.TestCase):
                 "callback_id": "",
                 "callback_data": "",
                 "callback_msg_id": "0",
+                "sender_name": "",
+                "sender_username": "",
+                "forward_user_id": "0",
             },
         )
 
@@ -333,6 +348,9 @@ class TestMacroStructure(unittest.TestCase):
                 "callback_id": "",
                 "callback_data": "",
                 "callback_msg_id": "0",
+                "sender_name": "",
+                "sender_username": "",
+                "forward_user_id": "0",
             },
         )
 
@@ -366,8 +384,32 @@ class TestMacroStructure(unittest.TestCase):
                 "callback_id": "998877665544332211",
                 "callback_data": "/qr",
                 "callback_msg_id": "505",
+                "sender_name": "",
+                "sender_username": "",
+                "forward_user_id": "0",
             },
         )
+
+        # Bot inline-keyboard message before forwarded sender_user skips bot name
+        bot_msg_with_forward = json.dumps(
+            {
+                "update_id": 100003,
+                "message": {
+                    "message_id": 600,
+                    "from": {"id": 999, "is_bot": True, "first_name": "Komobot"},
+                    "forward_origin": {
+                        "type": "user",
+                        "sender_user": {"id": 444555666, "first_name": "Eve"},
+                    },
+                    "chat": {"id": 111222333},
+                    "text": "hi",
+                },
+            },
+            ensure_ascii=False,
+        )
+        res_fwd = extract(bot_msg_with_forward)
+        self.assertEqual(res_fwd["sender_name"], "")
+        self.assertEqual(res_fwd["forward_user_id"], "444555666")
 
         self.assertEqual(
             extract(""),
@@ -378,6 +420,9 @@ class TestMacroStructure(unittest.TestCase):
                 "callback_id": "",
                 "callback_data": "",
                 "callback_msg_id": "0",
+                "sender_name": "",
+                "sender_username": "",
+                "forward_user_id": "0",
             },
         )
 

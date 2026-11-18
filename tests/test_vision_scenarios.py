@@ -846,8 +846,11 @@ class TestVisionScenarios(unittest.TestCase):
             if c["method"] == "sendMessage" and c["payload"]["chat_id"] == ADMIN_ID
         ]
         self.assertEqual(len(admin_sends), 1)
-        self.assertIn(f"chat_id: {USER_2}", admin_sends[0])
+        self.assertIn("🚨 QR Upload Failed", admin_sends[0])
+        self.assertIn(f"[{USER_2}]", admin_sends[0])
+        self.assertIn("• Trigger: queued_cmd", admin_sends[0])
         self.assertIn("HTTP 502", admin_sends[0])
+        self.assertIn("• Trace: ", admin_sends[0])
 
         # 3. Per-request 95-step cap triggers ABORT_TIMEOUT inside 130-step loop
         self._seed_active_run(step_count=95)
@@ -1304,6 +1307,68 @@ class TestVisionScenarios(unittest.TestCase):
         q_btn = self.env.tg_calls[2]["payload"]["reply_markup"]["inline_keyboard"][0][0]
         self.assertTrue(q_btn["text"].startswith("⏳ "))
         self.assertEqual(q_btn["callback_data"], "noop")
+
+    def test_usage_accounting_and_detailed_upload_error_alert(self) -> None:
+        # 1. Successful regular user QR delivery updates per-user/global stats & log
+        self._seed_active_run(active_chat_id=USER_2, status_message_id=2002)
+        self.assertEqual(self._step(ScreenFactory.pin_screen()), "ENTER_PIN")
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.env.tg_calls.clear()
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["global_stats"]["ok"], 1)
+        self.assertEqual(cfg["global_stats"]["day_ok"], 1)
+        u2_stat = cfg["user_stats"][str(USER_2)]
+        self.assertEqual(u2_stat["ok"], 1)
+        self.assertEqual(u2_stat["day_ok"], 1)
+        self.assertEqual(u2_stat["last_outcome"], "QR_SENT")
+        self.assertEqual(u2_stat["last_ms"], self.env.now_ms)
+        self.assertGreater(u2_stat["total_ok_ms"], 0)
+        audit_log = self.env.read_text(
+            "/storage/emulated/0/Download/komobot_events.log"
+        )
+        self.assertIn("QR_SENT", audit_log)
+        self.assertIn(str(USER_2), audit_log)
+
+        # 2. Regular user HTTP 400 upload failure surfaces Telegram API description
+        #    and full state trace in Admin alert + audit log
+        self._seed_active_run(active_chat_id=USER_2, status_message_id=3003)
+        self.assertEqual(
+            self._step(ScreenFactory.dashboard(mode="low")), "CLICK_TRANSPORT_LOW"
+        )
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.env.http_status_overrides["sendPhoto"] = 400
+        self.env.http_error_bodies["sendPhoto"] = {
+            "ok": False,
+            "error_code": 400,
+            "description": "Bad Request: image_process_failed",
+        }
+        self.env.tg_calls.clear()
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        admin_sends = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "sendMessage" and c["payload"]["chat_id"] == ADMIN_ID
+        ]
+        self.assertEqual(len(admin_sends), 1)
+        self.assertIn("🚨 QR Upload Failed", admin_sends[0])
+        self.assertIn("Bad Request: image_process_failed", admin_sends[0])
+        self.assertIn("DASHBOARD", admin_sends[0])
+        self.assertIn("TICKET_LIST>QR_ERR", admin_sends[0])
+        cfg2 = self.env.read_config()
+        self.assertEqual(cfg2["global_stats"]["fail"], 1)
+        self.assertEqual(cfg2["user_stats"][str(USER_2)]["fail"], 1)
+        self.assertEqual(
+            cfg2["user_stats"][str(USER_2)]["last_outcome"], "UPLOAD_HTTP_400"
+        )
+        self.assertIn(
+            "QR_FAIL_UPLOAD",
+            self.env.read_text("/storage/emulated/0/Download/komobot_events.log"),
+        )
 
 
 if __name__ == "__main__":

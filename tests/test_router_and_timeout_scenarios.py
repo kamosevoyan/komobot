@@ -25,6 +25,9 @@ def _run_router(
     callback_id: str = "",
     callback_data: str = "",
     callback_msg_id: str = "0",
+    sender_name: str = "",
+    sender_username: str = "",
+    forward_user_id: str = "0",
 ) -> str:
     return run_bsh_script(
         ROUTER_SCRIPT,
@@ -39,6 +42,9 @@ def _run_router(
             "callback_id": callback_id,
             "callback_data": callback_data,
             "callback_msg_id": callback_msg_id,
+            "sender_name": sender_name,
+            "sender_username": sender_username,
+            "forward_user_id": forward_user_id,
         },
     )
 
@@ -56,6 +62,9 @@ def _dispatch_qr(
     callback_id: str = "",
     callback_data: str = "",
     callback_msg_id: str = "0",
+    sender_name: str = "",
+    sender_username: str = "",
+    forward_user_id: str = "0",
 ) -> str:
     res = _run_router(
         env,
@@ -66,6 +75,9 @@ def _dispatch_qr(
         callback_id=callback_id,
         callback_data=callback_data,
         callback_msg_id=callback_msg_id,
+        sender_name=sender_name,
+        sender_username=sender_username,
+        forward_user_id=forward_user_id,
     )
     if res == "RUN":
         _run_init_status(env)
@@ -123,15 +135,44 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(_run_router(self.env, "abc", "/qr", update_id="503"), "IGNORE")
 
     def test_auth_public_lock_and_start_keyboards(self) -> None:
-        self.assertEqual(_run_router(self.env, UNKNOWN_USER, "/qr"), "IGNORE")
-        self.assertEqual(len(self.env.tg_calls), 1)
+        self.assertEqual(
+            _run_router(
+                self.env,
+                UNKNOWN_USER,
+                "/qr",
+                sender_name="Mallory",
+                sender_username="mal_0",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(len(self.env.tg_calls), 2)
+        self.assertEqual(self.env.tg_calls[0]["payload"]["chat_id"], int(UNKNOWN_USER))
         self.assertIn("Unauthorized", self.env.tg_calls[0]["payload"]["text"])
+        unauth_alert = self.env.tg_calls[1]["payload"]
+        self.assertEqual(unauth_alert["chat_id"], int(ADMIN_ID))
+        self.assertIn("Unauthorized Access Attempt", unauth_alert["text"])
+        self.assertIn(f"[{UNKNOWN_USER}]", unauth_alert["text"])
+        self.assertEqual(
+            unauth_alert["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
+            f"adm:addid:{UNKNOWN_USER}",
+        )
 
-        # Admin /start includes Reset VM App keyboard button; regular user does not
+        # Admin /start includes Admin Dashboard & Reset VM App; regular user does not
         self.env.tg_calls.clear()
         self.assertEqual(_run_router(self.env, ADMIN_ID, "/start"), "IGNORE")
-        admin_kb = self.env.tg_calls[0]["payload"]["reply_markup"]["keyboard"]
-        self.assertIn("🧹 Reset VM App", [b for row in admin_kb for b in row])
+        admin_kb = [
+            b
+            for row in self.env.tg_calls[0]["payload"]["reply_markup"]["keyboard"]
+            for b in row
+        ]
+        for btn in (
+            "📸 Take QR Screenshot",
+            "📊 Admin Dashboard",
+            "🧹 Reset VM App",
+            "👥 List Users",
+            "🛑 Toggle Public Access",
+        ):
+            self.assertIn(btn, admin_kb)
 
         self.env.tg_calls.clear()
         self.assertEqual(_run_router(self.env, ALLOWED_USER, "/start"), "IGNORE")
@@ -144,8 +185,14 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             _run_router(self.env, ADMIN_ID, "🛑 Toggle Public Access"), "IGNORE"
         )
         self.assertFalse(self.env.read_config()["public_access"])
+        self.env.tg_calls.clear()
         self.assertEqual(_run_router(self.env, ALLOWED_USER, "/qr"), "IGNORE")
-        self.assertIn("locked by the admin", self.env.tg_calls[-1]["payload"]["text"])
+        self.assertEqual(len(self.env.tg_calls), 2)
+        self.assertIn("locked by the admin", self.env.tg_calls[0]["payload"]["text"])
+        self.assertEqual(self.env.tg_calls[1]["payload"]["chat_id"], int(ADMIN_ID))
+        self.assertIn(
+            "Blocked Request (Bot Locked)", self.env.tg_calls[1]["payload"]["text"]
+        )
         self.assertEqual(_run_router(self.env, ADMIN_ID, "/qr"), "RUN")
 
     def test_admin_user_management_commands(self) -> None:
@@ -385,9 +432,16 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         ]
         self.assertEqual(len(sends), 1)
         self.assertEqual(sends[0]["chat_id"], int(ADMIN_ID))
-        self.assertIn(f"chat_id: {ALLOWED_USER}", sends[0]["text"])
-        self.assertIn("WHITE_LOADING (step 17)", sends[0]["text"])
-        self.assertIn(f"Affected queued users: {THIRD_USER}", sends[0]["text"])
+        self.assertIn("🚨 QR Request Failed", sends[0]["text"])
+        self.assertIn(f"[{ALLOWED_USER}]", sends[0]["text"])
+        self.assertIn("• Trigger: cmd", sends[0]["text"])
+        self.assertIn("WHITE_LOADING (step 17", sends[0]["text"])
+        self.assertIn("• Trace: ", sends[0]["text"])
+        self.assertIn(f"[{THIRD_USER}]", sends[0]["text"])
+        audit_log = self.env.read_text(
+            "/storage/emulated/0/Download/komobot_events.log"
+        )
+        self.assertIn("QR_FAIL_TIMEOUT", audit_log)
 
         # Admin RUN preserves exact original diagnostic text
         self.env.tg_calls.clear()
@@ -426,15 +480,12 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         edits = [
             c["payload"] for c in self.env.tg_calls if c["method"] == "editMessageText"
         ]
-        self.assertEqual(
-            sends,
-            [
-                {
-                    "chat_id": int(ADMIN_ID),
-                    "text": "🔄 Force-restarting Telcell Wallet...",
-                }
-            ],
-        )
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0]["chat_id"], int(ADMIN_ID))
+        self.assertIn("🔄 Force-restarting Telcell Wallet...", sends[0]["text"])
+        self.assertIn("Cancelled 2 pending", sends[0]["text"])
+        self.assertIn(f"[{ALLOWED_USER}] (active)", sends[0]["text"])
+        self.assertIn(f"[{THIRD_USER}] (queued #1)", sends[0]["text"])
         self.assertEqual(
             sorted((e["chat_id"], e["message_id"], e["text"]) for e in edits),
             sorted(
@@ -582,7 +633,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             self.env.tg_calls[0]["payload"], {"callback_query_id": "cb-103"}
         )
 
-        # 4. Unauthorized callback answers callback AND sends unauthorized error
+        # 4. Unauthorized callback answers callback, notifies user, AND alerts admin
         self.env.tg_calls.clear()
         self.assertEqual(
             _run_router(
@@ -597,9 +648,14 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         )
         self.assertEqual(
             [c["method"] for c in self.env.tg_calls],
-            ["answerCallbackQuery", "sendMessage"],
+            ["answerCallbackQuery", "sendMessage", "sendMessage"],
         )
+        self.assertEqual(self.env.tg_calls[1]["payload"]["chat_id"], int(UNKNOWN_USER))
         self.assertIn("Unauthorized", self.env.tg_calls[1]["payload"]["text"])
+        self.assertEqual(self.env.tg_calls[2]["payload"]["chat_id"], int(ADMIN_ID))
+        self.assertIn(
+            "Unauthorized Access Attempt", self.env.tg_calls[2]["payload"]["text"]
+        )
 
         # 5. Duplicate update_id skips all HTTP calls
         self.env.tg_calls.clear()
@@ -733,16 +789,13 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(q_btn["text"], "⏳ Queued (#1)...")
         self.assertEqual(q_btn["callback_data"], "noop")
         q_cfg = self.env.read_config()
-        self.assertEqual(
-            q_cfg["queue"],
-            [
-                {
-                    "chat_id": int(ALLOWED_USER),
-                    "status_message_id": 888,
-                    "status_is_media": True,
-                }
-            ],
-        )
+        self.assertEqual(len(q_cfg["queue"]), 1)
+        q_item = q_cfg["queue"][0]
+        self.assertEqual(q_item["chat_id"], int(ALLOWED_USER))
+        self.assertEqual(q_item["status_message_id"], 888)
+        self.assertTrue(q_item["status_is_media"])
+        self.assertEqual(q_item["trigger"], "queued_media")
+        self.assertGreater(q_item["enqueued_ms"], 0)
 
         self.env.tg_calls.clear()
         self.assertEqual(
@@ -824,16 +877,22 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(_run_init_status(self.env), "SENT")
         self.assertEqual(
             [c["method"] for c in self.env.tg_calls],
-            ["sendMessage", "editMessageReplyMarkup"],
+            ["sendMessage", "editMessageReplyMarkup", "sendMessage"],
         )
         self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 901)
         self.assertEqual(
             self.env.tg_calls[1]["payload"]["reply_markup"]["inline_keyboard"][0][0],
             {"text": "❌ Cancelled • 🔄 Retry", "callback_data": "/qr"},
         )
+        self.assertIn("VM Reset cancelled", self.env.tg_calls[2]["payload"]["text"])
+        self.assertIn(f"[{ALLOWED_USER}]", self.env.tg_calls[2]["payload"]["text"])
         self.env.tg_calls.clear()
         self.assertEqual(_run_timeout(self.env, "DONE_RESET"), "SCREEN_OFF")
         self.assertIn("VM app reset complete", self.env.tg_calls[-1]["payload"]["text"])
+        self.assertIn(
+            "RESET_DONE",
+            self.env.read_text("/storage/emulated/0/Download/komobot_events.log"),
+        )
 
         # 2. Cooperative preemption while worker is already active
         self.env.tg_calls.clear()
@@ -880,6 +939,438 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
                 c["payload"]["reply_markup"]["inline_keyboard"][0][0],
                 {"text": "❌ Cancelled • 🔄 Retry", "callback_data": "/qr"},
             )
+
+    def test_admin_dashboard_tabs_pagination_toggle_and_export(self) -> None:
+        extra_ids = [900001 + i for i in range(5)]
+        cfg = self.env.read_config()
+        cfg["allowed_users"].extend(extra_ids)
+        cfg["user_meta"] = {
+            ALLOWED_USER: {"name": "Alice", "username": "alice_a"},
+            THIRD_USER: {"name": "Charlie", "username": ""},
+        }
+        self.env.write_config(cfg)
+        log_path = "/storage/emulated/0/Download/komobot_events.log"
+        prev_path = "/storage/emulated/0/Download/komobot_events.prev.log"
+        self.env.write_text(
+            log_path,
+            "2026-11-18 10:00:00 | OK | QR_SENT | 222333444 | elapsed=4.9s\n"
+            "2026-11-18 10:05:00 | FAIL | QR_FAIL_TIMEOUT | 555666777 | step=17\n",
+        )
+
+        # Regular user cannot invoke adm:* callback or open dashboard
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                msg_text="",
+                update_id="800",
+                callback_id="cb-800",
+                callback_data="adm:home",
+                callback_msg_id="500",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["answerCallbackQuery", "sendMessage"],
+        )
+        self.assertIn("Admin", self.env.tg_calls[0]["payload"].get("text", ""))
+        self.assertEqual(self.env.tg_calls[1]["payload"]["chat_id"], int(ADMIN_ID))
+        self.assertIn(
+            "Unauthorized Admin Callback", self.env.tg_calls[1]["payload"]["text"]
+        )
+
+        # Admin opens Dashboard Overview and captures admin user_meta
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "📊 Admin Dashboard",
+                update_id="801",
+                sender_name="Kamo",
+                sender_username="kamo_s",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual([c["method"] for c in self.env.tg_calls], ["sendMessage"])
+        dash_payload = self.env.tg_calls[0]["payload"]
+        self.assertIn("Admin Dashboard", dash_payload["text"])
+        self.assertIn("Users: 8 authorized", dash_payload["text"])
+        self.assertEqual(
+            self.env.read_config()["user_meta"][ADMIN_ID]["username"], "kamo_s"
+        )
+
+        # Toggle public_access inline edits same dashboard card
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="802",
+                callback_id="cb-802",
+                callback_data="adm:toggle",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        self.assertFalse(self.env.read_config()["public_access"])
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls],
+            ["answerCallbackQuery", "editMessageText"],
+        )
+        self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 501)
+        self.assertIn("LOCKED", self.env.tg_calls[1]["payload"]["text"])
+
+        # Paginated Users & Usage (8 users => 2 pages of 5)
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="803",
+                callback_id="cb-803",
+                callback_data="adm:users:0",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        u0_text = self.env.tg_calls[1]["payload"]["text"]
+        u0_kb = [
+            b["callback_data"]
+            for row in self.env.tg_calls[1]["payload"]["reply_markup"][
+                "inline_keyboard"
+            ]
+            for b in row
+        ]
+        self.assertIn("1/2", u0_text)
+        self.assertIn("adm:users:1", u0_kb)
+
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="804",
+                callback_id="cb-804",
+                callback_data="adm:users:1",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        self.assertIn("2/2", self.env.tg_calls[1]["payload"]["text"])
+
+        # Recent Logs and Errors-Only tabs
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="805",
+                callback_id="cb-805",
+                callback_data="adm:logs:0",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        logs_text = self.env.tg_calls[1]["payload"]["text"]
+        self.assertIn("QR_SENT", logs_text)
+        self.assertIn("QR_FAIL_TIMEOUT", logs_text)
+
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="806",
+                callback_id="cb-806",
+                callback_data="adm:errs:0",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        errs_text = self.env.tg_calls[1]["payload"]["text"]
+        self.assertIn("QR_FAIL_TIMEOUT", errs_text)
+        self.assertNotIn("QR_SENT", errs_text)
+
+        # Export logs merges rotated prev (if present) + active log into sendDocument
+        self.env.write_text(prev_path, "2026-11-17 09:00:00 | INFO | OLD | 1 | ok\n")
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="807",
+                callback_id="cb-807",
+                callback_data="adm:export",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        docs = [c for c in self.env.tg_calls if c["method"] == "sendDocument"]
+        self.assertEqual([d["filename"] for d in docs], ["komobot_events.log"])
+        self.assertIn(b"OLD", docs[0]["document_bytes"])
+        self.assertIn(b"QR_FAIL_TIMEOUT", docs[0]["document_bytes"])
+
+        # Reset stats requires confirmation, then clears global & per-user stats
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="808",
+                callback_id="cb-808",
+                callback_data="adm:clrstats",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        clr_kb = [
+            b["callback_data"]
+            for row in self.env.tg_calls[1]["payload"]["reply_markup"][
+                "inline_keyboard"
+            ]
+            for b in row
+        ]
+        self.assertIn("adm:clrstats_ok", clr_kb)
+
+        cfg_stats = self.env.read_config()
+        cfg_stats["global_stats"] = {"day": "2026-11-18", "req": 5, "ok": 4}
+        cfg_stats["user_stats"] = {ALLOWED_USER: {"req": 3, "ok": 3}}
+        self.env.write_config(cfg_stats)
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="809",
+                callback_id="cb-809",
+                callback_data="adm:clrstats_ok",
+                callback_msg_id="501",
+            ),
+            "IGNORE",
+        )
+        after_clr = self.env.read_config()
+        self.assertEqual(after_clr["user_stats"], {})
+        self.assertEqual(after_clr["global_stats"], {})
+        self.assertIn("STATS_CLEARED", self.env.read_text(log_path))
+
+    def test_admin_dashboard_interactive_add_remove_and_1tap_authorize(self) -> None:
+        # 1. Interactive add via text "<user_id> <label>"
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="820",
+                callback_id="cb-820",
+                callback_data="adm:add",
+                callback_msg_id="502",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(self.env.read_config()["admin_pending_action"], "add_user")
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(self.env, ADMIN_ID, "777888999 Bob Vance", update_id="821"),
+            "IGNORE",
+        )
+        cfg1 = self.env.read_config()
+        self.assertIn(777888999, cfg1["allowed_users"])
+        self.assertEqual(cfg1["user_meta"]["777888999"]["label"], "Bob Vance")
+        self.assertEqual(cfg1["admin_pending_action"], "")
+
+        # 2. Interactive add via forwarded user message (forward_user_id)
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="822",
+                callback_id="cb-822",
+                callback_data="adm:add",
+                callback_msg_id="502",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="forwarded hi",
+                update_id="823",
+                forward_user_id="888999000",
+            ),
+            "IGNORE",
+        )
+        cfg2 = self.env.read_config()
+        self.assertIn(888999000, cfg2["allowed_users"])
+        self.assertEqual(cfg2["admin_pending_action"], "")
+
+        # 3. Command escape cancels add_user cleanly instead of failing
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="824",
+                callback_id="cb-824",
+                callback_data="adm:add",
+                callback_msg_id="502",
+            ),
+            "IGNORE",
+        )
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(self.env, ADMIN_ID, "/dashboard", update_id="825"), "IGNORE"
+        )
+        self.assertEqual(self.env.read_config()["admin_pending_action"], "")
+        self.assertIn("Admin Dashboard", self.env.tg_calls[0]["payload"]["text"])
+
+        # 4. Paginated remove confirm flow removes target & protects Admin
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="826",
+                callback_id="cb-826",
+                callback_data="adm:rm:777888999",
+                callback_msg_id="502",
+            ),
+            "IGNORE",
+        )
+        rm_kb = [
+            b["callback_data"]
+            for row in self.env.tg_calls[1]["payload"]["reply_markup"][
+                "inline_keyboard"
+            ]
+            for b in row
+        ]
+        self.assertIn("adm:rmok:777888999", rm_kb)
+
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="827",
+                callback_id="cb-827",
+                callback_data="adm:rmok:777888999",
+                callback_msg_id="502",
+            ),
+            "IGNORE",
+        )
+        self.assertNotIn(777888999, self.env.read_config()["allowed_users"])
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="828",
+                callback_id="cb-828",
+                callback_data=f"adm:rmok:{ADMIN_ID}",
+                callback_msg_id="502",
+            ),
+            "IGNORE",
+        )
+        self.assertIn(int(ADMIN_ID), self.env.read_config()["allowed_users"])
+
+        # 5. 1-tap Authorize from Unauthorized alert preserves user_meta
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                "999000111",
+                "/qr",
+                update_id="829",
+                sender_name="Eve",
+                sender_username="eve_x",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                msg_text="",
+                update_id="830",
+                callback_id="cb-830",
+                callback_data="adm:addid:999000111",
+                callback_msg_id="555",
+            ),
+            "IGNORE",
+        )
+        cfg_eve = self.env.read_config()
+        self.assertIn(999000111, cfg_eve["allowed_users"])
+        self.assertEqual(cfg_eve["user_meta"]["999000111"]["name"], "Eve")
+        self.assertEqual(cfg_eve["user_meta"]["999000111"]["username"], "eve_x")
+
+    def test_audit_log_rotation_daily_rollover_and_crash_lease_alert(self) -> None:
+        log_path = "/storage/emulated/0/Download/komobot_events.log"
+        prev_path = "/storage/emulated/0/Download/komobot_events.prev.log"
+        oversized = ("X" * 524290) + "\n"
+        self.env.write_text(log_path, oversized)
+
+        # Trigger audited event -> rotates oversized log to .prev.log
+        self.assertEqual(_run_router(self.env, UNKNOWN_USER, "/qr"), "IGNORE")
+        self.assertEqual(self.env.read_text(prev_path), oversized)
+        log_after = self.env.read_text(log_path)
+        self.assertIn("UNAUTHORIZED", log_after)
+        self.assertNotIn("XXXXX", log_after)
+
+        # Daily rollover: Day 1 fail vs Day 2 (+25h) fail via timeout accounting
+        self.assertEqual(
+            _dispatch_qr(self.env, ALLOWED_USER, "/qr", update_id="901"), "RUN"
+        )
+        self.assertEqual(_run_timeout(self.env, "ABORT_TIMEOUT"), "SCREEN_OFF")
+        self.env.advance_time(25 * 3600 * 1000)
+        self.assertEqual(
+            _dispatch_qr(self.env, ALLOWED_USER, "/qr", update_id="902"), "RUN"
+        )
+        self.assertEqual(_run_timeout(self.env, "ABORT_TIMEOUT"), "SCREEN_OFF")
+        cfg_roll = self.env.read_config()
+        self.assertEqual(cfg_roll["user_stats"][ALLOWED_USER]["req"], 2)
+        self.assertEqual(cfg_roll["user_stats"][ALLOWED_USER]["day_req"], 1)
+        self.assertEqual(cfg_roll["global_stats"]["req"], 2)
+        self.assertEqual(cfg_roll["global_stats"]["day_req"], 1)
+
+        # Crashed/expired active lease on cold recovery notifies Admin & increments fail
+        self.env.advance_time(50000)
+        stale_cfg = self.env.read_config()
+        stale_cfg["active_chat_id"] = int(ALLOWED_USER)
+        stale_cfg["busy_until"] = self.env.now_ms - 5000
+        stale_cfg["worker_active"] = True
+        stale_cfg["worker_heartbeat_ms"] = self.env.now_ms - 30000
+        stale_cfg["capture_mode"] = "qr"
+        stale_cfg["last_state"] = "PIN_SCREEN"
+        stale_cfg["step_count"] = 6
+        self.env.write_config(stale_cfg)
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _dispatch_qr(self.env, THIRD_USER, "/qr", update_id="903"), "RUN"
+        )
+        admin_alerts = [
+            c["payload"]["text"]
+            for c in self.env.tg_calls
+            if c["method"] == "sendMessage" and c["payload"]["chat_id"] == int(ADMIN_ID)
+        ]
+        self.assertTrue(
+            any("Lease Expired" in msg and ALLOWED_USER in msg for msg in admin_alerts)
+        )
+        self.assertIn("QR_FAIL_CRASH_LEASE", self.env.read_text(log_path))
+        self.assertGreaterEqual(
+            self.env.read_config()["user_stats"][ALLOWED_USER]["fail"], 1
+        )
 
 
 if __name__ == "__main__":

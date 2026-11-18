@@ -408,7 +408,7 @@ _BSH_FRAME_HELPER = f"""void deletePrivateFrames() {{
     }}
 }}"""
 
-_BSH_TG_HTTP_HELPERS = """JSONObject tgPost(String method, JSONObject payload, int timeoutMs) {
+_BSH_TG_HTTP_HELPERS = """JSONObject tgPostRaw(String method, JSONObject payload, int timeoutMs) {
     HttpURLConnection conn = null;
     try {
         URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + method);
@@ -441,6 +441,83 @@ _BSH_TG_HTTP_HELPERS = """JSONObject tgPost(String method, JSONObject payload, i
     return new JSONObject();
 }
 
+JSONObject tgPost(String method, JSONObject payload, int timeoutMs) {
+    return tgPostRaw(method, payload, timeoutMs);
+}
+
+void writeFormField(DataOutputStream req, String boundary, String name, String val) throws Exception {
+    req.writeBytes("--" + boundary + "\\r\\n");
+    req.writeBytes("Content-Disposition: form-data; name=\\"" + name + "\\"\\r\\n\\r\\n");
+    req.write(val.getBytes("UTF-8"));
+    req.writeBytes("\\r\\n");
+}
+
+JSONObject postMultipartRaw(String endpoint, long cid, long mid, JSONObject extraFields, String fileField, String filename, String mimeType, byte[] fileBytes, int timeoutMs) {
+    JSONObject res = new JSONObject();
+    res.put("code", -1);
+    res.put("desc", "");
+    HttpURLConnection conn = null;
+    try {
+        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + endpoint);
+        conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setDoOutput(true);
+        String boundary = "*****" + System.currentTimeMillis() + "*****";
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        conn.setRequestProperty("Connection", "keep-alive");
+        DataOutputStream req = new DataOutputStream(conn.getOutputStream());
+
+        writeFormField(req, boundary, "chat_id", cid + "");
+        if (mid > 0L) {
+            writeFormField(req, boundary, "message_id", mid + "");
+        }
+        if (extraFields != null) {
+            JSONArray keys = extraFields.names();
+            if (keys != null) {
+                for (int i = 0; i < keys.length(); i++) {
+                    String k = keys.optString(i, "");
+                    String v = extraFields.optString(k, "");
+                    if (k.length() > 0 && v.length() > 0) {
+                        writeFormField(req, boundary, k, v);
+                    }
+                }
+            }
+        }
+
+        req.writeBytes("--" + boundary + "\\r\\n");
+        req.writeBytes("Content-Disposition: form-data; name=\\"" + fileField + "\\"; filename=\\"" + filename + "\\"\\r\\n");
+        req.writeBytes("Content-Type: " + mimeType + "\\r\\n\\r\\n");
+        req.write(fileBytes);
+        req.writeBytes("\\r\\n--" + boundary + "--\\r\\n");
+        req.flush();
+        req.close();
+
+        int code = conn.getResponseCode();
+        InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
+        String rawResp = readStream(is);
+        res.put("code", code);
+        if (rawResp.length() > 0) {
+            try {
+                JSONObject j = new JSONObject(rawResp);
+                res.put("desc", j.optString("description", ""));
+            } catch (Exception ignored) {
+            }
+        }
+        return res;
+    } catch (Exception e) {
+        res.put("desc", e + "");
+        if (conn != null) {
+            try {
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+        return res;
+    }
+}
+
 void tgJson(String method, JSONObject payload) {
     tgPost(method, payload, 5000);
 }
@@ -459,16 +536,23 @@ JSONObject sendMsg(long cid, String text, JSONObject markup) {
     }
 }
 
-void updateStatus(long cid, long mid, String text) {
+void editMsg(long cid, long mid, String text, JSONObject markup) {
     if (cid <= 0L || mid <= 0L || text == null || text.length() == 0) return;
     try {
         JSONObject payload = new JSONObject();
         payload.put("chat_id", cid);
         payload.put("message_id", mid);
         payload.put("text", text);
+        if (markup != null) {
+            payload.put("reply_markup", markup);
+        }
         tgPost("editMessageText", payload, 5000);
     } catch (Exception e) {
     }
+}
+
+void updateStatus(long cid, long mid, String text) {
+    editMsg(cid, mid, text, null);
 }
 
 void deleteStatus(long cid, long mid) {
@@ -495,12 +579,16 @@ void answerCallback(String cbId, String text) {
     }
 }
 
-JSONObject makeInlineButtonMarkup(String btnText, String cbData) {
+JSONObject makeBtn(String btnText, String cbData) {
     JSONObject btn = new JSONObject();
     btn.put("text", btnText);
     btn.put("callback_data", cbData);
+    return btn;
+}
+
+JSONObject makeInlineButtonMarkup(String btnText, String cbData) {
     JSONArray row = new JSONArray();
-    row.put(btn);
+    row.put(makeBtn(btnText, cbData));
     JSONArray kb = new JSONArray();
     kb.put(row);
     JSONObject markup = new JSONObject();
@@ -542,6 +630,236 @@ void notifyPreemptNotices(JSONArray notices) {
         boolean nMedia = nItem.optBoolean("status_is_media", false);
         notifyTargetFailure(nCid, nMid, nMedia, cancelMsg, "❌ Cancelled • 🔄 Retry", true);
     }
+}"""
+
+_BSH_AUDIT_HELPERS = """String eventLogPath = "/storage/emulated/0/Download/komobot_events.log";
+String eventPrevLogPath = "/storage/emulated/0/Download/komobot_events.prev.log";
+
+String cleanLogText(String s) {
+    if (s == null) return "";
+    return s.replace("\\r", " ").replace("\\n", " ").replace("|", "/").trim();
+}
+
+String todayStr(long ms) {
+    return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date(ms));
+}
+
+String tsStr(long ms) {
+    return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date(ms));
+}
+
+String shortTs(long ms) {
+    if (ms <= 0L) return "Never";
+    return new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date(ms));
+}
+
+String formatSec(long ms) {
+    if (ms <= 0L) return "0.0s";
+    long tenths = (ms + 50L) / 100L;
+    return (tenths / 10L) + "." + (tenths % 10L) + "s";
+}
+
+String formatUserDisplay(JSONObject cfg, long uid) {
+    if (cfg == null) return "[" + uid + "]";
+    JSONObject metaAll = cfg.optJSONObject("user_meta");
+    JSONObject m = (metaAll != null) ? metaAll.optJSONObject(uid + "") : null;
+    if (m == null) return "[" + uid + "]";
+    String label = m.optString("label", "");
+    String name = m.optString("name", "");
+    String uname = m.optString("username", "");
+    String base = (label.length() > 0) ? label : name;
+    if (base.length() > 0 && uname.length() > 0) {
+        return base + " (@" + uname + ") [" + uid + "]";
+    }
+    if (base.length() > 0) {
+        return base + " [" + uid + "]";
+    }
+    if (uname.length() > 0) {
+        return "@" + uname + " [" + uid + "]";
+    }
+    return "[" + uid + "]";
+}
+
+void ensureDayRollover(JSONObject st, String day) {
+    if (!st.optString("day", "").equals(day)) {
+        st.put("day", day);
+        st.put("day_req", 0L);
+        st.put("day_ok", 0L);
+        st.put("day_fail", 0L);
+    }
+}
+
+void writeConfigRaw(JSONObject cfg) {
+    try {
+        File outFile = new File(configPath);
+        if (outFile.getParentFile() != null && !outFile.getParentFile().exists()) {
+            outFile.getParentFile().mkdirs();
+        }
+        FileOutputStream fos = new FileOutputStream(outFile);
+        OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
+        osw.write(cfg.toString(2));
+        osw.flush();
+        osw.close();
+    } catch (Exception e) {
+    }
+}
+
+void applyUsageToConfig(JSONObject cfg, long uid, String category, long elapsedMs, String outcome, String errDetail, long nowMs) {
+    String day = todayStr(nowMs);
+    JSONObject g = cfg.optJSONObject("global_stats");
+    if (g == null) {
+        g = new JSONObject();
+        cfg.put("global_stats", g);
+    }
+    ensureDayRollover(g, day);
+
+    if (category.equals("unauth")) {
+        g.put("unauth", g.optLong("unauth", 0L) + 1L);
+        return;
+    }
+
+    JSONObject allUsers = cfg.optJSONObject("user_stats");
+    if (allUsers == null) {
+        allUsers = new JSONObject();
+        cfg.put("user_stats", allUsers);
+    }
+    String uidKey = uid + "";
+    JSONObject u = (uid != 0L) ? allUsers.optJSONObject(uidKey) : null;
+    if (uid != 0L && u == null) {
+        u = new JSONObject();
+        allUsers.put(uidKey, u);
+    }
+    if (u != null) {
+        ensureDayRollover(u, day);
+        u.put("last_ms", nowMs);
+        u.put("last_outcome", outcome);
+    }
+
+    if (category.equals("locked")) {
+        g.put("locked", g.optLong("locked", 0L) + 1L);
+        if (u != null) {
+            u.put("rejected", u.optLong("rejected", 0L) + 1L);
+            u.put("last_error", cleanLogText(errDetail));
+        }
+    } else if (category.equals("ok")) {
+        g.put("req", g.optLong("req", 0L) + 1L);
+        g.put("ok", g.optLong("ok", 0L) + 1L);
+        g.put("day_req", g.optLong("day_req", 0L) + 1L);
+        g.put("day_ok", g.optLong("day_ok", 0L) + 1L);
+        if (elapsedMs > 0L) g.put("total_ok_ms", g.optLong("total_ok_ms", 0L) + elapsedMs);
+        if (u != null) {
+            u.put("req", u.optLong("req", 0L) + 1L);
+            u.put("ok", u.optLong("ok", 0L) + 1L);
+            u.put("day_req", u.optLong("day_req", 0L) + 1L);
+            u.put("day_ok", u.optLong("day_ok", 0L) + 1L);
+            if (elapsedMs > 0L) u.put("total_ok_ms", u.optLong("total_ok_ms", 0L) + elapsedMs);
+            u.put("last_error", "");
+        }
+    } else if (category.equals("fail")) {
+        g.put("req", g.optLong("req", 0L) + 1L);
+        g.put("fail", g.optLong("fail", 0L) + 1L);
+        g.put("day_req", g.optLong("day_req", 0L) + 1L);
+        g.put("day_fail", g.optLong("day_fail", 0L) + 1L);
+        if (u != null) {
+            u.put("req", u.optLong("req", 0L) + 1L);
+            u.put("fail", u.optLong("fail", 0L) + 1L);
+            u.put("day_req", u.optLong("day_req", 0L) + 1L);
+            u.put("day_fail", u.optLong("day_fail", 0L) + 1L);
+            u.put("last_error", cleanLogText(errDetail));
+        }
+    } else if (category.equals("cancel")) {
+        g.put("req", g.optLong("req", 0L) + 1L);
+        g.put("cancel", g.optLong("cancel", 0L) + 1L);
+        g.put("day_req", g.optLong("day_req", 0L) + 1L);
+        if (u != null) {
+            u.put("req", u.optLong("req", 0L) + 1L);
+            u.put("cancel", u.optLong("cancel", 0L) + 1L);
+            u.put("day_req", u.optLong("day_req", 0L) + 1L);
+            u.put("last_error", cleanLogText(errDetail));
+        }
+    }
+}
+
+void recordUsageSafe(long uid, String category, long elapsedMs, String outcome, String errDetail) {
+    synchronized (System.class) {
+        JSONObject fresh = new JSONObject();
+        File f = new File(configPath);
+        if (f.exists()) {
+            try {
+                FileInputStream fis = new FileInputStream(f);
+                String raw = readStream(fis);
+                fis.close();
+                if (raw.length() > 0) fresh = new JSONObject(raw);
+            } catch (Exception e) {
+            }
+        }
+        applyUsageToConfig(fresh, uid, category, elapsedMs, outcome, errDetail, System.currentTimeMillis());
+        writeConfigRaw(fresh);
+    }
+}
+
+void appendAuditLog(String level, String event, long uid, String userDisp, String detail) {
+    synchronized (System.class) {
+        try {
+            File f = new File(eventLogPath);
+            if (f.getParentFile() != null && !f.getParentFile().exists()) {
+                f.getParentFile().mkdirs();
+            }
+            if (f.exists() && f.length() >= 524288L) {
+                File prev = new File(eventPrevLogPath);
+                if (prev.exists()) {
+                    prev.delete();
+                }
+                f.renameTo(prev);
+            }
+            String uCol = (userDisp != null && userDisp.length() > 0) ? cleanLogText(userDisp) : ("[" + uid + "]");
+            String line = tsStr(System.currentTimeMillis()) + " | " + level + " | " + event + " | " + uCol + " | " + cleanLogText(detail) + "\\n";
+            FileOutputStream fos = new FileOutputStream(f, true);
+            fos.write(line.getBytes("UTF-8"));
+            fos.close();
+        } catch (Exception e) {
+        }
+    }
+}
+
+String buildFailureAlert(JSONObject cfg, String title, long targetCid, String triggerDesc, String reason, long elapsedMs, int stepCount, String lastState, String trace, int otherCnt, int whiteCnt, int loadCnt, String queuedSummary) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(title).append("\\n");
+    sb.append("• User: ").append(formatUserDisplay(cfg, targetCid)).append("\\n");
+    if (triggerDesc != null && triggerDesc.length() > 0) {
+        sb.append("• Trigger: ").append(triggerDesc).append("\\n");
+    }
+    sb.append("• Reason: ").append(reason).append("\\n");
+    sb.append("• Last State: ").append(lastState).append(" (step ").append(stepCount).append(" • ").append(formatSec(elapsedMs)).append(")\\n");
+    sb.append("• Counters: other=").append(otherCnt).append(", white=").append(whiteCnt).append(", loading=").append(loadCnt);
+    if (trace != null && trace.length() > 0) {
+        sb.append("\\n• Trace: ").append(trace);
+    }
+    if (queuedSummary != null && queuedSummary.length() > 0) {
+        sb.append("\\n• Queued user request(s) failed: ").append(queuedSummary);
+    }
+    return sb.toString();
+}
+
+String recordPreemptedList(JSONObject cfg, JSONArray notices) {
+    if (notices == null || notices.length() == 0) return "";
+    long now = System.currentTimeMillis();
+    StringBuilder summary = new StringBuilder();
+    for (int i = 0; i < notices.length(); i++) {
+        JSONObject nItem = notices.optJSONObject(i);
+        if (nItem == null) continue;
+        long nCid = nItem.optLong("chat_id", 0L);
+        String role = nItem.optString("role", "active");
+        String st = nItem.optString("last_state", "");
+        long startMs = nItem.optLong("start_ms", 0L);
+        long el = (startMs > 0L && now >= startMs) ? (now - startMs) : 0L;
+        String uDisp = formatUserDisplay(cfg, nCid);
+        recordUsageSafe(nCid, "cancel", el, "CANCELLED_RESET", role + (st.length() > 0 ? (" @ " + st) : ""));
+        appendAuditLog("WARN", "CANCELLED_RESET", nCid, uDisp, role + (st.length() > 0 ? (" state=" + st) : "") + " elapsed=" + formatSec(el));
+        if (summary.length() > 0) summary.append(", ");
+        summary.append(uDisp).append(" (").append(role).append(")");
+    }
+    return summary.toString();
 }"""
 
 _BSH_TIMING_HELPER = """void logTiming(String tag, long a, long b) {
@@ -602,6 +920,19 @@ void saveConfig(JSONObject cfg) {
             if (fresh.has("public_access")) {
                 cfg.put("public_access", fresh.optBoolean("public_access", true));
             }
+            if (fresh.has("user_meta")) {
+                cfg.put("user_meta", fresh.getJSONObject("user_meta"));
+            }
+            if (fresh.has("user_stats")) {
+                cfg.put("user_stats", fresh.getJSONObject("user_stats"));
+            }
+            if (fresh.has("global_stats")) {
+                cfg.put("global_stats", fresh.getJSONObject("global_stats"));
+            }
+            if (fresh.has("admin_pending_action")) {
+                cfg.put("admin_pending_action", fresh.optString("admin_pending_action", ""));
+                cfg.put("admin_pending_msg_id", fresh.optLong("admin_pending_msg_id", 0L));
+            }
             File outFile = new File(configPath);
             if (outFile.getParentFile() != null && !outFile.getParentFile().exists()) {
                 outFile.getParentFile().mkdirs();
@@ -622,6 +953,9 @@ def build_router_script() -> str:
     return f"""import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -639,6 +973,9 @@ String msgText = "{{lv=msg_text}}".trim();
 String callbackId = "{{lv=callback_id}}".trim();
 String callbackData = "{{lv=callback_data}}".trim();
 String callbackMsgIdStr = "{{lv=callback_msg_id}}".trim();
+String senderName = "{{lv=sender_name}}".trim();
+String senderUsername = "{{lv=sender_username}}".trim();
+String fwdUserIdStr = "{{lv=forward_user_id}}".trim();
 if (callbackId.length() > 0 && callbackData.length() > 0) {{
     msgText = callbackData;
 }}
@@ -649,6 +986,11 @@ if (callbackId.length() > 0) {{
     }} catch (Exception e) {{
     }}
 }}
+long fwdUserId = 0L;
+try {{
+    fwdUserId = Long.parseLong(fwdUserIdStr);
+}} catch (Exception e) {{
+}}
 
 {_BSH_READ_STREAM}
 
@@ -657,6 +999,8 @@ if (callbackId.length() > 0) {{
 {_BSH_FRAME_HELPER}
 
 {_BSH_TG_HTTP_HELPERS}
+
+{_BSH_AUDIT_HELPERS}
 
 JSONObject loadConfig() {{
     File f = new File(configPath);
@@ -684,18 +1028,400 @@ JSONObject loadConfig() {{
 }}
 
 void saveConfig(JSONObject cfg) {{
-    try {{
-        File f = new File(configPath);
-        if (f.getParentFile() != null && !f.getParentFile().exists()) {{
-            f.getParentFile().mkdirs();
-        }}
-        FileOutputStream fos = new FileOutputStream(f);
-        OutputStreamWriter osw = new OutputStreamWriter(fos, "UTF-8");
-        osw.write(cfg.toString(2));
-        osw.flush();
-        osw.close();
-    }} catch (Exception e) {{
+    writeConfigRaw(cfg);
+}}
+
+void upsertUserMeta(JSONObject cfg, long uid, String fname, String uname, String customLabel, long nowMs, boolean setAdded) {{
+    if (uid == 0L) return;
+    JSONObject metaAll = cfg.optJSONObject("user_meta");
+    if (metaAll == null) {{
+        metaAll = new JSONObject();
+        cfg.put("user_meta", metaAll);
     }}
+    String key = uid + "";
+    JSONObject m = metaAll.optJSONObject(key);
+    if (m == null) {{
+        m = new JSONObject();
+        metaAll.put(key, m);
+    }}
+    String cleanName = cleanLogText(fname);
+    if (cleanName.length() > 64) cleanName = cleanName.substring(0, 64);
+    String cleanUname = cleanLogText(uname);
+    if (cleanUname.length() > 64) cleanUname = cleanUname.substring(0, 64);
+    String cleanLbl = cleanLogText(customLabel);
+    if (cleanLbl.length() > 48) cleanLbl = cleanLbl.substring(0, 48);
+    if (cleanName.length() > 0) m.put("name", cleanName);
+    if (cleanUname.length() > 0) m.put("username", cleanUname);
+    if (cleanLbl.length() > 0) m.put("label", cleanLbl);
+    if (nowMs > 0L) m.put("last_seen_ms", nowMs);
+    if (setAdded && m.optLong("added_ms", 0L) == 0L) m.put("added_ms", nowMs);
+}}
+
+boolean isAllowedInArray(JSONArray allowed, long targetId) {{
+    if (allowed == null) return false;
+    for (int i = 0; i < allowed.length(); i++) {{
+        if (allowed.optLong(i, 0L) == targetId) return true;
+    }}
+    return false;
+}}
+
+boolean addAllowedUser(JSONObject cfg, long newId, String label, long nowMs) {{
+    JSONArray allowed = cfg.optJSONArray("allowed_users");
+    if (allowed == null) {{
+        allowed = new JSONArray();
+        cfg.put("allowed_users", allowed);
+    }}
+    boolean added = false;
+    if (!isAllowedInArray(allowed, newId)) {{
+        allowed.put(newId);
+        cfg.put("allowed_users", allowed);
+        added = true;
+    }}
+    upsertUserMeta(cfg, newId, "", "", label, 0L, true);
+    if (added && cfg.optJSONObject("user_meta") != null) {{
+        JSONObject m = cfg.optJSONObject("user_meta").optJSONObject(newId + "");
+        if (m != null && m.optLong("added_ms", 0L) == 0L) m.put("added_ms", nowMs);
+    }}
+    return added;
+}}
+
+boolean removeAllowedUser(JSONObject cfg, long remId) {{
+    JSONArray allowed = cfg.optJSONArray("allowed_users");
+    if (allowed == null) return false;
+    JSONArray next = new JSONArray();
+    boolean found = false;
+    for (int i = 0; i < allowed.length(); i++) {{
+        long cur = allowed.optLong(i, 0L);
+        if (cur == remId) {{
+            found = true;
+        }} else {{
+            next.put(cur);
+        }}
+    }}
+    cfg.put("allowed_users", next);
+    return found;
+}}
+
+JSONObject wrapInlineKb(JSONArray rows) {{
+    JSONObject m = new JSONObject();
+    m.put("inline_keyboard", rows);
+    return m;
+}}
+
+JSONArray readAuditLines(boolean errorsOnly) {{
+    JSONArray all = new JSONArray();
+    String[] paths = new String[]{{eventPrevLogPath, eventLogPath}};
+    for (int pi = 0; pi < paths.length; pi++) {{
+        try {{
+            File f = new File(paths[pi]);
+            if (!f.exists()) continue;
+            BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            String line;
+            while ((line = br.readLine()) != null) {{
+                if (line.length() == 0) continue;
+                if (errorsOnly && line.indexOf(" | FAIL | ") < 0 && line.indexOf(" | ERR | ") < 0 && line.indexOf(" | WARN | ") < 0) {{
+                    continue;
+                }}
+                all.put(line);
+            }}
+            br.close();
+        }} catch (Exception e) {{
+        }}
+    }}
+    if (all.length() <= 200) return all;
+    JSONArray trimmed = new JSONArray();
+    for (int i = all.length() - 200; i < all.length(); i++) {{
+        trimmed.put(all.optString(i, ""));
+    }}
+    return trimmed;
+}}
+
+byte[] readAuditDocumentBytes() {{
+    StringBuilder sb = new StringBuilder();
+    String[] paths = new String[]{{eventPrevLogPath, eventLogPath}};
+    for (int pi = 0; pi < paths.length; pi++) {{
+        try {{
+            File f = new File(paths[pi]);
+            if (!f.exists()) continue;
+            BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            String line;
+            while ((line = br.readLine()) != null) {{
+                if (line.length() > 0) sb.append(line).append("\\n");
+            }}
+            br.close();
+        }} catch (Exception e) {{
+        }}
+    }}
+    try {{
+        return sb.toString().getBytes("UTF-8");
+    }} catch (Exception e) {{
+        return new byte[]{{}};
+    }}
+}}
+
+JSONArray collectDisplayUserIds(JSONObject cfg, long adminId, boolean removableOnly) {{
+    JSONArray ids = new JSONArray();
+    if (!removableOnly && adminId > 0L) {{
+        ids.put(adminId);
+    }}
+    JSONArray allowed = cfg.optJSONArray("allowed_users");
+    if (allowed != null) {{
+        for (int i = 0; i < allowed.length(); i++) {{
+            long u = allowed.optLong(i, 0L);
+            if (u == 0L || u == adminId) continue;
+            if (!isAllowedInArray(ids, u)) ids.put(u);
+        }}
+    }}
+    if (!removableOnly) {{
+        JSONObject stats = cfg.optJSONObject("user_stats");
+        if (stats != null) {{
+            JSONArray keys = stats.names();
+            if (keys != null) {{
+                for (int i = 0; i < keys.length(); i++) {{
+                    try {{
+                        long u = Long.parseLong(keys.optString(i, "0"));
+                        if (u != 0L && !isAllowedInArray(ids, u)) ids.put(u);
+                    }} catch (Exception e) {{
+                    }}
+                }}
+            }}
+        }}
+    }}
+    return ids;
+}}
+
+JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid, long adminId) {{
+    JSONObject out = new JSONObject();
+    long now = System.currentTimeMillis();
+    String day = todayStr(now);
+    JSONObject g = cfg.optJSONObject("global_stats");
+    if (g == null) g = new JSONObject();
+    boolean sameDay = g.optString("day", "").equals(day);
+    long dReq = sameDay ? g.optLong("day_req", 0L) : 0L;
+    long dOk = sameDay ? g.optLong("day_ok", 0L) : 0L;
+    long dFail = sameDay ? g.optLong("day_fail", 0L) : 0L;
+    long tReq = g.optLong("req", 0L);
+    long tOk = g.optLong("ok", 0L);
+    long tFail = g.optLong("fail", 0L);
+    long tCancel = g.optLong("cancel", 0L);
+    long tUnauth = g.optLong("unauth", 0L);
+    long tLocked = g.optLong("locked", 0L);
+    long totalOkMs = g.optLong("total_ok_ms", 0L);
+    long avgMs = (tOk > 0L) ? (totalOkMs / tOk) : 0L;
+    JSONArray allowed = cfg.optJSONArray("allowed_users");
+    int userCnt = (allowed != null) ? allowed.length() : 0;
+    boolean pubAccess = cfg.optBoolean("public_access", true);
+
+    if (tab.equals("add")) {{
+        String txt = "➕ Add Authorized User\\n\\nSend a Telegram User ID (optionally followed by a label, e.g. `123456789 Alice`), or forward any message from that user.\\n\\nTap Cancel below or send /cancel to abort.";
+        JSONArray rows = new JSONArray();
+        JSONArray r1 = new JSONArray();
+        r1.put(makeBtn("❌ Cancel", "adm:cancel"));
+        rows.put(r1);
+        out.put("text", txt);
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    if (tab.equals("clrstats")) {{
+        String txt = "🗑️ Reset Usage Counters?\\n\\nThis resets Today & Lifetime counters in komobot_config.json to 0.\\nAllowed users, user labels, and komobot_events.log are preserved.";
+        JSONArray rows = new JSONArray();
+        JSONArray r1 = new JSONArray();
+        r1.put(makeBtn("✅ Confirm Reset Stats", "adm:clrstats_ok"));
+        r1.put(makeBtn("❌ Cancel", "adm:home"));
+        rows.put(r1);
+        out.put("text", txt);
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    if (tab.equals("rm")) {{
+        String disp = formatUserDisplay(cfg, targetUid);
+        String txt = "🗑️ Remove User?\\n\\nRemove " + disp + " from allowed users?\\nTheir historical log entries remain intact.";
+        JSONArray rows = new JSONArray();
+        JSONArray r1 = new JSONArray();
+        r1.put(makeBtn("✅ Confirm Remove", "adm:rmok:" + targetUid));
+        r1.put(makeBtn("❌ Cancel", "adm:rmenu:0"));
+        rows.put(r1);
+        out.put("text", txt);
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    if (tab.equals("users") || tab.equals("rmenu")) {{
+        boolean isRm = tab.equals("rmenu");
+        JSONArray ids = collectDisplayUserIds(cfg, adminId, isRm);
+        int pageSize = 5;
+        int total = ids.length();
+        int totalPages = (total == 0) ? 1 : ((total + pageSize - 1) / pageSize);
+        if (page < 0) page = 0;
+        if (page >= totalPages) page = totalPages - 1;
+        int start = page * pageSize;
+        int end = start + pageSize;
+        if (end > total) end = total;
+
+        JSONObject allStats = cfg.optJSONObject("user_stats");
+        StringBuilder sb = new StringBuilder();
+        if (isRm) {{
+            sb.append("➖ Remove Authorized User (Page ").append(page + 1).append("/").append(totalPages).append(")\\n");
+            if (total == 0) {{
+                sb.append("\\nNo removable non-admin users registered.");
+            }} else {{
+                sb.append("\\nSelect a user below to remove:");
+            }}
+        }} else {{
+            sb.append("👥 Users & Usage (Page ").append(page + 1).append("/").append(totalPages).append(" • ").append(userCnt).append(" allowed)\\n\\n");
+            if (total == 0) {{
+                sb.append("No users recorded yet.");
+            }} else {{
+                for (int i = start; i < end; i++) {{
+                    long uId = ids.optLong(i, 0L);
+                    boolean isAdm = (uId == adminId);
+                    boolean inAllowed = isAdm || isAllowedInArray(allowed, uId);
+                    String disp = formatUserDisplay(cfg, uId);
+                    JSONObject u = (allStats != null) ? allStats.optJSONObject(uId + "") : null;
+                    if (u == null) u = new JSONObject();
+                    boolean uSame = u.optString("day", "").equals(day);
+                    long uDReq = uSame ? u.optLong("day_req", 0L) : 0L;
+                    long uReq = u.optLong("req", 0L);
+                    long uOk = u.optLong("ok", 0L);
+                    long uFail = u.optLong("fail", 0L);
+                    long uCan = u.optLong("cancel", 0L);
+                    long uRej = u.optLong("rejected", 0L);
+                    long uAvg = (uOk > 0L) ? (u.optLong("total_ok_ms", 0L) / uOk) : 0L;
+                    long uLast = u.optLong("last_ms", 0L);
+                    String uOut = u.optString("last_outcome", "-");
+
+                    sb.append(i + 1).append(". ");
+                    if (isAdm) sb.append("👑 ");
+                    sb.append(disp);
+                    if (!inAllowed) sb.append(" [removed]");
+                    sb.append("\\n");
+                    sb.append("   Req: ").append(uReq).append(" (today ").append(uDReq).append(") | ✅ ").append(uOk);
+                    if (uFail > 0L) sb.append(" ❌ ").append(uFail);
+                    if (uCan > 0L) sb.append(" 🚫 ").append(uCan);
+                    if (uRej > 0L) sb.append(" 🔒 ").append(uRej);
+                    if (uOk > 0L) sb.append(" | avg ").append(formatSec(uAvg));
+                    sb.append("\\n   Last: ").append(shortTs(uLast)).append(" • ").append(uOut).append("\\n");
+                }}
+            }}
+        }}
+
+        JSONArray rows = new JSONArray();
+        if (isRm) {{
+            for (int i = start; i < end; i++) {{
+                long uId = ids.optLong(i, 0L);
+                JSONArray rBtn = new JSONArray();
+                rBtn.put(makeBtn("🗑️ " + formatUserDisplay(cfg, uId), "adm:rm:" + uId));
+                rows.put(rBtn);
+            }}
+        }}
+        String prefix = isRm ? "adm:rmenu:" : "adm:users:";
+        JSONArray nav = new JSONArray();
+        if (page > 0) nav.put(makeBtn("⬅️ Prev", prefix + (page - 1)));
+        nav.put(makeBtn("🔄 Refresh", prefix + page));
+        if (page + 1 < totalPages) nav.put(makeBtn("Next ➡️", prefix + (page + 1)));
+        rows.put(nav);
+        JSONArray act = new JSONArray();
+        if (isRm) {{
+            act.put(makeBtn("👥 Back to Users", "adm:users:0"));
+        }} else {{
+            act.put(makeBtn("➕ Add User", "adm:add"));
+            act.put(makeBtn("➖ Remove", "adm:rmenu:0"));
+        }}
+        act.put(makeBtn("◀️ Dashboard", "adm:home"));
+        rows.put(act);
+        out.put("text", sb.toString());
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    if (tab.equals("logs") || tab.equals("errs")) {{
+        boolean errOnly = tab.equals("errs");
+        JSONArray lines = readAuditLines(errOnly);
+        int pageSize = 8;
+        int total = lines.length();
+        int totalPages = (total == 0) ? 1 : ((total + pageSize - 1) / pageSize);
+        if (page < 0) page = 0;
+        if (page >= totalPages) page = totalPages - 1;
+        int endIdx = total - (page * pageSize);
+        int startIdx = endIdx - pageSize;
+        if (startIdx < 0) startIdx = 0;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(errOnly ? "🚨 Error & Alert Logs" : "📄 Recent Audit Logs");
+        sb.append(" (Page ").append(page + 1).append("/").append(totalPages).append(" • ").append(total).append(" events)\\n\\n");
+        if (total == 0) {{
+            sb.append("No matching entries recorded on device yet.");
+        }} else {{
+            int cnt = endIdx - startIdx;
+            for (int k = 0; k < cnt; k++) {{
+                String ln = lines.optString(endIdx - 1 - k, "");
+                if (ln.length() > 160) ln = ln.substring(0, 157) + "...";
+                sb.append("• ").append(ln).append("\\n");
+            }}
+        }}
+        String prefix = errOnly ? "adm:errs:" : "adm:logs:";
+        JSONArray rows = new JSONArray();
+        JSONArray r1 = new JSONArray();
+        r1.put(makeBtn(errOnly ? "📄 Show All" : "🚨 Failures/Alerts", (errOnly ? "adm:logs:" : "adm:errs:") + "0"));
+        r1.put(makeBtn("📎 Export File", "adm:export"));
+        rows.put(r1);
+        JSONArray r2 = new JSONArray();
+        if (page > 0) r2.put(makeBtn("⬅️ Newer", prefix + (page - 1)));
+        r2.put(makeBtn("🔄 Refresh", prefix + page));
+        if (page + 1 < totalPages) r2.put(makeBtn("Older ➡️", prefix + (page + 1)));
+        rows.put(r2);
+        JSONArray r3 = new JSONArray();
+        r3.put(makeBtn("◀️ Back to Dashboard", "adm:home"));
+        rows.put(r3);
+        out.put("text", sb.toString());
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    // Default: Overview tab (adm:home)
+    long busyUntil = cfg.optLong("busy_until", 0L);
+    JSONArray q = cfg.optJSONArray("queue");
+    int qLen = (q != null) ? q.length() : 0;
+    String runStatus = "🟢 Idle (last: " + cfg.optString("last_state", "NONE") + ")";
+    if (now < busyUntil && busyUntil > 0L) {{
+        long actCid = cfg.optLong("active_chat_id", 0L);
+        runStatus = "🟡 Active (" + cfg.optString("capture_mode", "qr") + " • " + formatUserDisplay(cfg, actCid) + " @ " + cfg.optString("last_state", "INIT") + ", Q=" + qLen + ")";
+    }}
+    long okPct = (tReq > 0L) ? ((tOk * 100L) / tReq) : 0L;
+    StringBuilder sb = new StringBuilder();
+    sb.append("👑 Komobot Admin Dashboard\\n\\n");
+    sb.append("• Access: ").append(pubAccess ? "🟢 ENABLED (Public)" : "🔴 LOCKED (Admin only)").append("\\n");
+    sb.append("• Status: ").append(runStatus).append("\\n");
+    sb.append("• Users: ").append(userCnt).append(" authorized\\n\\n");
+    sb.append("📊 Today (").append(day).append("): ")
+      .append(dReq).append(" req | ✅ ").append(dOk).append(" | ❌ ").append(dFail).append("\\n");
+    sb.append("📈 All-Time: ").append(tReq).append(" req | ✅ ").append(tOk)
+      .append(" (").append(okPct).append("%) | ❌ ").append(tFail).append(" | 🚫 ").append(tCancel).append("\\n");
+    sb.append("⏱️ Avg QR: ").append(formatSec(avgMs))
+      .append(" | ⚠️ Blocked: ").append(tUnauth).append(" unauth, ").append(tLocked).append(" locked");
+
+    JSONArray rows = new JSONArray();
+    JSONArray r1 = new JSONArray();
+    r1.put(makeBtn("👥 Users & Usage", "adm:users:0"));
+    r1.put(makeBtn("📄 Recent Logs", "adm:logs:0"));
+    rows.put(r1);
+    JSONArray r2 = new JSONArray();
+    r2.put(makeBtn(pubAccess ? "🔴 Lock Bot" : "🟢 Enable Public", "adm:toggle"));
+    r2.put(makeBtn("🔄 Refresh", "adm:home"));
+    rows.put(r2);
+    JSONArray r3 = new JSONArray();
+    r3.put(makeBtn("➕ Add User", "adm:add"));
+    r3.put(makeBtn("➖ Remove User", "adm:rmenu:0"));
+    rows.put(r3);
+    JSONArray r4 = new JSONArray();
+    r4.put(makeBtn("📎 Export Log File", "adm:export"));
+    r4.put(makeBtn("🗑️ Reset Stats", "adm:clrstats"));
+    rows.put(r4);
+    out.put("text", sb.toString());
+    out.put("markup", wrapInlineKb(rows));
+    return out;
 }}
 
 long cid = 0L;
@@ -725,6 +1451,20 @@ int qPos = 0;
 boolean dupUid = false;
 boolean isAdminUser = false;
 boolean isMediaStatus = false;
+boolean editDashboardInPlace = false;
+boolean exportAuditDoc = false;
+long notifyAdminCid = 0L;
+String adminAlertText = null;
+JSONObject adminAlertMarkup = null;
+String auditLevel = null;
+String auditEvent = null;
+String auditUserDisp = "";
+String auditDetail = "";
+String crashedAlertText = null;
+String crashedLogDetail = "";
+long crashedLogCid = 0L;
+String crashedLogUserDisp = "";
+JSONArray crashedRestoreTargets = null;
 JSONArray coopPreemptNotices = null;
 long coopRunStart = 0L;
 
@@ -768,16 +1508,24 @@ synchronized (System.class) {{
     if (uid > 0L && uid <= lastUid) {{
         dupUid = true;
     }} else {{
+        long now = System.currentTimeMillis();
         if (uid > 0L) {{
             cfg.put("last_update_id", uid);
         }}
         cfg.put("last_chat_id", cid);
         cfg.put("last_msg_text", msgText);
+        // Only capture sender_name/username directly when not forwarding someone else's message
+        if (fwdUserId == 0L) {{
+            upsertUserMeta(cfg, cid, senderName, senderUsername, "", now, false);
+        }} else {{
+            upsertUserMeta(cfg, cid, "", "", "", now, false);
+        }}
 
         long adminId = cfg.optLong("admin_id", defaultAdminId);
         if (!cfg.has("admin_id") && adminId > 0L) {{
             cfg.put("admin_id", adminId);
         }}
+        notifyAdminCid = adminId;
         JSONArray allowed = cfg.optJSONArray("allowed_users");
         if (allowed == null) {{
             allowed = new JSONArray();
@@ -787,17 +1535,271 @@ synchronized (System.class) {{
 
         boolean isAdmin = (cid == adminId);
         isAdminUser = isAdmin;
-        boolean isAllowed = isAdmin;
-        for (int i = 0; i < allowed.length(); i++) {{
-            if (allowed.optLong(i, 0L) == cid) {{
-                isAllowed = true;
-                break;
+        boolean isAllowed = isAdmin || isAllowedInArray(allowed, cid);
+
+        // Close abandoned lease stats if previous run expired mid-flight without cleanup
+        long busyUntil = cfg.optLong("busy_until", 0L);
+        boolean willRecoverStale = false;
+        JSONObject staleCrashPayload = null;
+        if (busyUntil > 0L && now >= busyUntil) {{
+            long staleCid = cfg.optLong("active_chat_id", 0L);
+            String staleState = cfg.optString("last_state", "INIT");
+            if (staleCid != 0L && !staleState.equals("QR_SENT") && !staleState.equals("RESET")) {{
+                willRecoverStale = true;
+                long staleStart = cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L));
+                long staleElapsed = (staleStart > 0L && now >= staleStart) ? (now - staleStart) : 0L;
+                int staleStep = cfg.optInt("step_count", 0);
+                String staleTrace = cfg.optString("state_trace", "");
+                String staleTrig = cfg.optString("active_trigger", "cmd");
+                applyUsageToConfig(cfg, staleCid, "fail", staleElapsed, "LEASE_EXPIRED_CRASH", "state=" + staleState, now);
+
+                JSONArray staleQ = cfg.optJSONArray("queue");
+                JSONArray restoreList = new JSONArray();
+                JSONObject actT = new JSONObject();
+                actT.put("chat_id", staleCid);
+                actT.put("status_message_id", cfg.optLong("status_message_id", 0L));
+                actT.put("status_is_media", cfg.optBoolean("status_is_media", false));
+                restoreList.put(actT);
+
+                StringBuilder qNames = new StringBuilder();
+                if (staleQ != null) {{
+                    for (int qi = 0; qi < staleQ.length(); qi++) {{
+                        JSONObject qIt = staleQ.optJSONObject(qi);
+                        if (qIt == null) continue;
+                        long qCid = qIt.optLong("chat_id", 0L);
+                        long qEnq = qIt.optLong("enqueued_ms", staleStart);
+                        applyUsageToConfig(cfg, qCid, "fail", (now >= qEnq) ? (now - qEnq) : 0L, "LEASE_EXPIRED_CRASH", "queued", now);
+                        restoreList.put(qIt);
+                        if (qNames.length() > 0) qNames.append(", ");
+                        qNames.append(formatUserDisplay(cfg, qCid));
+                    }}
+                }}
+
+                String alertTxt = buildFailureAlert(
+                    cfg,
+                    "🚨 Previous Request Interrupted (Lease Expired)",
+                    staleCid,
+                    staleTrig,
+                    "Worker stopped before finishing (LEASE_EXPIRED_CRASH)",
+                    staleElapsed,
+                    staleStep,
+                    staleState,
+                    staleTrace,
+                    cfg.optInt("other_count", 0),
+                    cfg.optInt("white_count", 0),
+                    cfg.optInt("loading_count", 0),
+                    qNames.toString()
+                );
+                staleCrashPayload = new JSONObject();
+                staleCrashPayload.put("alert", alertTxt);
+                staleCrashPayload.put("cid", staleCid);
+                staleCrashPayload.put("user_disp", formatUserDisplay(cfg, staleCid));
+                staleCrashPayload.put("detail", "state=" + staleState + " step=" + staleStep + " elapsed=" + formatSec(staleElapsed) + " trace=" + staleTrace);
+                staleCrashPayload.put("targets", restoreList);
+
+                cfg.put("busy_until", 0L);
+                cfg.put("queue", new JSONArray());
+                cfg.put("worker_active", false);
+                cfg.put("worker_pending_start_ms", 0L);
+                cfg.put("worker_exiting_ms", 0L);
             }}
         }}
 
+        String pendAction = isAdmin ? cfg.optString("admin_pending_action", "") : "";
+        boolean clearsAddPrompt = msgText.equalsIgnoreCase("/qr")
+            || msgText.indexOf("Take QR Screenshot") >= 0
+            || msgText.indexOf("Reset VM") >= 0
+            || msgText.equals("/start")
+            || msgText.equals("/dashboard")
+            || msgText.equals("/admin")
+            || msgText.indexOf("Admin Dashboard") >= 0
+            || msgText.equals("/listusers")
+            || msgText.indexOf("List Users") >= 0
+            || msgText.equals("/toggle")
+            || msgText.indexOf("Toggle Public Access") >= 0
+            || msgText.equals("/usage")
+            || msgText.equals("/logs")
+            || msgText.equals("/exportlogs")
+            || (callbackId.length() > 0);
+        if (isAdmin && pendAction.length() > 0 && clearsAddPrompt) {{
+            cfg.put("admin_pending_action", "");
+            pendAction = "";
+        }}
+
         if (!isAllowed) {{
+            applyUsageToConfig(cfg, cid, "unauth", 0L, "UNAUTHORIZED", msgText, now);
+            String uDisp = formatUserDisplay(cfg, cid);
             saveConfig(cfg);
             replyText = "⛔ Unauthorized. Your ID: " + cid;
+            auditLevel = "WARN";
+            auditEvent = "UNAUTHORIZED";
+            auditUserDisp = uDisp;
+            auditDetail = "input=" + msgText;
+            if (adminId > 0L) {{
+                adminAlertText = "🚫 Unauthorized Access Attempt\\n• From: " + uDisp + "\\n• Input: " + cleanLogText(msgText) + "\\n• Time: " + tsStr(now);
+                JSONArray r1 = new JSONArray();
+                r1.put(makeBtn("➕ Authorize " + cid, "adm:addid:" + cid));
+                JSONArray rows = new JSONArray();
+                rows.put(r1);
+                adminAlertMarkup = wrapInlineKb(rows);
+            }}
+        }} else if (callbackId.length() > 0 && callbackData.startsWith("adm:")) {{
+            if (!isAdmin) {{
+                applyUsageToConfig(cfg, cid, "unauth", 0L, "UNAUTHORIZED_ADMIN_CB", callbackData, now);
+                String uDisp = formatUserDisplay(cfg, cid);
+                saveConfig(cfg);
+                callbackToast = "⛔ Admin only.";
+                auditLevel = "WARN";
+                auditEvent = "UNAUTHORIZED";
+                auditUserDisp = uDisp;
+                auditDetail = "admin_cb=" + callbackData;
+                if (adminId > 0L) {{
+                    adminAlertText = "🚫 Unauthorized Admin Callback\\n• From: " + uDisp + "\\n• Data: " + cleanLogText(callbackData);
+                }}
+            }} else {{
+                String sub = callbackData.substring(4);
+                String viewTab = "home";
+                int viewPage = 0;
+                long viewUid = 0L;
+                boolean renderCard = true;
+                if (sub.equals("home")) {{
+                    viewTab = "home";
+                }} else if (sub.equals("toggle")) {{
+                    boolean pub = !cfg.optBoolean("public_access", true);
+                    cfg.put("public_access", pub);
+                    callbackToast = pub ? "🟢 Public access ENABLED" : "🔴 Bot LOCKED";
+                    auditLevel = "ADMIN";
+                    auditEvent = "PUBLIC_TOGGLE";
+                    auditUserDisp = formatUserDisplay(cfg, cid);
+                    auditDetail = "public_access=" + pub;
+                    viewTab = "home";
+                }} else if (sub.startsWith("users:")) {{
+                    viewTab = "users";
+                    try {{ viewPage = (int) Long.parseLong(sub.substring(6)); }} catch (Exception e) {{}}
+                }} else if (sub.startsWith("logs:")) {{
+                    viewTab = "logs";
+                    try {{ viewPage = (int) Long.parseLong(sub.substring(5)); }} catch (Exception e) {{}}
+                }} else if (sub.startsWith("errs:")) {{
+                    viewTab = "errs";
+                    try {{ viewPage = (int) Long.parseLong(sub.substring(5)); }} catch (Exception e) {{}}
+                }} else if (sub.equals("add")) {{
+                    cfg.put("admin_pending_action", "add_user");
+                    cfg.put("admin_pending_msg_id", cbMsgId);
+                    viewTab = "add";
+                }} else if (sub.equals("cancel")) {{
+                    cfg.put("admin_pending_action", "");
+                    callbackToast = "Cancelled";
+                    viewTab = "home";
+                }} else if (sub.startsWith("rmenu:")) {{
+                    viewTab = "rmenu";
+                    try {{ viewPage = (int) Long.parseLong(sub.substring(6)); }} catch (Exception e) {{}}
+                }} else if (sub.startsWith("rm:")) {{
+                    viewTab = "rm";
+                    try {{ viewUid = Long.parseLong(sub.substring(3)); }} catch (Exception e) {{}}
+                }} else if (sub.startsWith("rmok:")) {{
+                    long remId = 0L;
+                    try {{ remId = Long.parseLong(sub.substring(5)); }} catch (Exception e) {{}}
+                    if (remId != 0L && remId != adminId && removeAllowedUser(cfg, remId)) {{
+                        callbackToast = "🗑️ Removed " + remId;
+                        auditLevel = "ADMIN";
+                        auditEvent = "USER_REMOVED";
+                        auditUserDisp = formatUserDisplay(cfg, cid);
+                        auditDetail = "removed=" + formatUserDisplay(cfg, remId);
+                    }} else {{
+                        callbackToast = "⚠️ Cannot remove " + remId;
+                    }}
+                    viewTab = "users";
+                }} else if (sub.startsWith("addid:")) {{
+                    long newId = 0L;
+                    try {{ newId = Long.parseLong(sub.substring(6)); }} catch (Exception e) {{}}
+                    if (newId != 0L) {{
+                        addAllowedUser(cfg, newId, "", now);
+                        callbackToast = "✅ Authorized " + newId;
+                        auditLevel = "ADMIN";
+                        auditEvent = "USER_ADDED";
+                        auditUserDisp = formatUserDisplay(cfg, cid);
+                        auditDetail = "added=" + formatUserDisplay(cfg, newId) + " via=alert_btn";
+                        replyText = "✅ Authorized " + formatUserDisplay(cfg, newId);
+                        JSONArray rows = new JSONArray();
+                        JSONArray r1 = new JSONArray();
+                        r1.put(makeBtn("📊 Open Dashboard", "adm:home"));
+                        rows.put(r1);
+                        replyMarkup = wrapInlineKb(rows);
+                        editDashboardInPlace = (cbMsgId > 0L);
+                    }}
+                    renderCard = false;
+                }} else if (sub.equals("clrstats")) {{
+                    viewTab = "clrstats";
+                }} else if (sub.equals("clrstats_ok")) {{
+                    cfg.put("user_stats", new JSONObject());
+                    cfg.put("global_stats", new JSONObject());
+                    callbackToast = "🗑️ Usage stats cleared";
+                    auditLevel = "ADMIN";
+                    auditEvent = "STATS_CLEARED";
+                    auditUserDisp = formatUserDisplay(cfg, cid);
+                    auditDetail = "cleared=all_usage";
+                    viewTab = "home";
+                }} else if (sub.equals("export")) {{
+                    exportAuditDoc = true;
+                    callbackToast = "📎 Exporting log file...";
+                    renderCard = false;
+                }}
+                if (renderCard) {{
+                    JSONObject view = renderDashboard(cfg, viewTab, viewPage, viewUid, adminId);
+                    replyText = view.optString("text", "");
+                    replyMarkup = view.optJSONObject("markup");
+                    editDashboardInPlace = (cbMsgId > 0L);
+                }}
+                saveConfig(cfg);
+            }}
+        }} else if (isAdmin && pendAction.equals("add_user")) {{
+            if (msgText.equalsIgnoreCase("/cancel")) {{
+                cfg.put("admin_pending_action", "");
+                saveConfig(cfg);
+                JSONObject view = renderDashboard(cfg, "home", 0, 0L, adminId);
+                replyText = "❌ Add user cancelled.\\n\\n" + view.optString("text", "");
+                replyMarkup = view.optJSONObject("markup");
+            }} else {{
+                long targetId = 0L;
+                String lbl = "";
+                if (fwdUserId != 0L) {{
+                    targetId = fwdUserId;
+                    lbl = cleanLogText(senderName);
+                }} else {{
+                    int spIdx = msgText.indexOf(" ");
+                    String idPart = (spIdx >= 0) ? msgText.substring(0, spIdx).trim() : msgText.trim();
+                    lbl = (spIdx >= 0) ? cleanLogText(msgText.substring(spIdx + 1)) : "";
+                    try {{
+                        targetId = Long.parseLong(idPart);
+                    }} catch (Exception e) {{
+                    }}
+                }}
+                if (targetId != 0L) {{
+                    cfg.put("admin_pending_action", "");
+                    boolean added = addAllowedUser(cfg, targetId, lbl, now);
+                    saveConfig(cfg);
+                    String disp = formatUserDisplay(cfg, targetId);
+                    auditLevel = "ADMIN";
+                    auditEvent = "USER_ADDED";
+                    auditUserDisp = formatUserDisplay(cfg, cid);
+                    auditDetail = "target=" + disp + (added ? " (new)" : " (updated)");
+                    replyText = (added ? "✅ User authorized: " : "ℹ️ User already authorized (updated): ") + disp;
+                    JSONArray rows = new JSONArray();
+                    JSONArray r1 = new JSONArray();
+                    r1.put(makeBtn("👥 Users & Usage", "adm:users:0"));
+                    r1.put(makeBtn("📊 Dashboard", "adm:home"));
+                    rows.put(r1);
+                    replyMarkup = wrapInlineKb(rows);
+                }} else {{
+                    saveConfig(cfg);
+                    replyText = "⚠️ Could not read a Telegram User ID (forwarded senders with privacy enabled hide IDs).\\nSend `<id> [label]` (e.g. `123456789 Alice`), or tap Cancel.";
+                    JSONArray rows = new JSONArray();
+                    JSONArray r1 = new JSONArray();
+                    r1.put(makeBtn("❌ Cancel", "adm:cancel"));
+                    rows.put(r1);
+                    replyMarkup = wrapInlineKb(rows);
+                }}
+            }}
         }} else if (msgText.equals("/start")) {{
             JSONObject markup = new JSONObject();
             markup.put("resize_keyboard", true);
@@ -806,16 +1808,17 @@ synchronized (System.class) {{
                 JSONArray r1 = new JSONArray();
                 r1.put("📸 Take QR Screenshot");
                 JSONArray r2 = new JSONArray();
-                r2.put("👥 List Users");
-                r2.put("🛑 Toggle Public Access");
+                r2.put("📊 Admin Dashboard");
+                r2.put("🧹 Reset VM App");
                 JSONArray r3 = new JSONArray();
-                r3.put("🧹 Reset VM App");
+                r3.put("👥 List Users");
+                r3.put("🛑 Toggle Public Access");
                 keyboard.put(r1);
                 keyboard.put(r2);
                 keyboard.put(r3);
                 markup.put("keyboard", keyboard);
                 saveConfig(cfg);
-                replyText = "👑 Admin Dashboard\\nUse /adduser <id>, /removeuser <id>, /listusers, /toggle to manage access.";
+                replyText = "👑 Admin Control Ready\\nTap 📊 Admin Dashboard or use /dashboard, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle.";
                 replyMarkup = markup;
             }} else {{
                 JSONArray r1 = new JSONArray();
@@ -826,83 +1829,100 @@ synchronized (System.class) {{
                 replyText = "Welcome! Press the button below to generate a QR code.";
                 replyMarkup = markup;
             }}
+        }} else if (isAdmin && (msgText.equals("/dashboard") || msgText.equals("/admin") || msgText.indexOf("Admin Dashboard") >= 0)) {{
+            saveConfig(cfg);
+            JSONObject view = renderDashboard(cfg, "home", 0, 0L, adminId);
+            replyText = view.optString("text", "");
+            replyMarkup = view.optJSONObject("markup");
+        }} else if (isAdmin && (msgText.equals("/usage") || msgText.equals("/listusers") || msgText.indexOf("List Users") >= 0)) {{
+            saveConfig(cfg);
+            JSONObject view = renderDashboard(cfg, "users", 0, 0L, adminId);
+            replyText = view.optString("text", "");
+            replyMarkup = view.optJSONObject("markup");
+        }} else if (isAdmin && msgText.equals("/logs")) {{
+            saveConfig(cfg);
+            JSONObject view = renderDashboard(cfg, "logs", 0, 0L, adminId);
+            replyText = view.optString("text", "");
+            replyMarkup = view.optJSONObject("markup");
+        }} else if (isAdmin && msgText.equals("/exportlogs")) {{
+            saveConfig(cfg);
+            exportAuditDoc = true;
         }} else if (isAdmin && msgText.startsWith("/adduser")) {{
             String arg = msgText.substring(8).trim();
             try {{
-                long newId = Long.parseLong(arg);
-                boolean exists = false;
-                for (int i = 0; i < allowed.length(); i++) {{
-                    if (allowed.optLong(i, 0L) == newId) {{
-                        exists = true;
-                        break;
-                    }}
-                }}
-                if (!exists) {{
-                    allowed.put(newId);
-                }}
-                cfg.put("allowed_users", allowed);
+                int spIdx = arg.indexOf(" ");
+                String idPart = (spIdx >= 0) ? arg.substring(0, spIdx).trim() : arg;
+                String lbl = (spIdx >= 0) ? cleanLogText(arg.substring(spIdx + 1)) : "";
+                long newId = Long.parseLong(idPart);
+                addAllowedUser(cfg, newId, lbl, now);
                 saveConfig(cfg);
-                replyText = "✅ User " + newId + " added.";
+                String disp = formatUserDisplay(cfg, newId);
+                replyText = "✅ User " + disp + " added.";
+                auditLevel = "ADMIN";
+                auditEvent = "USER_ADDED";
+                auditUserDisp = formatUserDisplay(cfg, cid);
+                auditDetail = "added=" + disp;
             }} catch (Exception e) {{
                 saveConfig(cfg);
-                replyText = "⚠️ Usage: /adduser <telegram_id>";
+                replyText = "⚠️ Usage: /adduser <telegram_id> [optional name]";
             }}
         }} else if (isAdmin && msgText.startsWith("/removeuser")) {{
             String arg = msgText.substring(11).trim();
             try {{
                 long remId = Long.parseLong(arg);
-                JSONArray next = new JSONArray();
-                boolean found = false;
-                for (int i = 0; i < allowed.length(); i++) {{
-                    long cur = allowed.optLong(i, 0L);
-                    if (cur == remId) {{
-                        found = true;
-                    }} else {{
-                        next.put(cur);
-                    }}
-                }}
-                cfg.put("allowed_users", next);
-                saveConfig(cfg);
-                if (found) {{
-                    replyText = "🗑️ User " + remId + " removed.";
+                if (remId == adminId) {{
+                    saveConfig(cfg);
+                    replyText = "⚠️ Cannot remove the admin ID.";
                 }} else {{
-                    replyText = "🛑 User " + remId + " is not in the allowed list.";
+                    boolean found = removeAllowedUser(cfg, remId);
+                    String disp = formatUserDisplay(cfg, remId);
+                    saveConfig(cfg);
+                    if (found) {{
+                        replyText = "🗑️ User " + disp + " removed.";
+                        auditLevel = "ADMIN";
+                        auditEvent = "USER_REMOVED";
+                        auditUserDisp = formatUserDisplay(cfg, cid);
+                        auditDetail = "removed=" + disp;
+                    }} else {{
+                        replyText = "🛑 User " + remId + " is not in the allowed list.";
+                    }}
                 }}
             }} catch (Exception e) {{
                 saveConfig(cfg);
                 replyText = "⚠️ Usage: /removeuser <telegram_id>";
             }}
-        }} else if (isAdmin && (msgText.equals("/listusers") || msgText.indexOf("List Users") >= 0)) {{
-            saveConfig(cfg);
-            if (allowed.length() == 0) {{
-                replyText = "👥 The allowed users list is currently empty.";
-            }} else {{
-                StringBuilder sb = new StringBuilder();
-                sb.append("👥 Allowed Users (").append(allowed.length()).append("):\\n\\n");
-                for (int i = 0; i < allowed.length(); i++) {{
-                    sb.append("• ").append(allowed.optLong(i)).append("\\n");
-                }}
-                replyText = sb.toString();
-            }}
         }} else if (isAdmin && (msgText.equals("/toggle") || msgText.indexOf("Toggle Public Access") >= 0)) {{
             boolean pub = !cfg.optBoolean("public_access", true);
             cfg.put("public_access", pub);
+            String uDisp = formatUserDisplay(cfg, cid);
             saveConfig(cfg);
             replyText = "Public access is now " + (pub ? "🟢 ENABLED." : "🔴 DISABLED.");
+            auditLevel = "ADMIN";
+            auditEvent = "PUBLIC_TOGGLE";
+            auditUserDisp = uDisp;
+            auditDetail = "public_access=" + pub;
         }} else if (callbackId.length() > 0 && callbackData.equals("noop")) {{
             saveConfig(cfg);
             callbackToast = "⏳ Refresh already in progress...";
         }} else if (msgText.startsWith("/") && !msgText.equalsIgnoreCase("/qr")) {{
             saveConfig(cfg);
-            replyText = "ℹ️ Commands: /start, /qr" + (isAdmin ? ", /adduser <id>, /removeuser <id>, /listusers, /toggle" : "");
+            replyText = "ℹ️ Commands: /start, /qr" + (isAdmin ? ", /dashboard, /usage, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle" : "");
         }} else {{
             boolean pubAccess = cfg.optBoolean("public_access", true);
             if (!pubAccess && !isAdmin) {{
+                applyUsageToConfig(cfg, cid, "locked", 0L, "LOCKED", msgText, now);
+                String uDisp = formatUserDisplay(cfg, cid);
                 saveConfig(cfg);
                 replyText = "⚠️ The bot is currently locked by the admin.";
+                auditLevel = "WARN";
+                auditEvent = "BLOCKED_LOCKED";
+                auditUserDisp = uDisp;
+                auditDetail = "input=" + msgText;
+                if (adminId > 0L) {{
+                    adminAlertText = "🔒 Blocked Request (Bot Locked)\\n• User: " + uDisp + "\\n• Input: " + cleanLogText(msgText) + "\\n• Time: " + tsStr(now);
+                }}
             }} else {{
-                long now = System.currentTimeMillis();
-                long busyUntil = cfg.optLong("busy_until", 0L);
+                busyUntil = cfg.optLong("busy_until", 0L);
                 String lowerMsg = msgText.toLowerCase();
                 String requestedMode = "";
                 if (isAdmin && msgText.indexOf("Reset VM") >= 0) {{
@@ -956,6 +1976,8 @@ synchronized (System.class) {{
                             item.put("chat_id", cid);
                             item.put("status_message_id", isMediaRefresh ? cbMsgId : 0L);
                             item.put("status_is_media", isMediaRefresh);
+                            item.put("trigger", isMediaRefresh ? "queued_media" : "queued_cmd");
+                            item.put("enqueued_ms", now);
                             queue.put(item);
                             cfg.put("queue", queue);
                             cfg.put("busy_until", busyUntil + 30000L);
@@ -977,6 +1999,9 @@ synchronized (System.class) {{
                                 pActive.put("chat_id", prevCid);
                                 pActive.put("status_message_id", prevMid);
                                 pActive.put("status_is_media", cfg.optBoolean("status_is_media", false));
+                                pActive.put("role", "active");
+                                pActive.put("last_state", cfg.optString("last_state", "INIT"));
+                                pActive.put("start_ms", cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L)));
                                 displaced.put(pActive);
                             }}
                             JSONArray prevQ = cfg.optJSONArray("queue");
@@ -984,7 +2009,10 @@ synchronized (System.class) {{
                                 for (int qi = 0; qi < prevQ.length(); qi++) {{
                                     JSONObject qItem = prevQ.optJSONObject(qi);
                                     if (qItem != null && qItem.optLong("chat_id", 0L) != 0L) {{
-                                        displaced.put(qItem);
+                                        JSONObject qCopy = new JSONObject(qItem.toString());
+                                        qCopy.put("role", "queued #" + (qi + 1));
+                                        qCopy.put("start_ms", qItem.optLong("enqueued_ms", now));
+                                        displaced.put(qCopy);
                                     }}
                                 }}
                             }}
@@ -996,6 +2024,9 @@ synchronized (System.class) {{
                         cfg.put("active_chat_id", cid);
                         cfg.put("app_name", appName);
                         cfg.put("capture_mode", requestedMode);
+                        cfg.put("active_trigger", requestedMode.equals("reset") ? "reset" : (isMediaRefresh ? "callback_media" : "cmd"));
+                        cfg.put("active_start_ms", runStart);
+                        cfg.put("state_trace", "INIT");
                         cfg.put("queue", new JSONArray());
                         cfg.put("qr_was_closed", false);
                         cfg.put("reset_notified", false);
@@ -1031,7 +2062,15 @@ synchronized (System.class) {{
                             coopRunStart = runStart;
                             statusStage = "COOP_RESET";
                             actionResult = "IGNORE";
+                            auditLevel = "ADMIN";
+                            auditEvent = "RESET_START";
+                            auditUserDisp = formatUserDisplay(cfg, cid);
+                            auditDetail = "mode=coop displaced=" + displaced.length();
                         }} else {{
+                            if (willRecoverStale && staleCrashPayload != null) {{
+                                cfg.put("crashed_notice", staleCrashPayload);
+                                willRecoverStale = false;
+                            }}
                             JSONArray preemptNotices = cfg.optJSONArray("preempted_notices");
                             if (preemptNotices == null) {{
                                 preemptNotices = new JSONArray();
@@ -1052,6 +2091,13 @@ synchronized (System.class) {{
                 }}
             }}
         }}
+        if (willRecoverStale && staleCrashPayload != null) {{
+            crashedAlertText = staleCrashPayload.optString("alert", "");
+            crashedLogCid = staleCrashPayload.optLong("cid", 0L);
+            crashedLogUserDisp = staleCrashPayload.optString("user_disp", "");
+            crashedLogDetail = staleCrashPayload.optString("detail", "");
+            crashedRestoreTargets = staleCrashPayload.optJSONArray("targets");
+        }}
     }}
 }}
 
@@ -1061,11 +2107,36 @@ if (dupUid) {{
 if (actionResult.equals("RUN")) {{
     return "RUN";
 }}
+if (auditLevel != null) {{
+    appendAuditLog(auditLevel, auditEvent, cid, auditUserDisp, auditDetail);
+}}
+if (crashedAlertText != null && crashedAlertText.length() > 0) {{
+    appendAuditLog("FAIL", "QR_FAIL_CRASH_LEASE", crashedLogCid, crashedLogUserDisp, crashedLogDetail);
+    if (crashedRestoreTargets != null) {{
+        for (int ti = 0; ti < crashedRestoreTargets.length(); ti++) {{
+            JSONObject t = crashedRestoreTargets.optJSONObject(ti);
+            if (t == null) continue;
+            notifyTargetFailure(t.optLong("chat_id", 0L), t.optLong("status_message_id", 0L), t.optBoolean("status_is_media", false), "❌ Previous request was interrupted. Please try again.", "⚠️ Interrupted • 🔄 Retry", false);
+        }}
+    }}
+    if (notifyAdminCid > 0L) {{
+        sendMsg(notifyAdminCid, crashedAlertText, null);
+    }}
+}}
 if (callbackId.length() > 0) {{
     answerCallback(callbackId, callbackToast);
 }}
 if (statusStage.equals("COOP_RESET")) {{
-    JSONObject sent = sendMsg(cid, "🔄 Force-restarting Telcell Wallet...", null);
+    String coopPreemptSummary = "";
+    if (coopPreemptNotices != null && coopPreemptNotices.length() > 0) {{
+        JSONObject curCfg = loadConfig();
+        coopPreemptSummary = recordPreemptedList(curCfg, coopPreemptNotices);
+    }}
+    String resetMsgText = "🔄 Force-restarting Telcell Wallet...";
+    if (coopPreemptSummary.length() > 0) {{
+        resetMsgText = resetMsgText + "\\n\\nℹ️ Cancelled " + coopPreemptNotices.length() + " pending: " + coopPreemptSummary;
+    }}
+    JSONObject sent = sendMsg(cid, resetMsgText, null);
     long resetMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
     if (resetMsgId > 0L) {{
         synchronized (System.class) {{
@@ -1084,8 +2155,22 @@ if (statusStage.equals("COOP_RESET")) {{
     notifyPreemptNotices(coopPreemptNotices);
     return "IGNORE";
 }}
+if (exportAuditDoc) {{
+    byte[] docBytes = readAuditDocumentBytes();
+    if (docBytes.length == 0) {{
+        sendMsg(cid, "ℹ️ No audit log entries recorded on device yet.", null);
+    }} else {{
+        JSONObject extra = new JSONObject();
+        extra.put("caption", "📄 Komobot Audit Log (" + docBytes.length + " bytes)");
+        postMultipartRaw("sendDocument", cid, 0L, extra, "document", "komobot_events.log", "text/plain", docBytes, 15000);
+    }}
+}}
 if (replyText != null) {{
-    sendMsg(cid, replyText, replyMarkup);
+    if (editDashboardInPlace && cbMsgId > 0L) {{
+        editMsg(cid, cbMsgId, replyText, replyMarkup);
+    }} else {{
+        sendMsg(cid, replyText, replyMarkup);
+    }}
 }} else if (statusStage.equals("QUEUE")) {{
     if (isMediaStatus && cbMsgId > 0L) {{
         editButton(cid, cbMsgId, "⏳ Queued (#" + qPos + ")...", "noop");
@@ -1117,6 +2202,9 @@ if (replyText != null) {{
         }}
     }}
 }}
+if (adminAlertText != null && notifyAdminCid > 0L && cid != notifyAdminCid) {{
+    sendMsg(notifyAdminCid, adminAlertText, adminAlertMarkup);
+}}
 return actionResult;
 """
 
@@ -1127,6 +2215,9 @@ def build_init_status_script() -> str:
         "import java.io.*;\n"
         "import java.net.HttpURLConnection;\n"
         "import java.net.URL;\n"
+        "import java.text.SimpleDateFormat;\n"
+        "import java.util.Date;\n"
+        "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
@@ -1138,6 +2229,8 @@ def build_init_status_script() -> str:
         + _BSH_FRAME_HELPER
         + "\n\n"
         + _BSH_TG_HTTP_HELPERS
+        + "\n\n"
+        + _BSH_AUDIT_HELPERS
         + "\n\n"
         + _BSH_WORKER_CONFIG_HELPERS
         + """
@@ -1203,6 +2296,8 @@ if (statusIsMedia && existingMid > 0L) {
     statusMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
 }
 JSONArray preemptNotices = null;
+JSONObject crashedNotice = null;
+JSONObject latestSnapshot = null;
 boolean deleteOrphanedMsg = false;
 synchronized (System.class) {
     JSONObject fresh = loadConfig();
@@ -1220,14 +2315,50 @@ synchronized (System.class) {
         preemptNotices = pendingNotices;
         fresh.put("preempted_notices", new JSONArray());
     }
+    if (fresh.has("crashed_notice")) {
+        crashedNotice = fresh.optJSONObject("crashed_notice");
+        fresh.remove("crashed_notice");
+    }
     if (dirty) {
         saveConfig(fresh);
     }
+    latestSnapshot = fresh;
 }
 if (deleteOrphanedMsg) {
     deleteStatus(cid, statusMsgId);
 }
-notifyPreemptNotices(preemptNotices);
+if (statusMsgId <= 0L) {
+    String uDisp = formatUserDisplay(latestSnapshot, cid);
+    appendAuditLog("FAIL", "INIT_STATUS_ERR", cid, uDisp, "mode=" + captureMode);
+    if (adminId > 0L) {
+        sendMsg(adminId, "⚠️ Failed to initialize status message for " + uDisp + " (mode=" + captureMode + ")", null);
+    }
+}
+if (preemptNotices != null && preemptNotices.length() > 0) {
+    String preemptSummary = recordPreemptedList(latestSnapshot, preemptNotices);
+    notifyPreemptNotices(preemptNotices);
+    if (preemptSummary.length() > 0 && adminId > 0L) {
+        sendMsg(adminId, "ℹ️ VM Reset cancelled " + preemptNotices.length() + " pending request(s): " + preemptSummary, null);
+    }
+}
+if (crashedNotice != null) {
+    long cCid = crashedNotice.optLong("cid", 0L);
+    String cUser = crashedNotice.optString("user_disp", "");
+    String cDetail = crashedNotice.optString("detail", "");
+    String cAlert = crashedNotice.optString("alert", "");
+    appendAuditLog("FAIL", "QR_FAIL_CRASH_LEASE", cCid, cUser, cDetail);
+    JSONArray targets = crashedNotice.optJSONArray("targets");
+    if (targets != null) {
+        for (int ti = 0; ti < targets.length(); ti++) {
+            JSONObject t = targets.optJSONObject(ti);
+            if (t == null) continue;
+            notifyTargetFailure(t.optLong("chat_id", 0L), t.optLong("status_message_id", 0L), t.optBoolean("status_is_media", false), "❌ Previous request was interrupted. Please try again.", "⚠️ Interrupted • 🔄 Retry", false);
+        }
+    }
+    if (cAlert.length() > 0 && adminId > 0L) {
+        sendMsg(adminId, cAlert, null);
+    }
+}
 
 long rem = 550L - (System.currentTimeMillis() - t0);
 if (rem > 0L) {
@@ -1264,6 +2395,8 @@ def build_vision_script() -> str:
         + _BSH_TG_HTTP_HELPERS
         + "\n\n"
         + _BSH_WORKER_CONFIG_HELPERS
+        + "\n\n"
+        + _BSH_AUDIT_HELPERS
         + "\n\n"
         + _BSH_TIMING_HELPER
         + f"""
@@ -1307,67 +2440,39 @@ JSONObject syncActiveConfig(JSONObject curCfg, String ssName, long ssMtime, bool
     }}
 }}
 
-void writeFormField(DataOutputStream req, String boundary, String name, String val) throws Exception {{
-    req.writeBytes("--" + boundary + "\\r\\n");
-    req.writeBytes("Content-Disposition: form-data; name=\\"" + name + "\\"\\r\\n\\r\\n");
-    req.write(val.getBytes("UTF-8"));
-    req.writeBytes("\\r\\n");
+JSONObject uploadQrMultipart(long cid, long mid, byte[] pngBytes, String filename, String caption, String replyMarkupJson) {{
+    boolean isEdit = (mid > 0L);
+    String endpoint = isEdit ? "editMessageMedia" : "sendPhoto";
+    JSONObject extra = new JSONObject();
+    if (isEdit) {{
+        JSONObject mediaObj = new JSONObject();
+        mediaObj.put("type", "photo");
+        mediaObj.put("media", "attach://photo");
+        if (caption != null && caption.length() > 0) {{
+            mediaObj.put("caption", caption);
+        }}
+        extra.put("media", mediaObj.toString());
+    }} else if (caption != null && caption.length() > 0) {{
+        extra.put("caption", caption);
+    }}
+    if (replyMarkupJson != null && replyMarkupJson.length() > 0) {{
+        extra.put("reply_markup", replyMarkupJson);
+    }}
+    return postMultipartRaw(endpoint, cid, mid, extra, "photo", filename, "image/png", pngBytes, 15000);
 }}
 
-int uploadQrMultipart(long cid, long mid, byte[] pngBytes, String filename, String caption, String replyMarkupJson) {{
-    HttpURLConnection conn = null;
-    try {{
-        boolean isEdit = (mid > 0L);
-        String endpoint = isEdit ? "editMessageMedia" : "sendPhoto";
-        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + endpoint);
-        conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(15000);
-        conn.setDoOutput(true);
-        String boundary = "*****" + System.currentTimeMillis() + "*****";
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        conn.setRequestProperty("Connection", "keep-alive");
-        DataOutputStream req = new DataOutputStream(conn.getOutputStream());
-
-        writeFormField(req, boundary, "chat_id", cid + "");
-        if (isEdit) {{
-            writeFormField(req, boundary, "message_id", mid + "");
-            JSONObject mediaObj = new JSONObject();
-            mediaObj.put("type", "photo");
-            mediaObj.put("media", "attach://photo");
-            if (caption != null && caption.length() > 0) {{
-                mediaObj.put("caption", caption);
-            }}
-            writeFormField(req, boundary, "media", mediaObj.toString());
-        }} else if (caption != null && caption.length() > 0) {{
-            writeFormField(req, boundary, "caption", caption);
+void setVisionState(JSONObject cfg, String st) {{
+    String prev = cfg.optString("last_state", "");
+    cfg.put("last_state", st);
+    if (!st.equals(prev)) {{
+        String tr = cfg.optString("state_trace", "");
+        tr = (tr.length() > 0) ? (tr + ">" + st) : st;
+        if (tr.length() > 180) {{
+            int cut = tr.indexOf(">", tr.length() - 160);
+            if (cut >= 0) tr = "..." + tr.substring(cut + 1);
+            else tr = tr.substring(tr.length() - 160);
         }}
-
-        if (replyMarkupJson != null && replyMarkupJson.length() > 0) {{
-            writeFormField(req, boundary, "reply_markup", replyMarkupJson);
-        }}
-
-        req.writeBytes("--" + boundary + "\\r\\n");
-        req.writeBytes("Content-Disposition: form-data; name=\\"photo\\"; filename=\\"" + filename + "\\"\\r\\n");
-        req.writeBytes("Content-Type: image/png\\r\\n\\r\\n");
-        req.write(pngBytes);
-        req.writeBytes("\\r\\n--" + boundary + "--\\r\\n");
-        req.flush();
-        req.close();
-
-        int code = conn.getResponseCode();
-        InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
-        readStream(is);
-        return code;
-    }} catch (Exception e) {{
-        if (conn != null) {{
-            try {{
-                conn.disconnect();
-            }} catch (Exception ignored) {{
-            }}
-        }}
-        return -1;
+        cfg.put("state_trace", tr);
     }}
 }}
 
@@ -1528,7 +2633,7 @@ if (latest == null) {{
         return "ABORT_PREEMPTED";
     }}
     cfg = synced;
-    cfg.put("last_state", "NO_SCREENSHOT");
+    setVisionState(cfg, "NO_SCREENSHOT");
     cfg.put("pending_status_text", "");
     saveConfig(cfg);
     return "WAIT";
@@ -1552,7 +2657,7 @@ if (!latestReady) {{
         return "ABORT_PREEMPTED";
     }}
     cfg = synced;
-    cfg.put("last_state", "TRUNCATED_SS");
+    setVisionState(cfg, "TRUNCATED_SS");
     cfg.put("pending_status_text", "");
     saveConfig(cfg);
     return "WAIT";
@@ -1574,7 +2679,7 @@ if (bmp == null) {{
         return "ABORT_PREEMPTED";
     }}
     cfg = synced;
-    cfg.put("last_state", "DECODE_ERR");
+    setVisionState(cfg, "DECODE_ERR");
     cfg.put("pending_status_text", "");
     saveConfig(cfg);
     return "WAIT";
@@ -1673,7 +2778,7 @@ try {{
     String handleLoadingWait(JSONObject cfg, String countKey, String stateName, int maxWaits, int waitCapPct, long cid, long adminId) throws Exception {{
         int cnt = cfg.optInt(countKey, 0) + 1;
         cfg.put(countKey, cnt);
-        cfg.put("last_state", stateName);
+        setVisionState(cfg, stateName);
         if (cnt <= maxWaits) {{
             String waitText = prepareWaitNudge(cfg, cid, adminId, cnt, waitCapPct);
             queueStepStatus(cfg, waitText);
@@ -1698,7 +2803,7 @@ try {{
         int openTries = cfg.optInt("reset_open_tries", 0) + 1;
         cfg.put("reset_open_tries", openTries);
         cfg.put("reset_recents_checked", true);
-        cfg.put("last_state", "RESET_OPEN_RECENTS");
+        setVisionState(cfg, "RESET_OPEN_RECENTS");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         if (openTries == 1 || openTries == 3) {{
@@ -1745,7 +2850,7 @@ try {{
             cfg.put("vm_seen", true);
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
-            cfg.put("last_state", "VM_LAUNCHER");
+            setVisionState(cfg, "VM_LAUNCHER");
             String stepText = prepareStepStatus(cfg, cid, adminId, "🖥️ Entering Virtual Master...", 20);
             queueStepStatus(cfg, stepText);
             saveConfig(cfg);
@@ -1760,7 +2865,7 @@ try {{
         if (!isPureBlack) {{
             cfg.put("vm_booting", true);
         }}
-        cfg.put("last_state", isPureBlack ? "SCREEN_WAKING" : "VM_LOADING");
+        setVisionState(cfg, isPureBlack ? "SCREEN_WAKING" : "VM_LOADING");
         String waitText = (!isPureBlack && (stepCount & 1) == 0)
             ? prepareWaitNudge(cfg, cid, adminId, 2, 20)
             : null;
@@ -1774,7 +2879,7 @@ try {{
         isPopupCorner(130, 1050) && isPopupCorner(590, 1050) &&
         !(isDark(360, 350) && getB(360, 350) < 35)) {{
         cfg.put("vm_seen", true);
-        cfg.put("last_state", "VM_POPUP");
+        setVisionState(cfg, "VM_POPUP");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         queueStepStatus(cfg, null);
@@ -1800,19 +2905,19 @@ try {{
             boolean hasCard = isRecentsCardPixel(360, 500) || isRecentsCardPixel(360, 800) || isRecentsCardPixel(360, 1000);
             if (hasCard && resetKills < 3) {{
                 cfg.put("reset_kills", resetKills + 1);
-                cfg.put("last_state", "VM_RECENTS");
+                setVisionState(cfg, "VM_RECENTS");
                 String stepText = prepareStepStatus(cfg, cid, adminId, "🔪 Closing Telcell Wallet...", 25);
                 queueStepStatus(cfg, stepText);
                 saveConfig(cfg);
                 return "SWIPE_KILL_RECENT";
             }}
             cfg.put("reset_stage", 1);
-            cfg.put("last_state", "VM_RECENTS_EMPTY");
+            setVisionState(cfg, "VM_RECENTS_EMPTY");
             queueStepStatus(cfg, null);
             saveConfig(cfg);
             return "RESET_TO_HOME";
         }}
-        cfg.put("last_state", "VM_RECENTS");
+        setVisionState(cfg, "VM_RECENTS");
         queueStepStatus(cfg, null);
         saveConfig(cfg);
         return "RESET_TO_HOME";
@@ -1842,7 +2947,7 @@ try {{
             resetWaitCounters(cfg);
             if (mode.equals("reset") && resetStage == 0 && !resetRecentsChecked && resetKills == 0) {{
                 cfg.put("reset_recents_checked", true);
-                cfg.put("last_state", "RESET_CHECK_RECENTS");
+                setVisionState(cfg, "RESET_CHECK_RECENTS");
                 String stepText = prepareStepStatus(cfg, cid, adminId, "🧹 Checking running VM apps...", 20);
                 queueStepStatus(cfg, stepText);
                 saveConfig(cfg);
@@ -1851,7 +2956,7 @@ try {{
             if (mode.equals("reset")) {{
                 cfg.put("reset_stage", 2);
             }}
-            cfg.put("last_state", (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
+            setVisionState(cfg, (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
             String launchLabel = mode.equals("reset") ? "🚀 Reopening Telcell Wallet..." : "🚀 Launching Telcell Wallet...";
             String stepText = prepareStepStatus(cfg, cid, adminId, launchLabel, mode.equals("reset") ? 35 : 30);
             queueStepStatus(cfg, stepText);
@@ -1872,7 +2977,7 @@ try {{
         cfg.put("vm_seen", true);
         if (mode.equals("reset")) {{
             cfg.put("qr_was_closed", true);
-            cfg.put("last_state", "RESET_CLOSE_QR");
+            setVisionState(cfg, "RESET_CLOSE_QR");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
             queueStepStatus(cfg, null);
@@ -1898,7 +3003,7 @@ try {{
         if (blacks >= 100 && whites >= 100) {{
             if (stepCount == 1 && !cfg.optBoolean("qr_was_closed", false)) {{
                 cfg.put("qr_was_closed", true);
-                cfg.put("last_state", "STALE_QR");
+                setVisionState(cfg, "STALE_QR");
                 cfg.put("other_count", 0);
                 resetWaitCounters(cfg);
                 String stepText = prepareStepStatus(cfg, cid, adminId, "🔄 Refreshing stale QR screen...", 50);
@@ -1913,7 +3018,7 @@ try {{
             if (preSendSync != cfg || !preSendSync.optString("capture_mode", "qr").equals("qr")) {{
                 cfg = preSendSync;
                 cfg.put("qr_was_closed", true);
-                cfg.put("last_state", "RESET_CLOSE_QR");
+                setVisionState(cfg, "RESET_CLOSE_QR");
                 cfg.put("other_count", 0);
                 resetWaitCounters(cfg);
                 queueStepStatus(cfg, null);
@@ -1921,6 +3026,11 @@ try {{
                 return "CLOSE_MODAL";
             }}
             statusMsgId = cfg.optLong("status_message_id", 0L);
+            String activeTrig = cfg.optString("active_trigger", cfg.optBoolean("status_is_media", false) ? "callback_media" : "cmd");
+            long activeStartMs = cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L));
+            int snapOther = cfg.optInt("other_count", 0);
+            int snapWhite = cfg.optInt("white_count", 0);
+            int snapLoad = cfg.optInt("loading_count", 0);
             queueStepStatus(cfg, null);
             int cx = px(130);
             int cy = py(445);
@@ -1935,9 +3045,15 @@ try {{
             String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
             String caption = "🎫 QR Code • " + ts + " (valid ~30s)";
             String qrMarkup = makeInlineButtonMarkup("🔄 Refresh QR", "/qr").toString();
-            int code = uploadQrMultipart(cid, targetEditMid, baos.toByteArray(), "qr.png", caption, qrMarkup);
+            boolean usedFallback = false;
+            JSONObject upRes = uploadQrMultipart(cid, targetEditMid, baos.toByteArray(), "qr.png", caption, qrMarkup);
+            int code = upRes.optInt("code", -1);
+            String lastUploadDesc = upRes.optString("desc", "");
             if (targetEditMid > 0L && code >= 400 && code < 500) {{
-                code = uploadQrMultipart(cid, 0L, baos.toByteArray(), "qr.png", caption, qrMarkup);
+                usedFallback = true;
+                upRes = uploadQrMultipart(cid, 0L, baos.toByteArray(), "qr.png", caption, qrMarkup);
+                code = upRes.optInt("code", -1);
+                lastUploadDesc = upRes.optString("desc", "");
             }}
             long popNextCid = 0L;
             long popNextMid = 0L;
@@ -1980,6 +3096,8 @@ try {{
                         cfg.put("status_message_id", popNextMid);
                         cfg.put("status_is_media", nextIsMedia);
                         cfg.put("run_start_ms", nextRunStart);
+                        cfg.put("active_start_ms", nextRunStart);
+                        cfg.put("active_trigger", nextItem.optString("trigger", nextIsMedia ? "queued_media" : "queued_cmd"));
                         cfg.put("qr_was_closed", true);
                         cfg.put("step_count", 2);
                         cfg.put("other_count", 0);
@@ -1987,6 +3105,7 @@ try {{
                         cfg.put("busy_until", nowMs + 45000L);
                         cfg.put("worker_heartbeat_ms", nowMs);
                         cfg.put("last_state", "NEXT_IN_QUEUE");
+                        cfg.put("state_trace", "NEXT_IN_QUEUE");
                         cfg.put("progress_pct", (popNextCid == adminId && !nextIsMedia) ? 0 : 70);
                         if (!statusIsMedia && code == 200 && cid > 0L && statusMsgId > 0L) {{
                             cfg.put("pending_delete_cid", cid);
@@ -2016,18 +3135,31 @@ try {{
                     }}
                 }}
             }}
+            long doneMs = System.currentTimeMillis();
+            long elapsedMs = (activeStartMs > 0L && doneMs >= activeStartMs) ? (doneMs - activeStartMs) : 0L;
+            String baseTrace = cfg.optString("state_trace", "");
             if (code == 200) {{
                 if (!hasNext && !statusIsMedia) {{
                     deleteStatus(cid, statusMsgId);
                 }}
+                String finTrace = (baseTrace.length() > 0) ? (baseTrace + ">QR_SENT") : "QR_SENT";
+                recordUsageSafe(cid, "ok", elapsedMs, usedFallback ? "QR_SENT_FALLBACK" : "QR_SENT", "");
+                appendAuditLog("OK", "QR_SENT", cid, formatUserDisplay(cfg, cid),
+                    "trigger=" + activeTrig + " steps=" + stepCount + " elapsed=" + formatSec(elapsedMs)
+                    + (usedFallback ? " fallback=sendPhoto" : "") + " trace=" + finTrace);
             }} else {{
                 String errText = (cid == adminId)
                     ? "❌ Failed to upload QR (HTTP " + code + ")."
                     : "❌ Failed to upload QR. Please try again.";
                 notifyTargetFailure(cid, statusMsgId, statusIsMedia, errText, "⚠️ Failed • 🔄 Retry", false);
-                if (cid != adminId && cid > 0L && adminId > 0L) {{
+                String reasonDesc = "QR upload failed (HTTP " + code + ")" + (lastUploadDesc.length() > 0 ? (": " + lastUploadDesc) : "");
+                String finTrace = (baseTrace.length() > 0) ? (baseTrace + ">QR_ERR") : "QR_ERR";
+                recordUsageSafe(cid, "fail", elapsedMs, "UPLOAD_HTTP_" + code, lastUploadDesc);
+                appendAuditLog("FAIL", "QR_FAIL_UPLOAD", cid, formatUserDisplay(cfg, cid),
+                    reasonDesc + " trigger=" + activeTrig + " steps=" + stepCount + " elapsed=" + formatSec(elapsedMs) + " trace=" + finTrace);
+                if (adminId > 0L) {{
                     sendMsg(adminId,
-                        "⚠️ User request failed (chat_id: " + cid + ")\\nReason: QR upload failed (HTTP " + code + ")",
+                        buildFailureAlert(cfg, "🚨 QR Upload Failed", cid, activeTrig, reasonDesc, elapsedMs, stepCount, "QR_MODAL", finTrace, snapOther, snapWhite, snapLoad, ""),
                         null);
                 }}
             }}
@@ -2069,7 +3201,7 @@ try {{
                 cfg.put("white_count", 0);
                 return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 9, 40, cid, adminId);
             }}
-            cfg.put("last_state", "PIN_PAD");
+            setVisionState(cfg, "PIN_PAD");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
             String stepText = prepareStepStatus(cfg, cid, adminId, "🔐 Entering PIN...", 50);
@@ -2114,7 +3246,7 @@ try {{
         String prevDashState = cfg.optString("last_state", "");
         if (prevDashState.equals(useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH")) {{
             // Transport row was just tapped; give the page one short tick to navigate.
-            cfg.put("last_state", "DASH_OPENING");
+            setVisionState(cfg, "DASH_OPENING");
             saveConfig(cfg);
             return "WAIT";
         }}
@@ -2127,7 +3259,7 @@ try {{
         cfg.put("qr_was_closed", true);
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
-        cfg.put("last_state", useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH");
+        setVisionState(cfg, useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH");
         String stepText = prepareStepStatus(cfg, cid, adminId, "📲 Opening Transport tickets...", 60);
         queueStepStatus(cfg, stepText);
         saveConfig(cfg);
@@ -2152,6 +3284,7 @@ try {{
             long popNextCid = 0L;
             long popNextMid = 0L;
             boolean hasNext = false;
+            long rstStartMs = cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L));
             synchronized (System.class) {{
                 JSONObject latestCfg = loadConfig();
                 JSONArray queue = latestCfg.optJSONArray("queue");
@@ -2177,6 +3310,8 @@ try {{
                     cfg.put("status_message_id", popNextMid);
                     cfg.put("status_is_media", nextIsMedia);
                     cfg.put("run_start_ms", nextRunStart);
+                    cfg.put("active_start_ms", nextRunStart);
+                    cfg.put("active_trigger", nextItem.optString("trigger", nextIsMedia ? "queued_media" : "queued_cmd"));
                     cfg.put("step_count", 2);
                     cfg.put("reset_stage", 0);
                     cfg.put("reset_kills", 0);
@@ -2186,6 +3321,7 @@ try {{
                     cfg.put("busy_until", nowMs + 45000L);
                     cfg.put("worker_heartbeat_ms", nowMs);
                     cfg.put("last_state", "TICKET_LIST");
+                    cfg.put("state_trace", "TICKET_LIST");
                     cfg.put("progress_pct", (popNextCid == adminId && !nextIsMedia) ? 0 : 80);
                     String nextText = nextIsMedia
                         ? formatButtonProgress(80)
@@ -2199,6 +3335,10 @@ try {{
                     queueStepStatus(cfg, null);
                 }}
             }}
+            long rstNow = System.currentTimeMillis();
+            long rstElapsed = (rstStartMs > 0L && rstNow >= rstStartMs) ? (rstNow - rstStartMs) : 0L;
+            appendAuditLog("ADMIN", "RESET_DONE", cid, formatUserDisplay(cfg, cid),
+                "steps=" + stepCount + " elapsed=" + formatSec(rstElapsed) + " queued_handoff=" + hasNext);
             if (hasNext) {{
                 updateStatus(cid, statusMsgId, "✅ VM app reset complete — Telcell restarted & ready.");
                 return "CLICK_TICKET_ROW";
@@ -2223,11 +3363,11 @@ try {{
         if (cfg.optString("last_state", "").equals("TICKET_LIST")) {{
             // The row was just tapped; the QR modal may still be opening. Wait one
             // short tick instead of tapping the row a second time.
-            cfg.put("last_state", "TICKET_OPENING");
+            setVisionState(cfg, "TICKET_OPENING");
             saveConfig(cfg);
             return "WAIT";
         }}
-        cfg.put("last_state", "TICKET_LIST");
+        setVisionState(cfg, "TICKET_LIST");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Selecting ticket...", 80);
@@ -2247,7 +3387,7 @@ try {{
             return handleResetInApp(cfg, cid, adminId);
         }}
         cfg.put("qr_was_closed", true);
-        cfg.put("last_state", "BUY_TICKET_TAB");
+        setVisionState(cfg, "BUY_TICKET_TAB");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Switching to Available tickets...", 70);
@@ -2276,13 +3416,13 @@ try {{
     if (cfg.optLong("row_tap_ms", 0L) > 0L && rowTapAge < 6000L) {{
         // Telcell is still opening the QR after the row tap; do not count these
         // frames toward CLICK_BACK/RESET_TO_HOME recovery (back would close the QR).
-        cfg.put("last_state", "QR_OPENING");
+        setVisionState(cfg, "QR_OPENING");
         saveConfig(cfg);
         return "WAIT";
     }}
     int otherCount = cfg.optInt("other_count", 0) + 1;
     cfg.put("other_count", otherCount);
-    cfg.put("last_state", "OTHER");
+    setVisionState(cfg, "OTHER");
     resetWaitCounters(cfg);
     queueStepStatus(cfg, null);
     saveConfig(cfg);
@@ -2419,6 +3559,9 @@ def build_timeout_script() -> str:
         "import java.io.*;\n"
         "import java.net.HttpURLConnection;\n"
         "import java.net.URL;\n"
+        "import java.text.SimpleDateFormat;\n"
+        "import java.util.Date;\n"
+        "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
         'String botToken = "{lv=bot_token}".trim();\n'
@@ -2429,6 +3572,8 @@ def build_timeout_script() -> str:
         + _BSH_FRAME_HELPER
         + "\n\n"
         + _BSH_TG_HTTP_HELPERS
+        + "\n\n"
+        + _BSH_AUDIT_HELPERS
         + """
 
 if (stepCmd.equals("ABORT_PREEMPTED")) return "KEEP_ON";
@@ -2440,9 +3585,16 @@ boolean statusIsMedia = false;
 long adminId = 0L;
 long cid = 0L;
 long mid = 0L;
+long activeStartMs = 0L;
+String activeTrigger = "cmd";
 String lastState = "UNKNOWN";
+String stateTrace = "";
 int stepCount = 0;
+int otherCount = 0;
+int whiteCount = 0;
+int loadingCount = 0;
 JSONArray queue = null;
+JSONObject cfgSnap = new JSONObject();
 
 synchronized (System.class) {
     File f = new File(configPath);
@@ -2452,6 +3604,7 @@ synchronized (System.class) {
         fis.close();
         if (raw.length() > 0) {
             JSONObject cfg = new JSONObject(raw);
+            cfgSnap = cfg;
             adminId = cfg.optLong("admin_id", 0L);
             long busyUntil = cfg.optLong("busy_until", 0L);
             boolean workerActive = cfg.optBoolean("worker_active", false);
@@ -2459,8 +3612,14 @@ synchronized (System.class) {
             statusIsMedia = cfg.optBoolean("status_is_media", false);
             cid = cfg.optLong("active_chat_id", 0L);
             mid = cfg.optLong("status_message_id", 0L);
+            activeStartMs = cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L));
+            activeTrigger = cfg.optString("active_trigger", statusIsMedia ? "callback_media" : "cmd");
             lastState = cfg.optString("last_state", "UNKNOWN");
+            stateTrace = cfg.optString("state_trace", "");
             stepCount = cfg.optInt("step_count", 0);
+            otherCount = cfg.optInt("other_count", 0);
+            whiteCount = cfg.optInt("white_count", 0);
+            loadingCount = cfg.optInt("loading_count", 0);
 
             boolean newRunClaimed = (
                 stepCmd.equals("DONE") && (workerActive || busyUntil > 0L)
@@ -2491,6 +3650,7 @@ synchronized (System.class) {
                     cfg.put("status_is_media", false);
                     cfg.put("media_init_pending", false);
                     cfg.put("pending_cb_id", "");
+                    cfg.put("state_trace", "");
                     dirty = true;
                     notifyCleanup = true;
                 }
@@ -2513,6 +3673,8 @@ if (keepScreenOn) {
 deletePrivateFrames();
 
 if (notifyCleanup) {
+    long nowMs = System.currentTimeMillis();
+    long elapsedMs = (activeStartMs > 0L && nowMs >= activeStartMs) ? (nowMs - activeStartMs) : 0L;
     boolean isResetDone = stepCmd.equals("DONE_RESET");
     String msg = isResetDone
         ? "✅ VM app reset complete — Telcell restarted & ready."
@@ -2522,7 +3684,24 @@ if (notifyCleanup) {
     String retryBtn = isResetDone ? "✅ Reset done • 🔄 Refresh" : "❌ Timed out • 🔄 Retry";
     notifyTargetFailure(cid, mid, statusIsMedia, msg, retryBtn, true);
 
-    String failedQueueIds = "";
+    if (isResetDone) {
+        if (cid > 0L) {
+            appendAuditLog("ADMIN", "RESET_DONE", cid, formatUserDisplay(cfgSnap, cid),
+                "steps=" + stepCount + " elapsed=" + formatSec(elapsedMs) + " trace=" + stateTrace);
+        }
+    } else {
+        String reasonStr = stepCmd.equals("ABORT_TIMEOUT")
+            ? ("Timed out waiting for QR screen (step cap " + stepCount + ")")
+            : ("Loop ended before QR (" + stepCmd + ", step " + stepCount + ")");
+        if (cid != 0L) {
+            recordUsageSafe(cid, "fail", elapsedMs, "TIMEOUT_" + lastState, reasonStr);
+            appendAuditLog("FAIL", "QR_FAIL_TIMEOUT", cid, formatUserDisplay(cfgSnap, cid),
+                reasonStr + " trigger=" + activeTrigger + " state=" + lastState
+                + " elapsed=" + formatSec(elapsedMs) + " trace=" + stateTrace);
+        }
+    }
+
+    String failedQueueSummary = "";
     if (queue != null) {
         String qMsg = isResetDone
             ? "❌ Request cancelled by VM reset. Please try again."
@@ -2534,32 +3713,43 @@ if (notifyCleanup) {
                 long qCid = qItem.optLong("chat_id", 0L);
                 long qMid = qItem.optLong("status_message_id", 0L);
                 boolean qMedia = qItem.optBoolean("status_is_media", false);
+                long qEnqMs = qItem.optLong("enqueued_ms", activeStartMs);
+                long qElapsed = (qEnqMs > 0L && nowMs >= qEnqMs) ? (nowMs - qEnqMs) : elapsedMs;
                 notifyTargetFailure(qCid, qMid, qMedia, qMsg, qBtn, true);
-                if (!stepCmd.equals("DONE_RESET") && qCid != adminId && qCid > 0L) {
-                    if (failedQueueIds.length() > 0) {
-                        failedQueueIds = failedQueueIds + ", ";
+                if (!isResetDone && qCid != 0L) {
+                    String qDisp = formatUserDisplay(cfgSnap, qCid);
+                    recordUsageSafe(qCid, "fail", qElapsed, "QUEUED_TIMEOUT", "upstream=" + lastState);
+                    appendAuditLog("FAIL", "QR_FAIL_QUEUED_TIMEOUT", qCid, qDisp,
+                        "upstream=" + lastState + " step=" + stepCount + " elapsed=" + formatSec(qElapsed));
+                    if (failedQueueSummary.length() > 0) {
+                        failedQueueSummary = failedQueueSummary + ", ";
                     }
-                    failedQueueIds = failedQueueIds + qCid;
+                    failedQueueSummary = failedQueueSummary + qDisp;
                 }
             }
         }
     }
 
-    if (!stepCmd.equals("DONE_RESET") && adminId > 0L) {
-        if (cid != adminId && cid > 0L) {
-            String adminNotice = "⚠️ User request failed (chat_id: " + cid
-                + ")\\nReason: Timed out waiting for QR screen\\nLast state: " + lastState
-                + " (step " + stepCount + ")";
-            if (failedQueueIds.length() > 0) {
-                adminNotice = adminNotice + "\\nAffected queued users: " + failedQueueIds;
-            }
-            sendMsg(adminId, adminNotice, null);
-        } else if (failedQueueIds.length() > 0) {
-            sendMsg(adminId,
-                "⚠️ Queued user request(s) failed due to timeout: " + failedQueueIds
-                + "\\nLast state: " + lastState + " (step " + stepCount + ")",
-                null);
-        }
+    if (!isResetDone && adminId > 0L) {
+        String reasonLabel = stepCmd.equals("ABORT_TIMEOUT")
+            ? "Timed out waiting for QR screen (max steps reached)"
+            : ("Timed out / loop exited (" + stepCmd + ")");
+        String adminAlert = buildFailureAlert(
+            cfgSnap,
+            "🚨 QR Request Failed",
+            cid,
+            activeTrigger,
+            reasonLabel,
+            elapsedMs,
+            stepCount,
+            lastState,
+            stateTrace,
+            otherCount,
+            whiteCount,
+            loadingCount,
+            failedQueueSummary
+        );
+        sendMsg(adminId, adminAlert, null);
     }
 }
 return "SCREEN_OFF";
@@ -2621,6 +3811,30 @@ def build_macro(
             '{lv=webhook_body}\n"message":{"message_id":0',
             r'"message":\s*\{[^}]{0,80}"message_id":\s*(\d+)',
             "callback_msg_id",
+        )
+    )
+    actions.append(
+        make_extract_text(
+            sg,
+            '{lv=webhook_body}\n"from":{"id":0,"is_bot":false,"first_name":""',
+            r'"from":\s*\{[^}]{0,220}"is_bot":\s*false[^}]{0,220}"first_name":\s*"([^"\\]{0,64})"',
+            "sender_name",
+        )
+    )
+    actions.append(
+        make_extract_text(
+            sg,
+            '{lv=webhook_body}\n"from":{"id":0,"is_bot":false,"username":""',
+            r'"from":\s*\{[^}]{0,220}"is_bot":\s*false[^}]{0,220}"username":\s*"([^"\\]{0,64})"',
+            "sender_username",
+        )
+    )
+    actions.append(
+        make_extract_text(
+            sg,
+            '{lv=webhook_body}\n"sender_user":{"id":0',
+            r'"(?:sender_user|forward_from)":\s*\{\s*"id":\s*(-?\d+)',
+            "forward_user_id",
         )
     )
 
@@ -2714,12 +3928,15 @@ def build_macro(
         make_var("callback_id", supports_input=False),
         make_var("callback_msg_id", supports_input=False),
         make_var("chat_id", supports_input=False),
+        make_var("forward_user_id", supports_input=False),
         make_var("msg_text", supports_input=False),
         make_var("pin_d1", supports_input=False),
         make_var("pin_d2", supports_input=False),
         make_var("pin_d3", supports_input=False),
         make_var("pin_d4", supports_input=False),
         make_var("screen_action"),
+        make_var("sender_name", supports_input=False),
+        make_var("sender_username", supports_input=False),
         make_var("step_cmd"),
         make_var("update_id", supports_input=False),
         make_var("webhook_body", working=True, supports_input=False),

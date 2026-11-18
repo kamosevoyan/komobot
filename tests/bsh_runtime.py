@@ -133,6 +133,11 @@ class MockJSONObject:
     def toString(self, indent: int | None = None) -> str:
         return json.dumps(self.to_python(), indent=indent, ensure_ascii=False)
 
+    def names(self) -> MockJSONArray | None:
+        if not self._data:
+            return None
+        return MockJSONArray(list(self._data.keys()))
+
 
 class MockJSONArray:
     """Minimal Android org.json.JSONArray compatible wrapper."""
@@ -153,6 +158,14 @@ class MockJSONArray:
         if index < 0 or index >= len(self._items):
             raise JSONException(f"Index {index} out of bounds")
         return self._items[index]
+
+    def optString(self, index: int, default: str = "") -> str:
+        if 0 <= index < len(self._items):
+            val = self._items[index]
+            if val is None:
+                return default
+            return val if isinstance(val, str) else _java_str(val)
+        return default
 
     def getJSONObject(self, index: int) -> MockJSONObject:
         val = self.get(index)
@@ -313,6 +326,7 @@ class MockAndroidEnv:
         self.http_connections: list[dict[str, Any]] = []
         self.next_message_id = 1000
         self.http_status_overrides: dict[str, int] = {}
+        self.http_error_bodies: dict[str, dict[str, Any]] = {}
         self.lock = threading.RLock()
 
     def advance_time(self, ms: int) -> None:
@@ -373,22 +387,40 @@ class MockAndroidEnv:
     ) -> tuple[int, str]:
         method = url_str.rsplit("/", 1)[-1]
         status = self.http_status_overrides.get(method, 200)
-        if method in ("sendPhoto", "editMessageMedia"):
+        if method in ("sendPhoto", "editMessageMedia", "sendDocument"):
             record = _parse_multipart_form(body, content_type)
             self.tg_calls.append({"method": method, "status": status, **record})
             if status >= 400:
-                return status, json.dumps({"ok": False, "error_code": status})
-            mid = (
-                int(record.get("message_id", 9999))
-                if method == "editMessageMedia"
-                else 9999
-            )
+                err_body = self.http_error_bodies.get(
+                    method,
+                    {
+                        "ok": False,
+                        "error_code": status,
+                        "description": f"HTTP {status} error",
+                    },
+                )
+                return status, json.dumps(err_body)
+            if method == "editMessageMedia":
+                mid = int(record.get("message_id", 9999))
+            elif method == "sendDocument":
+                self.next_message_id += 1
+                mid = self.next_message_id
+            else:
+                mid = 9999
             return status, json.dumps({"ok": True, "result": {"message_id": mid}})
 
         payload = json.loads(body.decode("utf-8")) if body else {}
         self.tg_calls.append({"method": method, "status": status, "payload": payload})
         if status >= 400:
-            return status, json.dumps({"ok": False, "error_code": status})
+            err_body = self.http_error_bodies.get(
+                method,
+                {
+                    "ok": False,
+                    "error_code": status,
+                    "description": f"HTTP {status} error",
+                },
+            )
+            return status, json.dumps(err_body)
         self.next_message_id += 1
         return status, json.dumps(
             {"ok": True, "result": {"message_id": self.next_message_id}}
@@ -414,10 +446,10 @@ def _parse_multipart_form(body: bytes, content_type: str) -> dict[str, Any]:
         if not name_m:
             continue
         field_name = name_m.group(1)
-        if field_name == "photo":
+        if field_name in ("photo", "document"):
             fname_m = re.search(r'filename="([^"]+)"', headers)
             parsed["filename"] = fname_m.group(1) if fname_m else ""
-            parsed["photo_bytes"] = content
+            parsed[f"{field_name}_bytes"] = content
         else:
             parsed[field_name] = content.decode("utf-8", errors="replace")
     return parsed
@@ -476,6 +508,13 @@ class _MockFile:
 
     def delete(self) -> bool:
         return self._env.files.pop(self.path, None) is not None
+
+    def renameTo(self, dest: _MockFile) -> bool:
+        entry = self._env.files.pop(self.path, None)
+        if entry is None:
+            return False
+        self._env.files[dest.path] = entry
+        return True
 
 
 class _MockByteArrayInputStream:
@@ -676,6 +715,9 @@ class _MockStringBuilder:
         self._parts.append(_java_str(val))
         return self
 
+    def length(self) -> int:
+        return sum(len(p) for p in self._parts)
+
     def toString(self) -> str:
         return "".join(self._parts)
 
@@ -735,8 +777,15 @@ class _MockSimpleDateFormat:
 
     def format(self, date_obj: _MockDate) -> str:
         dt = datetime.fromtimestamp(date_obj.ms / 1000.0)
-        if self._pattern == "HH:mm:ss":
-            return dt.strftime("%H:%M:%S")
+        fmt_map = {
+            "HH:mm:ss": "%H:%M:%S",
+            "yyyy-MM-dd": "%Y-%m-%d",
+            "yyyy-MM-dd HH:mm:ss": "%Y-%m-%d %H:%M:%S",
+            "MM-dd HH:mm": "%m-%d %H:%M",
+        }
+        py_fmt = fmt_map.get(self._pattern)
+        if py_fmt is not None:
+            return dt.strftime(py_fmt)
         raise ValueError(f"Unsupported date pattern: {self._pattern}")
 
 
@@ -761,7 +810,7 @@ def _jdiv(a: Any, b: Any) -> Any:
 
 
 def _jattr(obj: Any, attr: str) -> Any:
-    if attr == "length" and isinstance(obj, list):
+    if attr == "length" and isinstance(obj, (list, bytes, bytearray)):
         return len(obj)
     if attr == "class" and isinstance(obj, _MockSystem):
         return obj._class_token
@@ -784,6 +833,10 @@ def _jcall(obj: Any, method: str, *args: Any) -> Any:
             return obj.endswith(args[0])
         if method == "indexOf":
             return obj.find(args[0])
+        if method == "lastIndexOf":
+            return obj.rfind(args[0])
+        if method == "replace":
+            return obj.replace(args[0], args[1])
         if method == "substring":
             return obj[args[0] :] if len(args) == 1 else obj[args[0] : args[1]]
         if method == "toLowerCase":
@@ -864,7 +917,7 @@ def _tokenize(src: str) -> list[_Tok]:
     i = 0
     n = len(src)
     two_char = {"&&", "||", "==", "!=", "<=", ">=", "++", "--", "+=", "-=", ">>", "<<"}
-    single_char = set("{}()[];,.?:+-*/&|!<>=")
+    single_char = set("{}()[];,.?:+-*/%&|!<>=")
     while i < n:
         ch = src[i]
         if ch.isspace():
@@ -1335,13 +1388,15 @@ class _BshToPyCompiler:
 
     def parse_mul(self) -> str:
         left = self.parse_unary()
-        while self.match("OP", "*") or self.match("OP", "/"):
+        while self.match("OP", "*") or self.match("OP", "/") or self.match("OP", "%"):
             op = self.eat("OP").val
             right = self.parse_unary()
             if op == "*":
                 left = f"({left} * {right})"
-            else:
+            elif op == "/":
                 left = f"_jdiv({left}, {right})"
+            else:
+                left = f"({left} % {right})"
         return left
 
     def parse_unary(self) -> str:
