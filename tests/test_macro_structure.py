@@ -174,7 +174,10 @@ class TestMacroStructure(unittest.TestCase):
             re.findall(r'return\s+"([A-Z0-9_]+)"\s*;', gm.build_vision_script())
         )
         self.assertTrue(returned_cmds)
-        for cmd in returned_cmds:
+        # WAIT is a pure no-op: the PostStep script provides its settle delay.
+        with self.assertRaises(AssertionError):
+            _find_cmd_branch(self.actions, "WAIT")
+        for cmd in returned_cmds - {"WAIT"}:
             branch = _find_cmd_branch(self.actions, cmd)
             self.assertGreater(len(branch), 0, f"Empty branch for {cmd}")
 

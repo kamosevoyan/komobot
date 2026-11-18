@@ -637,17 +637,18 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertEqual(self.env.tg_calls, [])
 
         self.assertEqual(_run_init_status(self.env), "SENT")
+        # Button flips to the progress bar first, then the callback spinner clears
         self.assertEqual(
             [c["method"] for c in self.env.tg_calls],
-            ["answerCallbackQuery", "editMessageReplyMarkup"],
+            ["editMessageReplyMarkup", "answerCallbackQuery"],
         )
         self.assertEqual(
-            self.env.tg_calls[0]["payload"], {"callback_query_id": "cb-201"}
+            self.env.tg_calls[1]["payload"], {"callback_query_id": "cb-201"}
         )
-        btn = self.env.tg_calls[1]["payload"]["reply_markup"]["inline_keyboard"][0][0]
+        btn = self.env.tg_calls[0]["payload"]["reply_markup"]["inline_keyboard"][0][0]
         self.assertEqual(btn["text"], "⏳ 🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜ 10%")
         self.assertEqual(btn["callback_data"], "noop")
-        self.assertEqual(self.env.tg_calls[1]["payload"]["message_id"], 777)
+        self.assertEqual(self.env.tg_calls[0]["payload"]["message_id"], 777)
         after_init = self.env.read_config()
         self.assertFalse(after_init["media_init_pending"])
         self.assertEqual(after_init["pending_cb_id"], "")

@@ -547,16 +547,12 @@ void notifyPreemptNotices(JSONArray notices) {
 _BSH_TIMING_HELPER = """void logTiming(String tag, long a, long b) {
     try {
         File f = new File("/storage/emulated/0/Download/komobot_timing.log");
-        String old = "";
-        if (f.exists()) {
-            FileInputStream fis = new FileInputStream(f);
-            old = readStream(fis);
-            fis.close();
-            if (old.length() > 12000) old = old.substring(old.length() - 8000);
+        if (f.exists() && f.length() > 12000L) {
+            f.delete();
         }
         String line = System.currentTimeMillis() + "\\t" + tag + "\\t" + a + "\\t" + b + ";";
-        FileOutputStream fos = new FileOutputStream(f);
-        fos.write((old + line).getBytes("UTF-8"));
+        FileOutputStream fos = new FileOutputStream(f, true);
+        fos.write(line.getBytes("UTF-8"));
         fos.close();
     } catch (Exception e) {
     }
@@ -1008,6 +1004,7 @@ synchronized (System.class) {{
                         cfg.put("reset_recents_checked", false);
                         cfg.put("reset_open_tries", 0);
                         cfg.put("step_count", 0);
+                        cfg.put("row_tap_ms", 0L);
                         cfg.put("other_count", 0);
                         cfg.put("white_count", 0);
                         cfg.put("loading_count", 0);
@@ -1183,15 +1180,20 @@ if (cid <= 0L || (existingMid > 0L && !mediaInitPending)) {
     return "SKIP";
 }
 
-if (pendingCbId.length() > 0) {
-    answerCallback(pendingCbId, "");
-    pendingCbId = "";
-}
 long statusMsgId = 0L;
 if (statusIsMedia && existingMid > 0L) {
+    // Flip the button to the progress bar first; the callback spinner is cleared right after.
     editButton(cid, existingMid, formatButtonProgress(10), "noop");
+    if (pendingCbId.length() > 0) {
+        answerCallback(pendingCbId, "");
+        pendingCbId = "";
+    }
     statusMsgId = existingMid;
 } else {
+    if (pendingCbId.length() > 0) {
+        answerCallback(pendingCbId, "");
+        pendingCbId = "";
+    }
     String initText = captureMode.equals("reset")
         ? "🔄 Force-restarting Telcell Wallet..."
         : ((cid == adminId)
@@ -1449,7 +1451,6 @@ JSONObject cfg = null;
 synchronized (System.class) {{
     cfg = loadConfig();
     cfg.put("worker_heartbeat_ms", System.currentTimeMillis());
-    saveConfig(cfg);
 }}
 String mode = cfg.optString("capture_mode", "qr");
 long cid = cfg.optLong("active_chat_id", 0L);
@@ -1822,13 +1823,15 @@ try {{
         int o1 = 0;
         for (int x = 80; x <= 120; x += 3) {{
             for (int y = 360; y <= 400; y += 3) {{
-                if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o1++;
+                int c = bmp.getPixel(px(x), py(y));
+                if (((c >> 16) & 0xFF) > 200 && ((c >> 8) & 0xFF) < 120 && (c & 0xFF) < 80) o1++;
             }}
         }}
         int o2 = 0;
         for (int x = 80; x <= 120; x += 3) {{
             for (int y = 120; y <= 165; y += 3) {{
-                if (getR(x, y) > 200 && getG(x, y) < 120 && getB(x, y) < 80) o2++;
+                int c = bmp.getPixel(px(x), py(y));
+                if (((c >> 16) & 0xFF) > 200 && ((c >> 8) & 0xFF) < 120 && (c & 0xFF) < 80) o2++;
             }}
         }}
         if (o1 >= 15 || o2 >= 15) {{
@@ -2045,7 +2048,8 @@ try {{
         int pinLogo = 0;
         for (int x = 280; x <= 440; x += 6) {{
             for (int y = 120; y <= 220; y += 6) {{
-                if (getR(x, y) > 200 && getG(x, y) < 130 && getB(x, y) < 100) pinLogo++;
+                int c = bmp.getPixel(px(x), py(y));
+                if (((c >> 16) & 0xFF) > 200 && ((c >> 8) & 0xFF) < 130 && (c & 0xFF) < 100) pinLogo++;
             }}
         }}
         if (pinLogo >= 10) {{
@@ -2057,7 +2061,8 @@ try {{
             int spinner = 0;
             for (int x = 330; x <= 390; x += 3) {{
                 for (int y = 680; y <= 715; y += 3) {{
-                    if (getR(x, y) > 215 && getB(x, y) < 120) spinner++;
+                    int c = bmp.getPixel(px(x), py(y));
+                    if (((c >> 16) & 0xFF) > 215 && (c & 0xFF) < 120) spinner++;
                 }}
             }}
             if (spinner >= 3) {{
@@ -2091,10 +2096,14 @@ try {{
         for (int x = 50; x <= 340; x += 8) {{
             if (x > 110 && x < 280) continue;
             for (int y = 1045; y <= 1105; y += 6) {{
-                if (getR(x, y) > 200 && getG(x, y) >= 70 && getG(x, y) <= 165 && getB(x, y) < 125) svcLow++;
+                int c = bmp.getPixel(px(x), py(y));
+                int g = (c >> 8) & 0xFF;
+                if (((c >> 16) & 0xFF) > 200 && g >= 70 && g <= 165 && (c & 0xFF) < 125) svcLow++;
             }}
             for (int y = 785; y <= 845; y += 6) {{
-                if (getR(x, y) > 200 && getG(x, y) >= 70 && getG(x, y) <= 165 && getB(x, y) < 125) svcHigh++;
+                int c = bmp.getPixel(px(x), py(y));
+                int g = (c >> 8) & 0xFF;
+                if (((c >> 16) & 0xFF) > 200 && g >= 70 && g <= 165 && (c & 0xFF) < 125) svcHigh++;
             }}
         }}
         if (svcLow < 3 && svcHigh < 3 && cfg.optInt("loading_count", 0) < 5) {{
@@ -2102,6 +2111,13 @@ try {{
             return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
         }}
         boolean useLow = (svcLow >= 3) || (svcHigh < 3 && isWhite(360, 1100) && !isWhite(360, 800));
+        String prevDashState = cfg.optString("last_state", "");
+        if (prevDashState.equals(useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH")) {{
+            // Transport row was just tapped; give the page one short tick to navigate.
+            cfg.put("last_state", "DASH_OPENING");
+            saveConfig(cfg);
+            return "WAIT";
+        }}
         if (!useLow && cfg.optInt("loading_count", 0) < 3) {{
             // The HIGH Услуги row is often transient: lazy-loaded promo cards push it down
             // right after the PIN. Wait briefly for the layout to settle before tapping.
@@ -2204,11 +2220,19 @@ try {{
             return "DONE_RESET";
         }}
         cfg.put("qr_was_closed", true);
+        if (cfg.optString("last_state", "").equals("TICKET_LIST")) {{
+            // The row was just tapped; the QR modal may still be opening. Wait one
+            // short tick instead of tapping the row a second time.
+            cfg.put("last_state", "TICKET_OPENING");
+            saveConfig(cfg);
+            return "WAIT";
+        }}
         cfg.put("last_state", "TICKET_LIST");
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         String stepText = prepareStepStatus(cfg, cid, adminId, "🎫 Selecting ticket...", 80);
         queueStepStatus(cfg, stepText);
+        cfg.put("row_tap_ms", System.currentTimeMillis());
         saveConfig(cfg);
         return "CLICK_TICKET_ROW";
     }}
@@ -2248,6 +2272,14 @@ try {{
     }}
 
     // 11. Unknown / transition screen
+    long rowTapAge = System.currentTimeMillis() - cfg.optLong("row_tap_ms", 0L);
+    if (cfg.optLong("row_tap_ms", 0L) > 0L && rowTapAge < 6000L) {{
+        // Telcell is still opening the QR after the row tap; do not count these
+        // frames toward CLICK_BACK/RESET_TO_HOME recovery (back would close the QR).
+        cfg.put("last_state", "QR_OPENING");
+        saveConfig(cfg);
+        return "WAIT";
+    }}
     int otherCount = cfg.optInt("other_count", 0) + 1;
     cfg.put("other_count", otherCount);
     cfg.put("last_state", "OTHER");
@@ -2319,7 +2351,7 @@ else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
 else if (stepCmd.equals("CLICK_TRANSPORT_LOW") || stepCmd.equals("CLICK_TRANSPORT_HIGH")) waitMs = 750L;
 else if (stepCmd.equals("ENTER_PIN")) waitMs = 850L;
 else if (stepCmd.equals("CLICK_ENTER") || stepCmd.equals("LAUNCH_VM")) waitMs = 900L;
-else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 450L;
+else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 520L;
 else if (stepCmd.equals("LAUNCH_1") || stepCmd.equals("LAUNCH_2")) waitMs = 1100L;
 
 long cid = 0L;
@@ -2330,7 +2362,11 @@ boolean statusIsMedia = false;
 String pendingText = "";
 synchronized (System.class) {
     JSONObject cfg = loadConfig();
-    if (stepCmd.equals("WAIT") && cfg.optBoolean("vm_booting", false)) {
+    if (stepCmd.equals("WAIT") && cfg.optString("last_state", "").equals("SCREEN_WAKING")
+        && cfg.optInt("step_count", 0) <= 2) {
+        // The first capture already blocked for the display to unblock.
+        waitMs = 80L;
+    } else if (stepCmd.equals("WAIT") && cfg.optBoolean("vm_booting", false)) {
         waitMs = 500L;
     }
     if (cfg.has("active_chat_id") || cfg.optBoolean("worker_active", false)) {
@@ -2653,7 +2689,6 @@ def build_macro(
     add_cmd_branch("CLOSE_MODAL", [make_click_xy(sg, 626, 121)])
     add_cmd_branch("CLICK_BACK", [make_click_xy(sg, 151, 1553)])
     add_cmd_branch("RESET_TO_HOME", [make_click_xy(sg, 360, 1553)])
-    add_cmd_branch("WAIT", [make_pause(sg, millis=50)])
 
     actions.append(make_java_action(sg, build_post_step_script()))
     actions.append(make_end_loop(sg))

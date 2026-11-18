@@ -563,10 +563,16 @@ class _MockByteArrayOutputStream:
 
 
 class _MockFileOutputStream:
-    def __init__(self, env: MockAndroidEnv, target: _MockFile) -> None:
+    def __init__(
+        self, env: MockAndroidEnv, target: _MockFile, append: bool = False
+    ) -> None:
         self._env = env
         self._target = target
         self._buf = bytearray()
+        if append:
+            existing = env.files.get(target.path)
+            if existing is not None:
+                self._buf.extend(existing.data)
 
     def write(self, data: bytes) -> None:
         self._buf.extend(data)
@@ -804,8 +810,10 @@ def _make_runtime_globals(env: MockAndroidEnv) -> dict[str, Any]:
             raise FileNotFoundError(file_obj.path)
         return _MockRandomAccessFile(entry.data)
 
-    def new_FileOutputStream(file_obj: _MockFile) -> _MockFileOutputStream:
-        return _MockFileOutputStream(env, file_obj)
+    def new_FileOutputStream(
+        file_obj: _MockFile, append: bool = False
+    ) -> _MockFileOutputStream:
+        return _MockFileOutputStream(env, file_obj, bool(append))
 
     def new_URL(spec: str) -> _MockURL:
         return _MockURL(env, spec)

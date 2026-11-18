@@ -973,7 +973,9 @@ class TestVisionScenarios(unittest.TestCase):
         )
         self.assertTrue(self.env.read_config()["vm_seen"])
         self.assertFalse(self.env.read_config()["vm_launched"])
-        # Transient in-app OTHER after TICKET_LIST never triggers LAUNCH_VM
+        # Transient in-app OTHER after TICKET_LIST never triggers LAUNCH_VM (the QR
+        # opening grace window has passed here, so normal recovery applies)
+        self.env.advance_time(6500)
         in_app_other = [self._step(host_home) for _ in range(5)]
         self.assertEqual(
             in_app_other, ["WAIT", "WAIT", "CLICK_BACK", "WAIT", "RESET_TO_HOME"]
@@ -1053,6 +1055,78 @@ class TestVisionScenarios(unittest.TestCase):
         )
         boot_dt = self.env.now_ms - t1
         self.assertGreaterEqual(boot_dt, 500)
+
+    def test_post_step_settle_tuning_and_timing_log_append(self) -> None:
+        def settle(cmd: str, **cfg_updates: object) -> int:
+            self._seed_active_run(step_count=1)
+            cfg = self.env.read_config()
+            cfg.update(cfg_updates)
+            self.env.write_config(cfg)
+            t0 = self.env.now_ms
+            run_bsh_script(
+                POST_STEP_SCRIPT,
+                self.env,
+                {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+            )
+            return self.env.now_ms - t0
+
+        self.assertGreaterEqual(settle("CLICK_TICKET_ROW"), 520)
+        # First pure-black frame: the capture already waited for the display.
+        waking = settle("WAIT", last_state="SCREEN_WAKING", vm_booting=False)
+        self.assertGreaterEqual(waking, 80)
+        self.assertLess(waking, 180)
+        # Later pure-black frames and cold boots keep the normal settle.
+        self.assertGreaterEqual(
+            settle("WAIT", last_state="SCREEN_WAKING", step_count=5), 180
+        )
+
+        # Timing log is appended, never rewritten, and truncated past ~12 KB.
+        log_path = "/storage/emulated/0/Download/komobot_timing.log"
+        first = self.env.files[log_path].data
+        settle("WAIT")
+        second = self.env.files[log_path].data
+        self.assertTrue(second.startswith(first))
+        self.env.files[log_path].data = b"x" * 12001
+        settle("WAIT")
+        self.assertLess(len(self.env.files[log_path].data), 200)
+
+    def test_unknown_frames_after_row_tap_wait_instead_of_back(self) -> None:
+        self._seed_active_run(step_count=1, vm_seen=True)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        transition = MockBitmap(720, 1600, (90, 110, 140))
+        for _ in range(8):
+            self.assertEqual(self._step(transition), "WAIT")
+            self.assertEqual(self.env.read_config()["last_state"], "QR_OPENING")
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+
+        # Once the grace window has passed, normal OTHER recovery resumes.
+        self._seed_active_run(step_count=1, vm_seen=True)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
+        )
+        self.env.advance_time(6500)
+        seq = [self._step(transition) for _ in range(3)]
+        self.assertEqual(seq, ["WAIT", "WAIT", "CLICK_BACK"])
+
+    def test_ticket_row_and_dashboard_taps_are_debounced(self) -> None:
+        # Ticket row: second consecutive TICKET_LIST frame waits once, then re-taps.
+        self._seed_active_run(step_count=1)
+        ticket = ScreenFactory.ticket_list(card_loaded=True)
+        self.assertEqual(self._step(ticket), "CLICK_TICKET_ROW")
+        self.assertEqual(self._step(ticket), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "TICKET_OPENING")
+        self.assertEqual(self._step(ticket), "CLICK_TICKET_ROW")
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+
+        # Dashboard: same debounce for the Transport row tap.
+        self._seed_active_run(step_count=1)
+        low = ScreenFactory.dashboard("low")
+        self.assertEqual(self._step(low), "CLICK_TRANSPORT_LOW")
+        self.assertEqual(self._step(low), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "DASH_OPENING")
+        self.assertEqual(self._step(low), "CLICK_TRANSPORT_LOW")
 
     def test_in_place_refresh_media_progress_and_atomic_swap(self) -> None:
         self._seed_active_run(
