@@ -90,67 +90,6 @@ for op in MANAGE_EXTERNAL_STORAGE SYSTEM_ALERT_WINDOW; do
 	fi
 done
 
-echo "==> Configuring Doze, Wi-Fi sleep, screen timeout & lockscreen..."
-for pkg in com.arlosoft.macrodroid com.clone.android.dual.space; do
-	adb shell dumpsys deviceidle whitelist "+$pkg" >/dev/null 2>&1 || true
-	for op in RUN_IN_BACKGROUND RUN_ANY_IN_BACKGROUND WAKE_LOCK; do
-		adb shell appops set "$pkg" "$op" allow 2>/dev/null || true
-	done
-done
-adb shell appops set com.clone.android.dual.space TOAST_WINDOW deny 2>/dev/null || true
-adb shell dumpsys deviceidle disable >/dev/null 2>&1 || true
-adb shell settings put global app_standby_enabled 0 2>/dev/null || true
-adb shell settings put global settings_enable_monitor_phantom_procs false 2>/dev/null || true
-adb shell cmd device_config override activity_manager max_phantom_processes 2147483647 2>/dev/null || adb shell cmd device_config put activity_manager max_phantom_processes 2147483647 2>/dev/null || true
-adb shell settings put global wifi_power_save 0 2>/dev/null || true
-adb shell settings put global wifi_sleep_policy 2 2>/dev/null || true
-adb shell settings put system screen_off_timeout 120000 2>/dev/null || true
-adb shell locksettings set-disabled true 2>/dev/null || true
-adb shell settings put secure lockscreen.disabled 1 2>/dev/null || true
-adb shell settings put secure lock_screen_lock_after_timeout 86400000 2>/dev/null || true
-
-adb shell settings put system enable_smart_capture 0 2>/dev/null || true
-adb shell settings put system screen_off_pocket 0 2>/dev/null || true
-adb shell settings put system surface_palm_touch 0 2>/dev/null || true
-adb shell settings put global window_animation_scale 0 2>/dev/null || true
-adb shell settings put global transition_animation_scale 0 2>/dev/null || true
-adb shell settings put global animator_duration_scale 0 2>/dev/null || true
-adb shell cmd uimode night yes >/dev/null 2>&1 || true
-adb shell settings put secure ui_night_mode 2 2>/dev/null || true
-adb shell settings put system display_night_theme_scheduled 0 2>/dev/null || true
-adb shell settings put system display_night_theme 1 2>/dev/null || true
-
-echo "==> Preparing screenshot workspace & cleaning old screenshots..."
-adb shell 'mkdir -p /storage/emulated/0/komobot_ss && touch /storage/emulated/0/komobot_ss/.nomedia && rm -f /storage/emulated/0/komobot_ss/frame.png /storage/emulated/0/komobot_ss/frame.jpg'
-adb shell 'rm -f /storage/emulated/0/DCIM/Screenshots/*Virtual\ Master* /storage/emulated/0/DCIM/Screenshots/.trashed-* /storage/emulated/0/DCIM/Screenshots/thumbnail_* /storage/emulated/0/DCIM/Screenshots/*Virtual_Master* /storage/emulated/0/Pictures/Screenshots/*Virtual\ Master* 2>/dev/null || true'
-
-echo "==> Seeding /storage/emulated/0/Download/komobot_config.json if absent..."
-if ! adb shell "[ -f /storage/emulated/0/Download/komobot_config.json ]"; then
-	TMP_CFG="$(mktemp)"
-	cat >"$TMP_CFG" <<EOF
-{
-  "admin_id": $ADMIN_ID_VAL,
-  "allowed_users": [
-    $ADMIN_ID_VAL,
-    879155028
-  ],
-  "public_access": true,
-  "busy_until": 0,
-  "last_update_id": 0
-}
-EOF
-	adb push "$TMP_CFG" /storage/emulated/0/Download/komobot_config.json
-	rm -f "$TMP_CFG"
-else
-	echo "  komobot_config.json already exists on device, preserving."
-fi
-
-echo "==> Pushing Komobot_Controller.macro to phone..."
-adb push "$SCRIPT_DIR/Komobot_Controller.macro" /storage/emulated/0/Download/Komobot_Controller.macro
-
-echo "==> Waking screen and opening macro in MacroDroid..."
-adb shell "input keyevent 224; wm dismiss-keyguard 2>/dev/null || true; sleep 0.4; input swipe 360 1200 360 300; cmd statusbar collapse 2>/dev/null || true; am start -a android.intent.action.VIEW -d file:///storage/emulated/0/Download/Komobot_Controller.macro -n com.arlosoft.macrodroid/.filehandler.FileHandlerProxy"
-
 tap_ui_node() {
 	local pattern="$1"
 	local xml
@@ -195,6 +134,132 @@ sys.exit(1)
 	fi
 	return 1
 }
+
+echo "==> Configuring MacroDroid Helper APK (per-request pocket/palm toggle)..."
+setup_macrodroid_helper() {
+	local helper_pkg="com.arlosoft.macrodroid.helper"
+	local helper_url="https://macrodroidlink.com/helper/MacroDroidHelper.apk"
+	local helper_apk="${MACRODROID_HELPER_APK:-/tmp/MacroDroidHelper.apk}"
+
+	if ! adb shell pm path "$helper_pkg" >/dev/null 2>&1; then
+		if [[ "${SKIP_HELPER_INSTALL:-0}" == "1" ]]; then
+			echo "  $helper_pkg not installed (SKIP_HELPER_INSTALL=1)"
+		else
+			if [[ ! -f "$helper_apk" ]]; then
+				echo "  fetching official MacroDroid Helper APK ($helper_url)..."
+				if ! curl -fsSL "$helper_url" -o "$helper_apk"; then
+					rm -f "$helper_apk"
+					echo "  Warning: failed to download MacroDroid Helper APK." >&2
+				fi
+			fi
+			if [[ -f "$helper_apk" ]]; then
+				echo "  installing $helper_pkg with --bypass-low-target-sdk-block..."
+				if adb install -r --bypass-low-target-sdk-block "$helper_apk"; then
+					echo "  installed $helper_pkg"
+				else
+					echo "  Warning: failed to install $helper_pkg (if Play Protect blocked it, temporarily disable Developer options -> Verify apps over USB and re-run)." >&2
+				fi
+			fi
+		fi
+	else
+		echo "  $helper_pkg already installed"
+	fi
+
+	if adb shell pm path "$helper_pkg" >/dev/null 2>&1; then
+		for perm in \
+			android.permission.WRITE_SECURE_SETTINGS \
+			android.permission.WRITE_GLOBAL_SETTINGS; do
+			adb shell pm grant "$helper_pkg" "$perm" 2>/dev/null || true
+		done
+		adb shell appops set "$helper_pkg" WRITE_SETTINGS allow 2>/dev/null || true
+		adb shell dumpsys deviceidle whitelist "+$helper_pkg" >/dev/null 2>&1 || true
+		for op in RUN_IN_BACKGROUND RUN_ANY_IN_BACKGROUND WAKE_LOCK; do
+			adb shell appops set "$helper_pkg" "$op" allow 2>/dev/null || true
+		done
+		# Low-targetSdk (21) apps require a one-time permission review and launch before
+		# Android's BroadcastQueue will deliver SystemSettingAction helper broadcasts.
+		if adb shell "dumpsys package $helper_pkg | grep -qE 'REVIEW_REQUIRED|stopped=true'"; then
+			echo "  completing one-time permission review & launch for $helper_pkg..."
+			adb shell "input keyevent 224; wm dismiss-keyguard 2>/dev/null || true; sleep 0.4; am start -n $helper_pkg/.ui.HomeScreenActivity" >/dev/null 2>&1 || true
+			sleep 1.5
+			if tap_ui_node "com.android.permissioncontroller:id/continue_button"; then
+				echo "  confirmed legacy permission review (Continue)"
+				sleep 1.5
+			fi
+			if adb shell "dumpsys package $helper_pkg | grep -q 'stopped=true'"; then
+				adb shell "am start -n $helper_pkg/.ui.HomeScreenActivity" >/dev/null 2>&1 || true
+				sleep 1.2
+			fi
+		fi
+		# Keep Samsung pocket/palm protection ON while idle; Stage 3/6 toggle them 0 -> 1 per request.
+		adb shell settings put system screen_off_pocket 1 2>/dev/null || true
+		adb shell settings put system surface_palm_touch 1 2>/dev/null || true
+		echo "  configured $helper_pkg permissions & restored idle pocket/palm guards (1)"
+	else
+		echo "  Warning: $helper_pkg is not installed; per-request screen_off_pocket/surface_palm_touch toggles will not work." >&2
+		echo "  Install manually: curl -fsSL $helper_url -o /tmp/MacroDroidHelper.apk && adb install -r --bypass-low-target-sdk-block /tmp/MacroDroidHelper.apk" >&2
+	fi
+}
+setup_macrodroid_helper
+
+echo "==> Configuring Doze, Wi-Fi sleep, screen timeout & lockscreen..."
+for pkg in com.arlosoft.macrodroid com.clone.android.dual.space; do
+	adb shell dumpsys deviceidle whitelist "+$pkg" >/dev/null 2>&1 || true
+	for op in RUN_IN_BACKGROUND RUN_ANY_IN_BACKGROUND WAKE_LOCK; do
+		adb shell appops set "$pkg" "$op" allow 2>/dev/null || true
+	done
+done
+adb shell appops set com.clone.android.dual.space TOAST_WINDOW deny 2>/dev/null || true
+adb shell dumpsys deviceidle disable >/dev/null 2>&1 || true
+adb shell settings put global app_standby_enabled 0 2>/dev/null || true
+adb shell settings put global settings_enable_monitor_phantom_procs false 2>/dev/null || true
+adb shell cmd device_config override activity_manager max_phantom_processes 2147483647 2>/dev/null || adb shell cmd device_config put activity_manager max_phantom_processes 2147483647 2>/dev/null || true
+adb shell settings put global wifi_power_save 0 2>/dev/null || true
+adb shell settings put global wifi_sleep_policy 2 2>/dev/null || true
+adb shell settings put system screen_off_timeout 120000 2>/dev/null || true
+adb shell locksettings set-disabled true 2>/dev/null || true
+adb shell settings put secure lockscreen.disabled 1 2>/dev/null || true
+adb shell settings put secure lock_screen_lock_after_timeout 86400000 2>/dev/null || true
+
+adb shell settings put system enable_smart_capture 0 2>/dev/null || true
+adb shell settings put global window_animation_scale 0 2>/dev/null || true
+adb shell settings put global transition_animation_scale 0 2>/dev/null || true
+adb shell settings put global animator_duration_scale 0 2>/dev/null || true
+adb shell cmd uimode night yes >/dev/null 2>&1 || true
+adb shell settings put secure ui_night_mode 2 2>/dev/null || true
+adb shell settings put system display_night_theme_scheduled 0 2>/dev/null || true
+adb shell settings put system display_night_theme 1 2>/dev/null || true
+
+echo "==> Preparing screenshot workspace & cleaning old screenshots..."
+adb shell 'mkdir -p /storage/emulated/0/komobot_ss && touch /storage/emulated/0/komobot_ss/.nomedia && rm -f /storage/emulated/0/komobot_ss/frame.png /storage/emulated/0/komobot_ss/frame.jpg'
+adb shell 'rm -f /storage/emulated/0/DCIM/Screenshots/*Virtual\ Master* /storage/emulated/0/DCIM/Screenshots/.trashed-* /storage/emulated/0/DCIM/Screenshots/thumbnail_* /storage/emulated/0/DCIM/Screenshots/*Virtual_Master* /storage/emulated/0/Pictures/Screenshots/*Virtual\ Master* 2>/dev/null || true'
+
+echo "==> Seeding /storage/emulated/0/Download/komobot_config.json if absent..."
+if ! adb shell "[ -f /storage/emulated/0/Download/komobot_config.json ]"; then
+	TMP_CFG="$(mktemp)"
+	cat >"$TMP_CFG" <<EOF
+{
+  "admin_id": $ADMIN_ID_VAL,
+  "allowed_users": [
+    $ADMIN_ID_VAL,
+    879155028
+  ],
+  "public_access": true,
+  "busy_until": 0,
+  "last_update_id": 0
+}
+EOF
+	adb push "$TMP_CFG" /storage/emulated/0/Download/komobot_config.json
+	rm -f "$TMP_CFG"
+else
+	echo "  komobot_config.json already exists on device, preserving."
+fi
+
+echo "==> Pushing Komobot_Controller.macro to phone..."
+adb push "$SCRIPT_DIR/Komobot_Controller.macro" /storage/emulated/0/Download/Komobot_Controller.macro
+
+echo "==> Waking screen and opening macro in MacroDroid..."
+adb shell "input keyevent 224; wm dismiss-keyguard 2>/dev/null || true; sleep 0.4; input swipe 360 1200 360 300; cmd statusbar collapse 2>/dev/null || true; am start -a android.intent.action.VIEW -d file:///storage/emulated/0/Download/Komobot_Controller.macro -n com.arlosoft.macrodroid/.filehandler.FileHandlerProxy"
 
 accepted=0
 for _ in 1 2 3 4 5 6 7 8; do

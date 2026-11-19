@@ -147,8 +147,25 @@ class TestMacroStructure(unittest.TestCase):
             for i, a in enumerate(self.actions)
             if a.get("m_classType") == "EndLoopAction"
         )
-        stage3_types = [a.get("m_classType") for a in self.actions[:loop_idx][-2:]]
-        self.assertEqual(stage3_types, ["ScreenOnAction", "JavaAction"])
+        stage3 = self.actions[:loop_idx][-5:]
+        stage3_types = [a.get("m_classType") for a in stage3]
+        self.assertEqual(
+            stage3_types,
+            [
+                "SystemSettingAction",
+                "SystemSettingAction",
+                "PauseAction",
+                "ScreenOnAction",
+                "JavaAction",
+            ],
+        )
+        for act, key in zip(stage3[:2], ("screen_off_pocket", "surface_palm_touch")):
+            self.assertEqual(act["settingString"], key)
+            self.assertEqual(act["tableOption"], 0)
+            self.assertEqual(act["valueType"], 0)
+            self.assertEqual(act["valueString"], "0")
+            self.assertTrue(act["useHelper"])
+        self.assertEqual(stage3[2]["m_delayInMilliSeconds"], 200)
         self.assertNotIn(
             "LaunchActivityAction",
             [a.get("m_classType") for a in self.actions[:loop_idx]],
@@ -243,10 +260,13 @@ class TestMacroStructure(unittest.TestCase):
             (360, 900, 360, 200, 200, 0, False, True),
         )
 
-        # Post-loop ScreenOff must be gated by Stage 5 screen_action == "SCREEN_OFF"
-        timeout_action = self.actions[-5]
-        screen_off_if = self.actions[-4]
-        screen_off = self.actions[-3]
+        # Post-loop ScreenOff & pocket/palm restore must be gated by Stage 5
+        # screen_action == "SCREEN_OFF"
+        timeout_action = self.actions[-7]
+        screen_off_if = self.actions[-6]
+        screen_off = self.actions[-5]
+        restore_pocket = self.actions[-4]
+        restore_palm = self.actions[-3]
         self.assertEqual(timeout_action["m_classType"], "JavaAction")
         self.assertEqual(timeout_action["responseVariableName"], "screen_action")
         self.assertEqual(screen_off_if["m_classType"], "IfConditionAction")
@@ -256,6 +276,16 @@ class TestMacroStructure(unittest.TestCase):
         self.assertEqual(c["m_stringValue"], "SCREEN_OFF")
         self.assertEqual(screen_off["m_classType"], "ScreenOnAction")
         self.assertTrue(screen_off["m_screenOff"])
+        for act, key in (
+            (restore_pocket, "screen_off_pocket"),
+            (restore_palm, "surface_palm_touch"),
+        ):
+            self.assertEqual(act["m_classType"], "SystemSettingAction")
+            self.assertEqual(act["settingString"], key)
+            self.assertEqual(act["tableOption"], 0)
+            self.assertEqual(act["valueType"], 0)
+            self.assertEqual(act["valueString"], "1")
+            self.assertTrue(act["useHelper"])
 
     def test_stage1_webhook_regex_extractors(self) -> None:
         extractors: dict[str, tuple[str, str]] = {}

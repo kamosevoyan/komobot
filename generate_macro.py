@@ -228,6 +228,32 @@ def make_screen_on(sg: SiguidGen, screen_off: bool) -> dict:
     }
 
 
+def make_system_setting(
+    sg: SiguidGen,
+    setting_key: str,
+    value: str,
+    *,
+    table_option: int = 0,
+    value_type: int = 0,
+    use_helper: bool = True,
+) -> dict:
+    """Build a MacroDroid SystemSettingAction (table_option: 0=System, 1=Secure, 2=Global; value_type: 0=Int)."""
+    return {
+        "settingString": setting_key,
+        "tableOption": table_option,
+        "useHelper": use_helper,
+        "valueString": value,
+        "valueType": value_type,
+        "disableLogging": False,
+        "m_SIGUID": sg.next_id(),
+        "m_classType": "SystemSettingAction",
+        "m_comment": "",
+        "m_constraintList": [],
+        "m_isDisabled": False,
+        "m_isOrCondition": False,
+    }
+
+
 def make_launch_app(
     sg: SiguidGen, app_name: str, package_name: str, *, start_new: bool = False
 ) -> dict:
@@ -4797,8 +4823,12 @@ def build_macro(
         make_java_action(sg, build_router_script(), response_var="bot_action")
     )
 
-    # 3. If bot_action == "RUN": wake screen directly onto running VM and overlap initial status send
+    # 3. If bot_action == "RUN": temporarily disable Samsung pocket/palm screen-off guards via
+    #    MacroDroid Helper (low-targetSdk APK), wake screen directly onto running VM, and overlap status send
     actions.append(make_if_var_equals(sg, "bot_action", "RUN"))
+    actions.append(make_system_setting(sg, "screen_off_pocket", "0", use_helper=True))
+    actions.append(make_system_setting(sg, "surface_palm_touch", "0", use_helper=True))
+    actions.append(make_pause(sg, millis=200))
     actions.append(make_screen_on(sg, screen_off=False))
     actions.append(make_java_action(sg, build_init_status_script()))
 
@@ -4867,9 +4897,12 @@ def build_macro(
         make_java_action(sg, build_timeout_script(), response_var="screen_action")
     )
 
-    # 6. Turn screen off without leaving Virtual Master (skip if a newer worker/request owns the screen)
+    # 6. Turn screen off without leaving Virtual Master and restore Samsung pocket/palm guards
+    #    (skip if a newer worker/request owns the screen)
     actions.append(make_if_var_equals(sg, "screen_action", "SCREEN_OFF"))
     actions.append(make_screen_on(sg, screen_off=True))
+    actions.append(make_system_setting(sg, "screen_off_pocket", "1", use_helper=True))
+    actions.append(make_system_setting(sg, "surface_palm_touch", "1", use_helper=True))
     actions.append(make_end_if(sg))
     actions.append(make_end_if(sg))
 
