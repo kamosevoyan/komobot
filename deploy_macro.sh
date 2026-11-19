@@ -41,11 +41,13 @@ prompt_var() {
 }
 
 DEFAULT_BOT_TOKEN="$(read_env_default BOT_TOKEN)"
+DEFAULT_ADMIN_BOT_TOKEN="$(read_env_default ADMIN_BOT_TOKEN)"
 DEFAULT_ADMIN_ID="$(read_env_default ADMIN_ID)"
 DEFAULT_APP_PIN="$(read_env_default APP_PIN)"
 DEFAULT_APP_NAME="$(read_env_default APP_NAME)"
 
 BOT_TOKEN_VAL="${BOT_TOKEN:-}"
+ADMIN_BOT_TOKEN_VAL="${ADMIN_BOT_TOKEN:-$DEFAULT_ADMIN_BOT_TOKEN}"
 ADMIN_ID_VAL="${ADMIN_ID:-}"
 APP_PIN_VAL="${APP_PIN:-}"
 APP_NAME_VAL="${APP_NAME:-}"
@@ -58,6 +60,7 @@ prompt_var APP_NAME_VAL "APP_NAME" "$DEFAULT_APP_NAME" 0
 echo "==> Generating Komobot_Controller.macro..."
 python3 "$SCRIPT_DIR/generate_macro.py" \
 	--bot-token "$BOT_TOKEN_VAL" \
+	--admin-bot-token "$ADMIN_BOT_TOKEN_VAL" \
 	--admin-id "$ADMIN_ID_VAL" \
 	--app-pin "$APP_PIN_VAL" \
 	--app-name "$APP_NAME_VAL"

@@ -1409,16 +1409,35 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
         self.assertEqual(self.env.guest_adb_commands, [])
 
-        # 2. Cold VM recovery stops vendor.fps_hal once upon reaching VM_HOME
+        # 2. Cold VM init stops fps_hal, tunes guest settings & launches via ADB
         self._seed_active_run(mode="qr", vm_seen=False)
         cfg_cold = self.env.read_config()
         cfg_cold["vm_booting"] = True
         cfg_cold["fps_hal_checked"] = False
+        cfg_cold["adb_launch_tried"] = False
         self.env.write_config(cfg_cold)
         self.env.guest_adb_commands.clear()
-        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "LAUNCH_1")
-        self.assertIn("setprop ctl.stop vendor.fps_hal", self.env.guest_adb_commands)
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "WAIT")
+        self.assertTrue(
+            any(
+                "setprop ctl.stop vendor.fps_hal" in c
+                for c in self.env.guest_adb_commands
+            )
+        )
+        self.assertTrue(
+            any("window_animation_scale 0" in c for c in self.env.guest_adb_commands)
+        )
+        self.assertEqual(self.env.read_config()["last_state"], "ADB_LAUNCH_APP")
         self.assertTrue(self.env.read_config()["fps_hal_checked"])
+
+        # 2b. When Guest ADB is offline, VM_HOME falls back to pixel LAUNCH_1
+        self.env.guest_adb_mode = "offline"
+        self._seed_active_run(mode="qr", vm_seen=False)
+        cfg_off = self.env.read_config()
+        cfg_off["adb_launch_tried"] = False
+        self.env.write_config(cfg_off)
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "LAUNCH_1")
+        self.env.guest_adb_mode = "ok"
 
         # 3. Reset with Guest ADB connected runs am force-stop + am start directly
         self._seed_active_run(mode="reset")
@@ -1447,6 +1466,81 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(self.env.read_config()["last_state"], "ADB_RELAUNCH")
         self.assertEqual(self.env.read_config()["other_count"], 0)
         self.assertTrue(any("am start" in c for c in self.env.guest_adb_commands))
+
+    def test_restart_vm_full_flow_and_adb_fragment_recovery(self) -> None:
+        self.env.guest_adb_mode = "ok"
+        run_bsh_script(
+            gm.build_router_script(),
+            self.env,
+            {
+                "bot_token": LOCAL_VARS["bot_token"],
+                "app_name": LOCAL_VARS["app_name"],
+                "admin_id": str(ADMIN_ID),
+                "chat_id": str(ADMIN_ID),
+                "update_id": "0",
+                "msg_text": "",
+                "callback_id": "cb-pair-rst",
+                "callback_data": "adm:adbpair",
+                "callback_msg_id": "10",
+            },
+        )
+
+        # 1. Start restart_vm from inside a running VM -> returns to VM_LAUNCHER
+        self._seed_active_run(mode="restart_vm", vm_seen=False)
+        cfg = self.env.read_config()
+        cfg["vm_restart_stage"] = 0
+        cfg["vm_launcher_tries"] = 0
+        self.env.write_config(cfg)
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)),
+            "LAUNCH_VM_LAUNCHER",
+        )
+        self.assertEqual(self.env.read_config()["last_state"], "VM_RETURN_LAUNCHER")
+
+        # 2. On VM_LAUNCHER even if guest ADB is offline -> still CLICK_VM_SHUTDOWN
+        self.env.guest_adb_mode = "offline"
+        self.assertEqual(self._step(ScreenFactory.vm_launcher()), "CLICK_VM_SHUTDOWN")
+        self.assertEqual(self.env.read_config()["last_state"], "VM_SHUTDOWN")
+        self.assertEqual(self.env.read_config()["vm_restart_stage"], 1)
+        self.env.guest_adb_mode = "ok"
+
+        # 3. After shutdown, VM_LAUNCHER taps CLICK_ENTER to cold-boot inner VM
+        self.assertEqual(self._step(ScreenFactory.vm_launcher()), "CLICK_ENTER")
+        self.assertEqual(self.env.read_config()["last_state"], "VM_LAUNCHER")
+
+        # 4. Cold-booted VM_HOME -> tunes guest ADB & launches Telcell via ADB
+        self.env.guest_adb_commands.clear()
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "ADB_LAUNCH_APP")
+        self.assertEqual(self.env.read_config()["vm_restart_stage"], 2)
+
+        # 5. Reaches TICKET_LIST -> DONE_RESET with VM_RESTART_DONE audit log
+        self.assertEqual(
+            self._step(ScreenFactory.ticket_list(card_loaded=True)), "DONE_RESET"
+        )
+        log_txt = self.env.read_text("/storage/emulated/0/Download/komobot_events.log")
+        self.assertIn("VM_RESTART_DONE", log_txt)
+        self.assertIn(
+            "Inner Android VM restarted", self.env.tg_calls[-1]["payload"]["text"]
+        )
+
+        # 6. Actionable tryAdbRecoverState on promo-blocked HomeFragment -> CLICK_BACK
+        self._seed_active_run(mode="qr", vm_seen=True)
+        cfg2 = self.env.read_config()
+        cfg2["other_count"] = 1
+        cfg2["adb_relaunch_tried"] = False
+        self.env.write_config(cfg2)
+        self.env.guest_adb_responses["dumpsys activity activities"] = (
+            "topResumedActivity=ActivityRecord{u0 "
+            "ru.deltapay.puntopago.telcell/.activities.main.MainActivity}\n"
+        )
+        self.env.guest_adb_responses[
+            "dumpsys activity ru.deltapay.puntopago.telcell"
+        ] = "HomeFragment{abc}\n"
+        self.assertEqual(
+            self._step(MockBitmap(720, 1600, (120, 140, 160))), "CLICK_BACK"
+        )
+        self.assertEqual(self.env.read_config()["last_state"], "ADB_HOME_FRAG")
 
         # 5. Unauthorized Guest ADB falls back to CLOSE_MODAL / OPEN_RECENTS on reset
         self.env.guest_adb_mode = "unauthorized"

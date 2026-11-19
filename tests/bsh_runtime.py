@@ -336,6 +336,7 @@ class MockAndroidEnv:
         self.now_ms = now_ms
         self.files: dict[str, VirtualFileEntry] = {}
         self.tg_calls: list[dict[str, Any]] = []
+        self.tg_urls: list[str] = []
         self.http_connections: list[dict[str, Any]] = []
         self.next_message_id = 1000
         self.http_status_overrides: dict[str, int] = {}
@@ -404,6 +405,7 @@ class MockAndroidEnv:
     ) -> tuple[int, str]:
         method = url_str.rsplit("/", 1)[-1]
         status = self.http_status_overrides.get(method, 200)
+        self.tg_urls.append(url_str)
         if method in ("sendPhoto", "editMessageMedia", "sendDocument"):
             record = _parse_multipart_form(body, content_type)
             self.tg_calls.append({"method": method, "status": status, **record})
@@ -518,6 +520,9 @@ class _MockFile:
     def length(self) -> int:
         entry = self._env.files.get(self.path)
         return len(entry.data) if entry else 0
+
+    def getUsableSpace(self) -> int:
+        return 19_800_000_000
 
     def lastModified(self) -> int:
         entry = self._env.files.get(self.path)
@@ -1929,7 +1934,24 @@ def substitute_macro_vars(script_text: str, local_vars: dict[str, str]) -> str:
             .replace("\r", "\\r")
         )
 
-    return re.sub(r"\{lv=([A-Za-z0-9_]+)\}", repl, script_text)
+    out = re.sub(r"\{lv=([A-Za-z0-9_]+)\}", repl, script_text)
+    magic_defaults = {
+        "trigger_that_invoked": "Webhook (komobotv2)",
+        "battery": "92",
+        "power": "On",
+        "battery_temp": "28",
+        "wifi_ssid": "TestWiFi",
+    }
+    for mkey, default_val in magic_defaults.items():
+        val = local_vars.get(mkey, default_val)
+        val_esc = (
+            val.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        )
+        out = out.replace("{" + mkey + "}", val_esc)
+    return out
 
 
 def compile_bsh_to_python(script_text: str, local_vars: dict[str, str]) -> str:

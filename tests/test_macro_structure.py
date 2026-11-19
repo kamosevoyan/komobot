@@ -64,10 +64,13 @@ class TestMacroStructure(unittest.TestCase):
         self.assertEqual(self.macro["m_name"], "Komobot Controller")
         self.assertTrue(self.macro["m_enabled"])
         triggers = self.macro["m_triggerList"]
-        self.assertEqual(len(triggers), 1)
+        self.assertEqual(len(triggers), 2)
         self.assertEqual(triggers[0]["m_classType"], "WebHookTrigger")
         self.assertEqual(triggers[0]["identifier"], "komobotv2")
         self.assertEqual(triggers[0]["saveBodyVariableName"], "webhook_body")
+        self.assertEqual(triggers[1]["m_classType"], "WebHookTrigger")
+        self.assertEqual(triggers[1]["identifier"], "komobotv2_admin")
+        self.assertEqual(triggers[1]["saveBodyVariableName"], "admin_webhook_body")
 
     def test_unique_negative_siguids_and_defined_local_vars(self) -> None:
         seen_ids: set[int] = set()
@@ -80,10 +83,13 @@ class TestMacroStructure(unittest.TestCase):
 
         declared_vars = {v["m_name"] for v in self.macro["localVariables"]}
         expected_vars = {
+            "admin_bot_token",
             "admin_id",
+            "admin_webhook_body",
             "app_name",
             "app_pin",
             "bot_action",
+            "bot_role",
             "bot_token",
             "callback_data",
             "callback_id",
@@ -274,7 +280,7 @@ class TestMacroStructure(unittest.TestCase):
 
     def test_stage1_webhook_regex_extractors(self) -> None:
         extractors: dict[str, tuple[str, str]] = {}
-        for action in self.actions[:9]:
+        for action in self.actions[6:15]:
             self.assertEqual(action["m_classType"], "TextManipulationAction")
             suffix = action["m_text"].split("{lv=webhook_body}", 1)[1]
             regex = action["m_textManipulation"]["params"][0]

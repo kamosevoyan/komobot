@@ -28,12 +28,16 @@ def _run_router(
     sender_name: str = "",
     sender_username: str = "",
     forward_user_id: str = "0",
+    admin_bot_token: str = "",
+    bot_role: str = "public",
 ) -> str:
     return run_bsh_script(
         ROUTER_SCRIPT,
         env,
         {
             "bot_token": "test-token",
+            "admin_bot_token": admin_bot_token,
+            "bot_role": bot_role,
             "app_name": "ru.deltapay.puntopago.telcell",
             "admin_id": admin_id,
             "chat_id": chat_id,
@@ -49,8 +53,12 @@ def _run_router(
     )
 
 
-def _run_init_status(env: MockAndroidEnv) -> str:
-    return run_bsh_script(INIT_STATUS_SCRIPT, env, {"bot_token": "test-token"})
+def _run_init_status(env: MockAndroidEnv, admin_bot_token: str = "") -> str:
+    return run_bsh_script(
+        INIT_STATUS_SCRIPT,
+        env,
+        {"bot_token": "test-token", "admin_bot_token": admin_bot_token},
+    )
 
 
 def _dispatch_qr(
@@ -1454,6 +1462,147 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             "IGNORE",
         )
         self.assertIn("already paired", self.env.tg_calls[0]["payload"]["text"])
+
+    def test_separate_admin_bot_routing_vmhealth_and_restart_vm(self) -> None:
+        self.env.guest_adb_mode = "ok"
+        _run_router(
+            self.env,
+            ADMIN_ID,
+            "",
+            update_id="0",
+            callback_id="cb-pair-init",
+            callback_data="adm:adbpair",
+            callback_msg_id="699",
+            admin_bot_token="admin-tok",
+            bot_role="admin",
+        )
+        self.env.tg_calls.clear()
+        self.env.guest_adb_responses["dumpsys activity activities"] = (
+            "topResumedActivity=ActivityRecord{MainActivity}\n"
+            "===PID===\n4321\n===FPS===\nstopped\n===UP===\n1234.5\n"
+        )
+
+        # 1. Public bot stays QR-only even for admin when admin_bot_token is configured
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "/start",
+                update_id="1001",
+                admin_bot_token="admin-tok",
+                bot_role="public",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(self.env.read_config()["last_update_id"], 1001)
+        self.assertIn(
+            "Press the button below", self.env.tg_calls[-1]["payload"]["text"]
+        )
+        self.assertEqual(
+            self.env.tg_urls[-1].split("/bot")[1].split("/")[0], "test-token"
+        )
+
+        # 2. Admin bot uses its own update_id counter (independent of public bot)
+        self.env.tg_calls.clear()
+        self.env.tg_urls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "/start",
+                update_id="50",
+                admin_bot_token="admin-tok",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(self.env.read_config()["last_update_id_admin"], 50)
+        self.assertEqual(self.env.read_config()["last_update_id"], 1001)
+        self.assertIn("Admin Control Ready", self.env.tg_calls[-1]["payload"]["text"])
+        kb_flat = [
+            btn
+            for row in self.env.tg_calls[-1]["payload"]["reply_markup"]["keyboard"]
+            for btn in row
+        ]
+        self.assertIn("🧹 Reset VM App", kb_flat)
+        self.assertIn("🔁 Restart VM", kb_flat)
+        self.assertNotIn("📸 Take QR Screenshot", kb_flat)
+        self.assertEqual(
+            self.env.tg_urls[-1].split("/bot")[1].split("/")[0], "admin-tok"
+        )
+
+        # 3. Non-admin on Admin Bot is rejected and alerts admin via admin-tok
+        self.env.tg_calls.clear()
+        self.env.tg_urls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                "/dashboard",
+                update_id="51",
+                admin_bot_token="admin-tok",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        self.assertIn("Unauthorized", self.env.tg_calls[0]["payload"]["text"])
+        self.assertIn(
+            "Unauthorized Admin Bot Access", self.env.tg_calls[1]["payload"]["text"]
+        )
+        self.assertEqual(
+            self.env.tg_urls[1].split("/bot")[1].split("/")[0], "admin-tok"
+        )
+
+        # 4. VM Health tab (adm:vmhealth) reports live guest telemetry
+        self.env.tg_calls.clear()
+        self.env.tg_urls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="52",
+                callback_id="cb-vh",
+                callback_data="adm:vmhealth",
+                callback_msg_id="700",
+                admin_bot_token="admin-tok",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        vh_txt = self.env.tg_calls[1]["payload"]["text"]
+        self.assertIn("System & VM Health", vh_txt)
+        self.assertIn("92%", vh_txt)
+        self.assertIn("TestWiFi", vh_txt)
+        self.assertIn("4321", vh_txt)
+        self.assertIn("stopped", vh_txt)
+
+        # 5. Restart VM sets capture_mode="restart_vm" & active_reply_bot="admin"
+        self.env.tg_calls.clear()
+        self.env.tg_urls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "🔁 Restart VM",
+                update_id="53",
+                admin_bot_token="admin-tok",
+                bot_role="admin",
+            ),
+            "RUN",
+        )
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["capture_mode"], "restart_vm")
+        self.assertEqual(cfg["active_reply_bot"], "admin")
+        self.assertEqual(
+            _run_init_status(self.env, admin_bot_token="admin-tok"), "SENT"
+        )
+        self.assertIn(
+            "Restarting inner Android VM", self.env.tg_calls[-1]["payload"]["text"]
+        )
+        self.assertEqual(
+            self.env.tg_urls[-1].split("/bot")[1].split("/")[0], "admin-tok"
+        )
 
 
 if __name__ == "__main__":

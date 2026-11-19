@@ -8,8 +8,10 @@ Once deployed via ADB, there is **no PC, Docker container, or external backend s
 
 ## Key Capabilities & Architectural Design
 
-* **Standalone On-Device Execution:** Generated via [`generate_macro.py`](generate_macro.py) (`211` MacroDroid actions, `5` BeanShell `JavaAction` scripts) and deployed over ADB with [`deploy_macro.sh`](deploy_macro.sh). All runtime state lives in `/storage/emulated/0/Download/komobot_config.json`.
-* **Hybrid Host Pixels + Pure-Java Guest ADB (`127.0.0.1:10001`):** Keeps the fast `3`-step host pixel warm QR path (`0` ADB socket overhead) while adding an in-process 2048-bit RSA + ADB TCP client (`/storage/emulated/0/Download/komobot_adb_key.{pk8,pub}`) inside MacroDroid BeanShell for 1-tap Admin pairing (`adm:adbpair`), `<0.6s` `am force-stop && am start` resets (`ADB_FORCE_RESTART`), autonomous post-cold-boot `vendor.fps_hal` stop, and `dumpsys activity` Fragment/Launcher stall recovery (`tryAdbRecoverState`), failing closed to pure pixel navigation whenever Guest ADB is offline or unpaired.
+* **Standalone On-Device Execution:** Generated via [`generate_macro.py`](generate_macro.py) (`226` MacroDroid actions, `5` BeanShell `JavaAction` scripts) and deployed over ADB with [`deploy_macro.sh`](deploy_macro.sh). All runtime state lives in `/storage/emulated/0/Download/komobot_config.json`.
+* **Optional Separate Admin Bot (`ADMIN_BOT_TOKEN`):** Supports either a single bot or two dedicated bots via dual MacroDroid `WebHookTrigger`s (`komobotv2` saving into `{lv=webhook_body}` and `komobotv2_admin` saving into `{lv=admin_webhook_body}` $\rightarrow$ `{lv=bot_role}`). When `ADMIN_BOT_TOKEN` is set in `.env`, the public bot stays strictly QR-only (even for `admin_id`), the admin bot rejects non-admins immediately with its own independent `last_update_id_admin` counter, and all security/failure alerts route directly to the admin bot.
+* **Hybrid Host Pixels + Pure-Java Guest ADB (`127.0.0.1:10001`):** Keeps the fast `3`-step host pixel warm QR path (`0` ADB socket overhead) while adding an in-process 2048-bit RSA + ADB TCP client (`/storage/emulated/0/Download/komobot_adb_key.{pk8,pub}`) inside MacroDroid BeanShell for 1-tap Admin pairing (`adm:adbpair`), live outer-host (battery %, charging, temp, Wi-Fi, free storage) + inner-guest telemetry (`🩺 System & VM Health`, `adm:vmhealth`), `<0.6s` `am force-stop && am start` resets (`ADB_FORCE_RESTART`), cold-boot Guest ADB app launch (`ADB_LAUNCH_APP`) + batched `vendor.fps_hal` stop / zero-animation / infinite-screen-timeout tuning, and actionable `dumpsys activity` Fragment/Launcher stall recovery (`tryAdbRecoverState`), failing closed to pure pixel navigation whenever Guest ADB is offline or unpaired.
+* **Two-Tier Reset Controls (`🧹 Reset VM App` vs. `🔁 Restart VM`):** Keeps `🧹 Reset VM App` (`capture_mode = "reset"`) dedicated to fast-restarting Telcell Wallet inside the running VM, and adds `🔁 Restart VM` (`/restartvm`, `adm:restart_vm` $\rightarrow$ `capture_mode = "restart_vm"`) to return to Virtual Master's launcher (`LAUNCH_VM_LAUNCHER`), unconditionally tap **Shutdown VM** $\rightarrow$ **Confirm** (`CLICK_VM_SHUTDOWN`), cold-boot the inner Android OS, re-apply Guest ADB tuning, and park Telcell back on `TICKET_LIST`.
 * **`FLAG_SECURE` Bypass & Zero-Flash Direct PNG Capture:** Financial apps block `adb screencap` and native screenshots when run directly on the host OS. Running the target app inside **Virtual Master** renders the guest OS inside a Virtual Master host surface, letting MacroDroid's host-level `TakeScreenshotAction` (`uiOption: 1`, `screenshotFormat: 1`) capture every screen directly to `/storage/emulated/0/komobot_ss/frame.png` without SystemUI screenshot animations/flashes or MediaStore thumbnail delays.
 * **Serverless Telegram Webhook & In-Place One-Tap Refresh:** Telegram Bot API `message` and inline button `callback_query` updates arrive via a MacroDroid `WebHookTrigger` (`identifier: "komobotv2"`, body stored in `{lv=webhook_body}`). Every delivered QR photo includes a local capture timestamp and ~30s validity hint (`"🎫 QR Code • HH:MM:SS (valid ~30s)"`) plus an inline `"🔄 Refresh QR"` button (`callback_data: "/qr"`). Tapping `"🔄 Refresh QR"` refreshes that photo message **in-place** without adding new chat messages: Stage 3 replaces the button with an inline progress bar (`editMessageReplyMarkup`, `callback_data: "noop"`), Stage 4 updates the bar percentage, and completion atomically swaps the photo, caption timestamp, and `"🔄 Refresh QR"` button via `editMessageMedia` (falling back to `sendPhoto` on HTTP `4xx`, and retrying `sendPhoto` up to `8` times over `14s` alternating PNG/JPEG on HTTP `5xx`).
 * **Interactive Admin Dashboard & Persistent Audit Log:** Admins can manage users, toggle `public_access`, monitor/pair Guest ADB (`adm:adbpair`), browse per-user today/all-time/average latency metrics, inspect/export `/storage/emulated/0/Download/komobot_events.log` (`512 KB` rotated to `.prev.log`), and reset usage stats from a single in-place inline `/dashboard` card (`adm:*`). Any unauthorized attempt, locked-bot block, crash-expired lease recovery, timeout, or upload HTTP failure logs structured diagnostics and alerts `admin_id`.
@@ -21,19 +23,19 @@ Once deployed via ADB, there is **no PC, Docker container, or external backend s
 
 ## Full Pipeline Architecture
 
-The generated macro (**Komobot Controller**, `211` actions) processes every incoming Telegram update through six stages (reusing HTTP/1.1 Keep-Alive TLS connections across Telegram API calls):
+The generated macro (**Komobot Controller**, `226` actions) processes every incoming Telegram update through six stages (reusing HTTP/1.1 Keep-Alive TLS connections across Telegram API calls):
 
 ```mermaid
 flowchart TD
-    TG["Telegram Bot Webhook -> MacroDroid Trigger (komobotv2)"] --> S1
-    S1["Stage 1: 9 Extractors (update_id, chat_id, msg_text, callback_*, sender_name/username, forward_user_id)"] --> S2
-    S2["Stage 2: JavaAction #1 Router, Auth, Admin Dashboard & Queue Manager (komobot_config.json + events.log)"]
+    TG["Telegram Webhooks -> MacroDroid Triggers (komobotv2 -> webhook_body | komobotv2_admin -> admin_webhook_body)"] --> S1
+    S1["Stage 1: Trigger Role Router (bot_role) + 9 Extractors (update_id, chat_id, msg_text, callback_*, sender_*, forward_user_id)"] --> S2
+    S2["Stage 2: JavaAction #1 Router, Split-Bot Auth, Per-Bot update_id, Admin Dashboard (Host+VM) & Queue Manager"]
 
-    S2 -->|"Dup uid / noop / unauthorized / locked"| END1["Reply / Toast + Record Stats & events.log + Admin Alert (1-tap adm:addid)"]
-    S2 -->|"Admin Dashboard (/dashboard, adm:*)"| ADM["In-Place Card Edit / Export Log (sendDocument) / Add or Rm User / Toggle Public"]
+    S2 -->|"Dup uid / noop / unauthorized / locked"| END1["Reply / Toast + Record Stats & events.log + Admin Alert (alertBotToken)"]
+    S2 -->|"Admin Dashboard (/dashboard, adm:*)"| ADM["In-Place Card Edit / Export Log / Users / Toggle / System & VM Health (adm:vmhealth)"]
     ADM -->|"adm:adbpair"| PAIR["Generate RSA-2048 Keys (.pk8/.pub) -> Connect 127.0.0.1:10001 -> AUTH_RSAPUBLICKEY + Log ADB_PAIR_SENT"]
-    S2 -->|"Live Worker Reset (coop preempt) / QUEUE"| END2["Preempt In-Place or Append cfg.queue (+30s lease) + Ack/Edit Status"]
-    S2 -->|"RUN (lease claimed or expired crash lease recovered)"| S3
+    S2 -->|"Live Worker Reset/Restart (coop preempt) / QUEUE"| END2["Preempt In-Place or Append cfg.queue (+30s lease) + Ack/Edit Status"]
+    S2 -->|"RUN (qr / reset / restart_vm)"| S3
 
     S3["Stage 3: Screen On + JavaAction #2 Initial Status (startup barrier + ack callback + crash/preempt notices + 550ms settle)"] --> S4
     S4["Stage 4: Vision State Loop (Repeat up to 130x; 95-step cap/request)"]
@@ -43,7 +45,9 @@ flowchart TD
 
     VA -->|"Worker superseded / step_count >= 95"| ABORT["ABORT_PREEMPTED / ABORT_TIMEOUT -> BreakLoop"]
     VA -->|"0. ANR Bottom Sheet (anr_count < 4)"| ANR["ANR_DIALOG -> DISMISS_ANR: Tap Wait (360, 1412) + Log ANR_DIALOG_DISMISSED"]
-    VA -->|"VM_LAUNCHER / VM_POPUP / VM_HOME (+ cold fps_hal stop)"| ACT1["Click Enter (627, 250) / Dismiss Menu / Tap Telcell Icon"]
+    VA -->|"restart_vm Stage 0 (not on VM_LAUNCHER)"| RVM0["LAUNCH_VM_LAUNCHER (m_startNew=true) -> Return to Virtual Master MainActivity"]
+    VA -->|"restart_vm Stage 0 (on VM_LAUNCHER)"| RVM1["CLICK_VM_SHUTDOWN: Tap Shutdown VM (75, 272) -> Confirm (542, 884) -> Cold Boot"]
+    VA -->|"VM_LAUNCHER / VM_POPUP / VM_HOME (+ cold ADB init)"| ACT1["Click Enter (627, 250) / Dismiss Menu / ADB_LAUNCH_APP (fallback: LAUNCH_1/2)"]
     VA -->|"Host/non-VM OTHER (step 2, !vm_seen & !vm_launched)"| LVM["LAUNCH_VM -> Launch Virtual Master"]
     VA -->|"Reset Stage 0 (VM Home / Telcell UI, !vm_booting)"| RSTGATE{"Guest ADB paired on 127.0.0.1:10001?"}
     RSTGATE -->|"Yes"| ADBRST["ADB_FORCE_RESTART: am force-stop & am start ActivationActivity + stop vendor.fps_hal -> reset_stage=2 (WAIT 900ms)"]
@@ -52,13 +56,15 @@ flowchart TD
     VA -->|"DASHBOARD_LOW / DASHBOARD_HIGH (3-6 tick settle + DASH_OPENING)"| TR["Tap Услуги -> Транспорт"]
     VA -->|"BUY_TICKET_TAB"| TAB["Tap Доступно Tab (277, 200)"]
     VA -->|"TICKET_LIST (mode == qr, debounced + 6s QR_OPENING grace)"| ROW["Tap Ticket Row (360, 400; 520ms settle)"]
-    VA -->|"TICKET_LIST (mode == reset & queue empty)"| RST["Log RESET_DONE, Set RESET, busy_until=0 -> BreakLoop (parked on Ticket List)"]
-    VA -->|"TICKET_LIST (mode == reset & queue non-empty)"| RSTQ["Log RESET_DONE + Notify Admin + Pop User -> CLICK_TICKET_ROW"]
+    VA -->|"TICKET_LIST (mode == reset/restart_vm & queue empty)"| RST["Log RESET_DONE / VM_RESTART_DONE, Set RESET, busy_until=0 -> BreakLoop (parked on Ticket List)"]
+    VA -->|"TICKET_LIST (mode == reset/restart_vm & queue non-empty)"| RSTQ["Log Done + Notify Admin + Pop Public User -> CLICK_TICKET_ROW"]
     VA -->|"STALE_QR (step 1) / Reset QR Modal"| CLOSE["Close Modal (626, 121)"]
-    VA -->|"In-VM OTHER (other 2-3) / Loading Stall (maxWaits)"| ADBREC["Guest ADB dumpsys activity -> ADB_RELAUNCH or Frag Trace + Save komobot_other_frame.png (other 3)"]
+    VA -->|"In-VM OTHER (other 2-3) / Loading Stall (maxWaits)"| ADBREC["Guest ADB dumpsys activity -> ADB_RELAUNCH / Actionable Frag Recovery + Save komobot_other_frame.png (other 3)"]
     VA -->|"Loading / WHITE_LOADING / OTHER / VM_RECENTS"| REC["Tuned Wait (180ms / 500ms vm_booting) / Back (151, 1553) / VM Home (360, 1553)"]
 
     ANR --> POST["JavaAction #4 Overlapped Delete/Edit Status + Post-Tap Settle (80/180/450-1100ms, 900ms ADB WAIT)"]
+    RVM0 --> POST
+    RVM1 --> POST
     ACT1 --> POST
     LVM --> POST
     ADBRST --> POST
@@ -73,12 +79,12 @@ flowchart TD
     REC --> POST
     POST --> S4
 
-    VA -->|"QR Valid (mode == qr)"| CROP["Crop [130,445]..[590,905] & editMessageMedia / sendPhoto (+ up to 8x PNG/JPEG retry over 14s on 5xx)"]
+    VA -->|"QR Valid (mode == qr)"| CROP["Crop [130,445]..[590,905] & editMessageMedia / sendPhoto (+ up to 8x 6s PNG/JPEG retry over 14s on 5xx)"]
     CROP -->|"Queue non-empty or coop reset pending"| POP["Pop Next User (NEXT_IN_QUEUE, defer delete to PostStep) or Close Modal"]
     POP --> POST
     CROP -->|"Queue empty"| DONE["Cleanup Status + Log QR_SENT or QR_FAIL_UPLOAD/Admin Alert, Set busy_until=0 -> Close (626,121) + 250ms + BreakLoop"]
 
-    DONE --> S5["Stage 5: JavaAction #5 Timeout/Guard -> Log RESET_DONE or QR_FAIL_TIMEOUT + Admin Alert -> screen_action"]
+    DONE --> S5["Stage 5: JavaAction #5 Timeout/Guard -> Log RESET_DONE / VM_RESTART_DONE or QR_FAIL_TIMEOUT + Admin Alert -> screen_action"]
     RST --> S5
     ABORT --> S5
     S4 -->|"130 iterations exhausted"| S5

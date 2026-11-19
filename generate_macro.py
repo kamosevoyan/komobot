@@ -228,12 +228,14 @@ def make_screen_on(sg: SiguidGen, screen_off: bool) -> dict:
     }
 
 
-def make_launch_app(sg: SiguidGen, app_name: str, package_name: str) -> dict:
+def make_launch_app(
+    sg: SiguidGen, app_name: str, package_name: str, *, start_new: bool = False
+) -> dict:
     return {
         "m_applicationName": app_name,
         "m_excludeFromRecents": False,
         "m_packageToLaunch": package_name,
-        "m_startNew": False,
+        "m_startNew": start_new,
         "m_userSerial": -1,
         "m_workProfile": False,
         "option": 0,
@@ -408,10 +410,11 @@ _BSH_FRAME_HELPER = f"""void deletePrivateFrames() {{
     }}
 }}"""
 
-_BSH_TG_HTTP_HELPERS = """JSONObject tgPostRaw(String method, JSONObject payload, int timeoutMs) {
+_BSH_TG_HTTP_HELPERS = """JSONObject tgPostWithToken(String tok, String method, JSONObject payload, int timeoutMs) {
+    if (tok == null || tok.length() == 0) return new JSONObject();
     HttpURLConnection conn = null;
     try {
-        URL url = new URL("https://api.telegram.org/bot" + botToken + "/" + method);
+        URL url = new URL("https://api.telegram.org/bot" + tok + "/" + method);
         conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setConnectTimeout(timeoutMs);
@@ -439,6 +442,10 @@ _BSH_TG_HTTP_HELPERS = """JSONObject tgPostRaw(String method, JSONObject payload
         }
     }
     return new JSONObject();
+}
+
+JSONObject tgPostRaw(String method, JSONObject payload, int timeoutMs) {
+    return tgPostWithToken(botToken, method, payload, timeoutMs);
 }
 
 JSONObject tgPost(String method, JSONObject payload, int timeoutMs) {
@@ -528,7 +535,7 @@ void tgJson(String method, JSONObject payload) {
     tgPost(method, payload, 5000);
 }
 
-JSONObject sendMsg(long cid, String text, JSONObject markup) {
+JSONObject sendMsgWithToken(String tok, long cid, String text, JSONObject markup) {
     try {
         JSONObject body = new JSONObject();
         body.put("chat_id", cid);
@@ -536,13 +543,23 @@ JSONObject sendMsg(long cid, String text, JSONObject markup) {
         if (markup != null) {
             body.put("reply_markup", markup);
         }
-        return tgPost("sendMessage", body, 6000);
+        return tgPostWithToken(tok, "sendMessage", body, 6000);
     } catch (Exception e) {
         return new JSONObject();
     }
 }
 
-void editMsg(long cid, long mid, String text, JSONObject markup) {
+JSONObject sendMsg(long cid, String text, JSONObject markup) {
+    return sendMsgWithToken(botToken, cid, text, markup);
+}
+
+JSONObject sendAdminAlert(long adminCid, String text, JSONObject markup) {
+    if (adminCid <= 0L || text == null || text.length() == 0) return new JSONObject();
+    String tok = (alertBotToken != null && alertBotToken.length() > 0) ? alertBotToken : botToken;
+    return sendMsgWithToken(tok, adminCid, text, markup);
+}
+
+void editMsgWithToken(String tok, long cid, long mid, String text, JSONObject markup) {
     if (cid <= 0L || mid <= 0L || text == null || text.length() == 0) return;
     try {
         JSONObject payload = new JSONObject();
@@ -552,9 +569,13 @@ void editMsg(long cid, long mid, String text, JSONObject markup) {
         if (markup != null) {
             payload.put("reply_markup", markup);
         }
-        tgPost("editMessageText", payload, 5000);
+        tgPostWithToken(tok, "editMessageText", payload, 5000);
     } catch (Exception e) {
     }
+}
+
+void editMsg(long cid, long mid, String text, JSONObject markup) {
+    editMsgWithToken(botToken, cid, mid, text, markup);
 }
 
 void updateStatus(long cid, long mid, String text) {
@@ -602,31 +623,40 @@ JSONObject makeInlineButtonMarkup(String btnText, String cbData) {
     return markup;
 }
 
-void editButton(long cid, long mid, String btnText, String cbData) {
+void editButtonWithToken(String tok, long cid, long mid, String btnText, String cbData) {
     if (cid <= 0L || mid <= 0L || btnText == null || btnText.length() == 0) return;
     try {
         JSONObject payload = new JSONObject();
         payload.put("chat_id", cid);
         payload.put("message_id", mid);
         payload.put("reply_markup", makeInlineButtonMarkup(btnText, cbData));
-        tgPost("editMessageReplyMarkup", payload, 5000);
+        tgPostWithToken(tok, "editMessageReplyMarkup", payload, 5000);
     } catch (Exception e) {
     }
 }
 
-void notifyTargetFailure(long cid, long mid, boolean isMedia, String textMsg, String retryBtnText, boolean sendIfMissing) {
+void editButton(long cid, long mid, String btnText, String cbData) {
+    editButtonWithToken(botToken, cid, mid, btnText, cbData);
+}
+
+void notifyTargetFailureWithToken(String tok, long cid, long mid, boolean isMedia, String textMsg, String retryBtnText, boolean sendIfMissing) {
     if (cid <= 0L) return;
     if (isMedia && mid > 0L) {
-        editButton(cid, mid, retryBtnText, "/qr");
+        editButtonWithToken(tok, cid, mid, retryBtnText, "/qr");
     } else if (mid > 0L) {
-        updateStatus(cid, mid, textMsg);
+        editMsgWithToken(tok, cid, mid, textMsg, null);
     } else if (sendIfMissing) {
-        sendMsg(cid, textMsg, null);
+        sendMsgWithToken(tok, cid, textMsg, null);
     }
+}
+
+void notifyTargetFailure(long cid, long mid, boolean isMedia, String textMsg, String retryBtnText, boolean sendIfMissing) {
+    notifyTargetFailureWithToken(botToken, cid, mid, isMedia, textMsg, retryBtnText, sendIfMissing);
 }
 
 void notifyPreemptNotices(JSONArray notices) {
     if (notices == null) return;
+    String tok = (pubBotToken != null && pubBotToken.length() > 0) ? pubBotToken : botToken;
     String cancelMsg = "❌ Request cancelled by VM reset. Please try again.";
     for (int i = 0; i < notices.length(); i++) {
         JSONObject nItem = notices.optJSONObject(i);
@@ -634,7 +664,7 @@ void notifyPreemptNotices(JSONArray notices) {
         long nCid = nItem.optLong("chat_id", 0L);
         long nMid = nItem.optLong("status_message_id", 0L);
         boolean nMedia = nItem.optBoolean("status_is_media", false);
-        notifyTargetFailure(nCid, nMid, nMedia, cancelMsg, "❌ Cancelled • 🔄 Retry", true);
+        notifyTargetFailureWithToken(tok, nCid, nMid, nMedia, cancelMsg, "❌ Cancelled • 🔄 Retry", true);
     }
 }"""
 
@@ -1267,8 +1297,18 @@ import javax.crypto.Cipher;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-String botToken = "{{lv=bot_token}}".trim();
+String pubBotToken = "{{lv=bot_token}}".trim();
+String adminBotToken = "{{lv=admin_bot_token}}".trim();
+String botRole = "{{lv=bot_role}}".trim();
+boolean splitAdminBot = (adminBotToken.length() > 0);
+boolean isAdminBot = splitAdminBot && botRole.equals("admin");
+String botToken = isAdminBot ? adminBotToken : pubBotToken;
+String alertBotToken = splitAdminBot ? adminBotToken : pubBotToken;
 String appName = "{{lv=app_name}}".trim();
+String hostBattery = "{{battery}}".trim();
+String hostPower = "{{power}}".trim();
+String hostBattTemp = "{{battery_temp}}".trim();
+String hostWifiSsid = "{{wifi_ssid}}".trim();
 long defaultAdminId = 0L;
 try {{
     defaultAdminId = Long.parseLong("{{lv=admin_id}}".trim());
@@ -1500,6 +1540,37 @@ JSONArray collectDisplayUserIds(JSONObject cfg, long adminId, boolean removableO
     return ids;
 }}
 
+String formatHostStorageGb() {{
+    try {{
+        long freeB = new File("/storage/emulated/0").getUsableSpace();
+        if (freeB <= 0L) return "";
+        long tenthsGb = (freeB * 10L) / 1073741824L;
+        return (tenthsGb / 10L) + "." + (tenthsGb % 10L) + " GB";
+    }} catch (Exception e) {{
+        return "";
+    }}
+}}
+
+String formatHostSummaryLine() {{
+    StringBuilder h = new StringBuilder();
+    String batt = (hostBattery.length() > 0 && !hostBattery.startsWith("{{")) ? (hostBattery + "%") : "?";
+    boolean chg = hostPower.equalsIgnoreCase("on") || hostPower.equalsIgnoreCase("true") || hostPower.equals("1");
+    h.append(chg ? "🔌 " : "🔋 ").append(batt);
+    if (hostBattTemp.length() > 0 && !hostBattTemp.startsWith("{{")) {{
+        h.append(" • 🌡️ ").append(hostBattTemp).append("°C");
+    }}
+    if (hostWifiSsid.length() > 0 && !hostWifiSsid.startsWith("{{")) {{
+        String ssid = cleanLogText(hostWifiSsid);
+        if (ssid.length() > 20) ssid = ssid.substring(0, 17) + "...";
+        h.append(" • 📶 ").append(ssid);
+    }}
+    String freeGb = formatHostStorageGb();
+    if (freeGb.length() > 0) {{
+        h.append(" • 💾 ").append(freeGb);
+    }}
+    return h.toString();
+}}
+
 JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid, long adminId) {{
     JSONObject out = new JSONObject();
     long now = System.currentTimeMillis();
@@ -1541,6 +1612,63 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
         r1.put(makeBtn("❌ Cancel", "adm:home"));
         rows.put(r1);
         out.put("text", txt);
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    if (tab.equals("restart_vm")) {{
+        String txt = "🔁 Restart Inner Android VM?\\n\\nThis shuts down and cold-boots the Android VM inside Virtual Master, stops vendor.fps_hal, disables guest animations, and reopens Telcell Wallet.\\n\\n(Existing 🧹 Reset VM App only restarts Telcell.)";
+        JSONArray rows = new JSONArray();
+        JSONArray r1 = new JSONArray();
+        r1.put(makeBtn("✅ Confirm Restart VM", "adm:restart_vm_ok"));
+        r1.put(makeBtn("❌ Cancel", "adm:home"));
+        rows.put(r1);
+        out.put("text", txt);
+        out.put("markup", wrapInlineKb(rows));
+        return out;
+    }}
+
+    if (tab.equals("vmhealth")) {{
+        String targetPkg = (appName != null && appName.length() > 0) ? appName : "ru.deltapay.puntopago.telcell";
+        String diagCmd = "dumpsys activity activities | grep -E 'mResumedActivity|topResumed' | head -n 1"
+            + "; echo '===PID==='; pidof " + targetPkg
+            + "; echo '===FPS==='; getprop init.svc.vendor.fps_hal"
+            + "; echo '===UP==='; cut -d' ' -f1 /proc/uptime";
+        JSONObject hRes = guestAdbShell(diagCmd, 1500, false);
+        StringBuilder hsb = new StringBuilder();
+        hsb.append("🩺 System & VM Health\\n\\n");
+        hsb.append("📱 Outer Android (Host)\\n");
+        hsb.append("• ").append(formatHostSummaryLine()).append("\\n\\n");
+        hsb.append("🖥️ Inner Android (Guest VM)\\n");
+        if (!hRes.optBoolean("ok", false)) {{
+            hsb.append("• Guest ADB: ").append(hRes.optString("state", "OFFLINE")).append("\\n");
+            hsb.append("• Detail: Inner VM adbd (127.0.0.1:10001) is offline or unpaired. Enable USB Debugging inside inner Android Settings -> Developer options.");
+        }} else {{
+            String rawOut = hRes.optString("out", "");
+            int pIdx = rawOut.indexOf("===PID===");
+            int fIdx = rawOut.indexOf("===FPS===");
+            int uIdx = rawOut.indexOf("===UP===");
+            String topAct = (pIdx > 0) ? rawOut.substring(0, pIdx).trim() : rawOut.trim();
+            String pidStr = (pIdx >= 0 && fIdx > pIdx) ? rawOut.substring(pIdx + 9, fIdx).trim() : "";
+            String fpsStr = (fIdx >= 0 && uIdx > fIdx) ? rawOut.substring(fIdx + 9, uIdx).trim() : "";
+            String upStr = (uIdx >= 0) ? rawOut.substring(uIdx + 8).trim() : "";
+            if (topAct.length() > 90) topAct = topAct.substring(0, 87) + "...";
+            if (topAct.length() == 0) topAct = "unknown";
+            hsb.append("• Guest ADB: 🟢 Connected\\n");
+            hsb.append("• Telcell PID: ").append(pidStr.length() > 0 ? ("🟢 " + pidStr) : "🔴 Not running").append("\\n");
+            hsb.append("• vendor.fps_hal: ").append(fpsStr.equals("running") ? "⚠️ running" : ("🟢 " + (fpsStr.length() > 0 ? fpsStr : "stopped"))).append("\\n");
+            hsb.append("• Guest Uptime: ").append(upStr.length() > 0 ? (upStr + "s") : "unknown").append("\\n");
+            hsb.append("• Top Activity: ").append(topAct);
+        }}
+        JSONArray rows = new JSONArray();
+        JSONArray r1 = new JSONArray();
+        r1.put(makeBtn("🔄 Refresh", "adm:vmhealth"));
+        r1.put(makeBtn("🔁 Restart VM", "adm:restart_vm"));
+        rows.put(r1);
+        JSONArray r2 = new JSONArray();
+        r2.put(makeBtn("◀️ Dashboard", "adm:home"));
+        rows.put(r2);
+        out.put("text", hsb.toString());
         out.put("markup", wrapInlineKb(rows));
         return out;
     }}
@@ -1704,6 +1832,7 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     sb.append("👑 Komobot Admin Dashboard\\n\\n");
     sb.append("• Access: ").append(pubAccess ? "🟢 ENABLED (Public)" : "🔴 LOCKED (Admin only)").append("\\n");
     sb.append("• Status: ").append(runStatus).append("\\n");
+    sb.append("• Host: ").append(formatHostSummaryLine()).append("\\n");
     sb.append("• Guest ADB: ").append(guestAdbStatusLabel()).append("\\n");
     sb.append("• Users: ").append(userCnt).append(" authorized\\n\\n");
     sb.append("📊 Today (").append(day).append("): ")
@@ -1732,7 +1861,11 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     rows.put(r4);
     JSONArray r5 = new JSONArray();
     r5.put(makeBtn("🔗 Pair Guest ADB", "adm:adbpair"));
+    r5.put(makeBtn("🩺 VM Health", "adm:vmhealth"));
     rows.put(r5);
+    JSONArray r6 = new JSONArray();
+    r6.put(makeBtn("🔁 Restart VM", "adm:restart_vm"));
+    rows.put(r6);
     out.put("text", sb.toString());
     out.put("markup", wrapInlineKb(rows));
     return out;
@@ -1782,6 +1915,8 @@ JSONArray crashedRestoreTargets = null;
 JSONArray coopPreemptNotices = null;
 long coopRunStart = 0L;
 
+String coopRequestedMode = "reset";
+
 // Wait briefly if a new worker is starting Stage 3 or exiting Stage 5 to avoid MacroDroid shared-local-var races
 boolean sawExitWait = false;
 boolean exitClearedCleanly = false;
@@ -1818,13 +1953,14 @@ if (exitClearedCleanly) {{
 
 synchronized (System.class) {{
     JSONObject cfg = loadConfig();
-    long lastUid = cfg.optLong("last_update_id", 0L);
+    String uidKey = isAdminBot ? "last_update_id_admin" : "last_update_id";
+    long lastUid = cfg.optLong(uidKey, 0L);
     if (uid > 0L && uid <= lastUid) {{
         dupUid = true;
     }} else {{
         long now = System.currentTimeMillis();
         if (uid > 0L) {{
-            cfg.put("last_update_id", uid);
+            cfg.put(uidKey, uid);
         }}
         cfg.put("last_chat_id", cid);
         cfg.put("last_msg_text", msgText);
@@ -1848,8 +1984,9 @@ synchronized (System.class) {{
         }}
 
         boolean isAdmin = (cid == adminId);
-        isAdminUser = isAdmin;
-        boolean isAllowed = isAdmin || isAllowedInArray(allowed, cid);
+        boolean canUseAdmin = isAdmin && (!splitAdminBot || isAdminBot);
+        isAdminUser = canUseAdmin;
+        boolean isAllowed = isAdminBot ? isAdmin : (isAdmin || isAllowedInArray(allowed, cid));
 
         // Close abandoned lease stats if previous run expired mid-flight without cleanup
         long busyUntil = cfg.optLong("busy_until", 0L);
@@ -1919,10 +2056,12 @@ synchronized (System.class) {{
             }}
         }}
 
-        String pendAction = isAdmin ? cfg.optString("admin_pending_action", "") : "";
+        String pendAction = canUseAdmin ? cfg.optString("admin_pending_action", "") : "";
         boolean clearsAddPrompt = msgText.equalsIgnoreCase("/qr")
             || msgText.indexOf("Take QR Screenshot") >= 0
             || msgText.indexOf("Reset VM") >= 0
+            || msgText.indexOf("Restart VM") >= 0
+            || msgText.equalsIgnoreCase("/restartvm")
             || msgText.equals("/start")
             || msgText.equals("/dashboard")
             || msgText.equals("/admin")
@@ -1935,40 +2074,48 @@ synchronized (System.class) {{
             || msgText.equals("/logs")
             || msgText.equals("/exportlogs")
             || (callbackId.length() > 0);
-        if (isAdmin && pendAction.length() > 0 && clearsAddPrompt) {{
+        if (canUseAdmin && pendAction.length() > 0 && clearsAddPrompt) {{
             cfg.put("admin_pending_action", "");
             pendAction = "";
         }}
 
         if (!isAllowed) {{
-            applyUsageToConfig(cfg, cid, "unauth", 0L, "UNAUTHORIZED", msgText, now);
+            applyUsageToConfig(cfg, cid, "unauth", 0L, isAdminBot ? "UNAUTHORIZED_ADMIN_BOT" : "UNAUTHORIZED", msgText, now);
             String uDisp = formatUserDisplay(cfg, cid);
             saveConfig(cfg);
             replyText = "⛔ Unauthorized. Your ID: " + cid;
             auditLevel = "WARN";
-            auditEvent = "UNAUTHORIZED";
+            auditEvent = isAdminBot ? "UNAUTHORIZED_ADMIN_BOT" : "UNAUTHORIZED";
             auditUserDisp = uDisp;
             auditDetail = "input=" + msgText;
             if (adminId > 0L) {{
-                adminAlertText = "🚫 Unauthorized Access Attempt\\n• From: " + uDisp + "\\n• Input: " + cleanLogText(msgText) + "\\n• Time: " + tsStr(now);
-                JSONArray r1 = new JSONArray();
-                r1.put(makeBtn("➕ Authorize " + cid, "adm:addid:" + cid));
-                JSONArray rows = new JSONArray();
-                rows.put(r1);
-                adminAlertMarkup = wrapInlineKb(rows);
+                adminAlertText = (isAdminBot ? "🚫 Unauthorized Admin Bot Access" : "🚫 Unauthorized Access Attempt")
+                    + "\\n• From: " + uDisp + "\\n• Input: " + cleanLogText(msgText) + "\\n• Time: " + tsStr(now);
+                if (!isAdminBot) {{
+                    JSONArray r1 = new JSONArray();
+                    r1.put(makeBtn("➕ Authorize " + cid, "adm:addid:" + cid));
+                    JSONArray rows = new JSONArray();
+                    rows.put(r1);
+                    adminAlertMarkup = wrapInlineKb(rows);
+                }}
             }}
-        }} else if (callbackId.length() > 0 && callbackData.startsWith("adm:")) {{
-            if (!isAdmin) {{
-                applyUsageToConfig(cfg, cid, "unauth", 0L, "UNAUTHORIZED_ADMIN_CB", callbackData, now);
-                String uDisp = formatUserDisplay(cfg, cid);
-                saveConfig(cfg);
-                callbackToast = "⛔ Admin only.";
-                auditLevel = "WARN";
-                auditEvent = "UNAUTHORIZED";
-                auditUserDisp = uDisp;
-                auditDetail = "admin_cb=" + callbackData;
-                if (adminId > 0L) {{
-                    adminAlertText = "🚫 Unauthorized Admin Callback\\n• From: " + uDisp + "\\n• Data: " + cleanLogText(callbackData);
+        }} else if (callbackId.length() > 0 && callbackData.startsWith("adm:") && !(canUseAdmin && callbackData.equals("adm:restart_vm_ok"))) {{
+            if (!canUseAdmin) {{
+                if (isAdmin && splitAdminBot && !isAdminBot) {{
+                    saveConfig(cfg);
+                    callbackToast = "ℹ️ Use the Admin Bot for admin controls.";
+                }} else {{
+                    applyUsageToConfig(cfg, cid, "unauth", 0L, "UNAUTHORIZED_ADMIN_CB", callbackData, now);
+                    String uDisp = formatUserDisplay(cfg, cid);
+                    saveConfig(cfg);
+                    callbackToast = "⛔ Admin only.";
+                    auditLevel = "WARN";
+                    auditEvent = "UNAUTHORIZED";
+                    auditUserDisp = uDisp;
+                    auditDetail = "admin_cb=" + callbackData;
+                    if (adminId > 0L) {{
+                        adminAlertText = "🚫 Unauthorized Admin Callback\\n• From: " + uDisp + "\\n• Data: " + cleanLogText(callbackData);
+                    }}
                 }}
             }} else {{
                 String sub = callbackData.substring(4);
@@ -2072,6 +2219,10 @@ synchronized (System.class) {{
                         callbackToast = "🔴 Guest VM offline (" + pState + ")";
                     }}
                     viewTab = "home";
+                }} else if (sub.equals("vmhealth")) {{
+                    viewTab = "vmhealth";
+                }} else if (sub.equals("restart_vm")) {{
+                    viewTab = "restart_vm";
                 }}
                 if (renderCard) {{
                     JSONObject view = renderDashboard(cfg, viewTab, viewPage, viewUid, adminId);
@@ -2081,7 +2232,7 @@ synchronized (System.class) {{
                 }}
                 saveConfig(cfg);
             }}
-        }} else if (isAdmin && pendAction.equals("add_user")) {{
+        }} else if (canUseAdmin && pendAction.equals("add_user")) {{
             if (msgText.equalsIgnoreCase("/cancel")) {{
                 cfg.put("admin_pending_action", "");
                 saveConfig(cfg);
@@ -2133,21 +2284,26 @@ synchronized (System.class) {{
             JSONObject markup = new JSONObject();
             markup.put("resize_keyboard", true);
             JSONArray keyboard = new JSONArray();
-            if (isAdmin) {{
+            if (canUseAdmin) {{
+                if (!splitAdminBot) {{
+                    JSONArray r0 = new JSONArray();
+                    r0.put("📸 Take QR Screenshot");
+                    keyboard.put(r0);
+                }}
                 JSONArray r1 = new JSONArray();
-                r1.put("📸 Take QR Screenshot");
+                r1.put("📊 Admin Dashboard");
+                r1.put("🧹 Reset VM App");
                 JSONArray r2 = new JSONArray();
-                r2.put("📊 Admin Dashboard");
-                r2.put("🧹 Reset VM App");
+                r2.put("🔁 Restart VM");
+                r2.put("👥 List Users");
                 JSONArray r3 = new JSONArray();
-                r3.put("👥 List Users");
                 r3.put("🛑 Toggle Public Access");
                 keyboard.put(r1);
                 keyboard.put(r2);
                 keyboard.put(r3);
                 markup.put("keyboard", keyboard);
                 saveConfig(cfg);
-                replyText = "👑 Admin Control Ready\\nTap 📊 Admin Dashboard or use /dashboard, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle.";
+                replyText = "👑 Admin Control Ready\\nTap 📊 Admin Dashboard or use /dashboard, /restartvm, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle.";
                 replyMarkup = markup;
             }} else {{
                 JSONArray r1 = new JSONArray();
@@ -2158,25 +2314,25 @@ synchronized (System.class) {{
                 replyText = "Welcome! Press the button below to generate a QR code.";
                 replyMarkup = markup;
             }}
-        }} else if (isAdmin && (msgText.equals("/dashboard") || msgText.equals("/admin") || msgText.indexOf("Admin Dashboard") >= 0)) {{
+        }} else if (canUseAdmin && (msgText.equals("/dashboard") || msgText.equals("/admin") || msgText.indexOf("Admin Dashboard") >= 0)) {{
             saveConfig(cfg);
             JSONObject view = renderDashboard(cfg, "home", 0, 0L, adminId);
             replyText = view.optString("text", "");
             replyMarkup = view.optJSONObject("markup");
-        }} else if (isAdmin && (msgText.equals("/usage") || msgText.equals("/listusers") || msgText.indexOf("List Users") >= 0)) {{
+        }} else if (canUseAdmin && (msgText.equals("/usage") || msgText.equals("/listusers") || msgText.indexOf("List Users") >= 0)) {{
             saveConfig(cfg);
             JSONObject view = renderDashboard(cfg, "users", 0, 0L, adminId);
             replyText = view.optString("text", "");
             replyMarkup = view.optJSONObject("markup");
-        }} else if (isAdmin && msgText.equals("/logs")) {{
+        }} else if (canUseAdmin && msgText.equals("/logs")) {{
             saveConfig(cfg);
             JSONObject view = renderDashboard(cfg, "logs", 0, 0L, adminId);
             replyText = view.optString("text", "");
             replyMarkup = view.optJSONObject("markup");
-        }} else if (isAdmin && msgText.equals("/exportlogs")) {{
+        }} else if (canUseAdmin && msgText.equals("/exportlogs")) {{
             saveConfig(cfg);
             exportAuditDoc = true;
-        }} else if (isAdmin && msgText.startsWith("/adduser")) {{
+        }} else if (canUseAdmin && msgText.startsWith("/adduser")) {{
             String arg = msgText.substring(8).trim();
             try {{
                 int spIdx = arg.indexOf(" ");
@@ -2195,7 +2351,7 @@ synchronized (System.class) {{
                 saveConfig(cfg);
                 replyText = "⚠️ Usage: /adduser <telegram_id> [optional name]";
             }}
-        }} else if (isAdmin && msgText.startsWith("/removeuser")) {{
+        }} else if (canUseAdmin && msgText.startsWith("/removeuser")) {{
             String arg = msgText.substring(11).trim();
             try {{
                 long remId = Long.parseLong(arg);
@@ -2220,7 +2376,7 @@ synchronized (System.class) {{
                 saveConfig(cfg);
                 replyText = "⚠️ Usage: /removeuser <telegram_id>";
             }}
-        }} else if (isAdmin && (msgText.equals("/toggle") || msgText.indexOf("Toggle Public Access") >= 0)) {{
+        }} else if (canUseAdmin && (msgText.equals("/toggle") || msgText.indexOf("Toggle Public Access") >= 0)) {{
             boolean pub = !cfg.optBoolean("public_access", true);
             cfg.put("public_access", pub);
             String uDisp = formatUserDisplay(cfg, cid);
@@ -2233,9 +2389,18 @@ synchronized (System.class) {{
         }} else if (callbackId.length() > 0 && callbackData.equals("noop")) {{
             saveConfig(cfg);
             callbackToast = "⏳ Refresh already in progress...";
-        }} else if (msgText.startsWith("/") && !msgText.equalsIgnoreCase("/qr")) {{
+        }} else if (splitAdminBot && isAdminBot && (msgText.equalsIgnoreCase("/qr") || msgText.indexOf("Take QR Screenshot") >= 0)) {{
             saveConfig(cfg);
-            replyText = "ℹ️ Commands: /start, /qr" + (isAdmin ? ", /dashboard, /usage, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle" : "");
+            replyText = "ℹ️ Use the main QR bot for /qr requests.";
+        }} else if (msgText.startsWith("/") && !msgText.equalsIgnoreCase("/qr") && !(canUseAdmin && msgText.equalsIgnoreCase("/restartvm"))) {{
+            saveConfig(cfg);
+            if (splitAdminBot && !isAdminBot) {{
+                replyText = "ℹ️ Commands: /start, /qr";
+            }} else if (splitAdminBot && isAdminBot) {{
+                replyText = "ℹ️ Admin commands: /start, /dashboard, /restartvm, /usage, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle";
+            }} else {{
+                replyText = "ℹ️ Commands: /start, /qr" + (canUseAdmin ? ", /dashboard, /restartvm, /usage, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle" : "");
+            }}
         }} else {{
             boolean pubAccess = cfg.optBoolean("public_access", true);
             if (!pubAccess && !isAdmin) {{
@@ -2254,15 +2419,18 @@ synchronized (System.class) {{
                 busyUntil = cfg.optLong("busy_until", 0L);
                 String lowerMsg = msgText.toLowerCase();
                 String requestedMode = "";
-                if (isAdmin && msgText.indexOf("Reset VM") >= 0) {{
+                if (canUseAdmin && (msgText.indexOf("Restart VM") >= 0 || lowerMsg.equals("/restartvm") || callbackData.equals("adm:restart_vm_ok"))) {{
+                    requestedMode = "restart_vm";
+                }} else if (canUseAdmin && msgText.indexOf("Reset VM") >= 0) {{
                     requestedMode = "reset";
-                }} else if (lowerMsg.equals("/qr") || lowerMsg.equals("qr") || msgText.indexOf("Take QR Screenshot") >= 0 || lowerMsg.indexOf("qr") >= 0 || lowerMsg.indexOf("screenshot") >= 0) {{
+                }} else if ((!splitAdminBot || !isAdminBot) && (lowerMsg.equals("/qr") || lowerMsg.equals("qr") || msgText.indexOf("Take QR Screenshot") >= 0 || lowerMsg.indexOf("qr") >= 0 || lowerMsg.indexOf("screenshot") >= 0)) {{
                     requestedMode = "qr";
                 }}
                 boolean isMediaRefresh = callbackId.length() > 0 && cbMsgId > 0L && requestedMode.equals("qr");
+                boolean isVmMaintenance = requestedMode.equals("reset") || requestedMode.equals("restart_vm");
                 boolean isResetPreempt = (now < busyUntil)
-                    && requestedMode.equals("reset")
-                    && !cfg.optString("capture_mode", "qr").equals("reset");
+                    && isVmMaintenance
+                    && !cfg.optString("capture_mode", "qr").equals(requestedMode);
                 boolean workerActive = cfg.optBoolean("worker_active", false);
                 long heartbeatMs = cfg.optLong("worker_heartbeat_ms", 0L);
                 boolean isLiveWorker = workerActive && heartbeatMs > 0L && (now - heartbeatMs) < 20000L;
@@ -2348,31 +2516,35 @@ synchronized (System.class) {{
                         }}
                         long prevStart = cfg.optLong("run_start_ms", 0L);
                         long runStart = (now > prevStart) ? now : (prevStart + 1L);
-                        long leaseMs = requestedMode.equals("reset") ? 60000L : 45000L;
+                        long leaseMs = requestedMode.equals("restart_vm") ? 90000L : (requestedMode.equals("reset") ? 60000L : 45000L);
                         cfg.put("busy_until", now + leaseMs);
                         cfg.put("active_chat_id", cid);
+                        cfg.put("active_reply_bot", isAdminBot ? "admin" : "public");
                         cfg.put("app_name", appName);
                         cfg.put("capture_mode", requestedMode);
-                        cfg.put("active_trigger", requestedMode.equals("reset") ? "reset" : (isMediaRefresh ? "callback_media" : "cmd"));
+                        cfg.put("active_trigger", requestedMode.equals("restart_vm") ? "restart_vm" : (requestedMode.equals("reset") ? "reset" : (isMediaRefresh ? "callback_media" : "cmd")));
                         cfg.put("active_start_ms", runStart);
                         cfg.put("state_trace", "INIT");
                         cfg.put("queue", new JSONArray());
                         cfg.put("qr_was_closed", false);
                         cfg.put("adb_reset_tried", false);
                         cfg.put("adb_relaunch_tried", false);
+                        cfg.put("adb_launch_tried", false);
                         cfg.put("fps_hal_checked", false);
                         cfg.put("reset_notified", false);
                         cfg.put("reset_stage", 0);
                         cfg.put("reset_kills", 0);
                         cfg.put("reset_recents_checked", false);
                         cfg.put("reset_open_tries", 0);
+                        cfg.put("vm_restart_stage", 0);
+                        cfg.put("vm_launcher_tries", 0);
                         cfg.put("step_count", 0);
                         cfg.put("row_tap_ms", 0L);
                         cfg.put("other_count", 0);
                         cfg.put("white_count", 0);
                         cfg.put("loading_count", 0);
                         cfg.put("last_state", "INIT");
-                        cfg.put("progress_pct", (isAdmin && !isMediaRefresh) ? 0 : 10);
+                        cfg.put("progress_pct", (canUseAdmin && !isMediaRefresh) ? 0 : 10);
                         cfg.put("pending_status_text", "");
                         cfg.put("pending_delete_cid", 0L);
                         cfg.put("pending_delete_mid", 0L);
@@ -2392,10 +2564,11 @@ synchronized (System.class) {{
                             saveConfig(cfg);
                             coopPreemptNotices = displaced;
                             coopRunStart = runStart;
+                            coopRequestedMode = requestedMode;
                             statusStage = "COOP_RESET";
                             actionResult = "IGNORE";
                             auditLevel = "ADMIN";
-                            auditEvent = "RESET_START";
+                            auditEvent = requestedMode.equals("restart_vm") ? "VM_RESTART_START" : "RESET_START";
                             auditUserDisp = formatUserDisplay(cfg, cid);
                             auditDetail = "mode=coop displaced=" + displaced.length();
                         }} else {{
@@ -2452,7 +2625,7 @@ if (crashedAlertText != null && crashedAlertText.length() > 0) {{
         }}
     }}
     if (notifyAdminCid > 0L) {{
-        sendMsg(notifyAdminCid, crashedAlertText, null);
+        sendAdminAlert(notifyAdminCid, crashedAlertText, null);
     }}
 }}
 if (callbackId.length() > 0) {{
@@ -2464,7 +2637,9 @@ if (statusStage.equals("COOP_RESET")) {{
         JSONObject curCfg = loadConfig();
         coopPreemptSummary = recordPreemptedList(curCfg, coopPreemptNotices);
     }}
-    String resetMsgText = "🔄 Force-restarting Telcell Wallet...";
+    String resetMsgText = coopRequestedMode.equals("restart_vm")
+        ? "🔁 Restarting inner Android VM..."
+        : "🔄 Force-restarting Telcell Wallet...";
     if (coopPreemptSummary.length() > 0) {{
         resetMsgText = resetMsgText + "\\n\\nℹ️ Cancelled " + coopPreemptNotices.length() + " pending: " + coopPreemptSummary;
     }}
@@ -2535,7 +2710,7 @@ if (replyText != null) {{
     }}
 }}
 if (adminAlertText != null && notifyAdminCid > 0L && cid != notifyAdminCid) {{
-    sendMsg(notifyAdminCid, adminAlertText, adminAlertMarkup);
+    sendAdminAlert(notifyAdminCid, adminAlertText, adminAlertMarkup);
 }}
 return actionResult;
 """
@@ -2552,7 +2727,10 @@ def build_init_status_script() -> str:
         "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String botToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
+        "String botToken = pubBotToken;\n"
+        "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
         + _BSH_READ_STREAM
         + "\n\n"
@@ -2597,6 +2775,9 @@ synchronized (System.class) {
     claimedRunStart = cfg.optLong("run_start_ms", 0L);
     existingMid = cfg.optLong("status_message_id", 0L);
     captureMode = cfg.optString("capture_mode", "qr");
+    if (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0) {
+        botToken = adminBotToken;
+    }
 }
 if (cid <= 0L || (existingMid > 0L && !mediaInitPending)) {
     if (pendingCbId.length() > 0) {
@@ -2619,11 +2800,13 @@ if (statusIsMedia && existingMid > 0L) {
         answerCallback(pendingCbId, "");
         pendingCbId = "";
     }
-    String initText = captureMode.equals("reset")
-        ? "🔄 Force-restarting Telcell Wallet..."
-        : ((cid == adminId)
-            ? "🔍 Waking phone & checking Virtual Master..."
-            : formatProgress("⏳ Generating QR code...", 10));
+    String initText = captureMode.equals("restart_vm")
+        ? "🔁 Restarting inner Android VM..."
+        : (captureMode.equals("reset")
+            ? "🔄 Force-restarting Telcell Wallet..."
+            : ((cid == adminId && adminBotToken.length() == 0)
+                ? "🔍 Waking phone & checking Virtual Master..."
+                : formatProgress("⏳ Generating QR code...", 10)));
     JSONObject sent = sendMsg(cid, initText, null);
     statusMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
 }
@@ -2663,14 +2846,14 @@ if (statusMsgId <= 0L) {
     String uDisp = formatUserDisplay(latestSnapshot, cid);
     appendAuditLog("FAIL", "INIT_STATUS_ERR", cid, uDisp, "mode=" + captureMode);
     if (adminId > 0L) {
-        sendMsg(adminId, "⚠️ Failed to initialize status message for " + uDisp + " (mode=" + captureMode + ")", null);
+        sendAdminAlert(adminId, "⚠️ Failed to initialize status message for " + uDisp + " (mode=" + captureMode + ")", null);
     }
 }
 if (preemptNotices != null && preemptNotices.length() > 0) {
     String preemptSummary = recordPreemptedList(latestSnapshot, preemptNotices);
     notifyPreemptNotices(preemptNotices);
     if (preemptSummary.length() > 0 && adminId > 0L) {
-        sendMsg(adminId, "ℹ️ VM Reset cancelled " + preemptNotices.length() + " pending request(s): " + preemptSummary, null);
+        sendAdminAlert(adminId, "ℹ️ VM Reset cancelled " + preemptNotices.length() + " pending request(s): " + preemptSummary, null);
     }
 }
 if (crashedNotice != null) {
@@ -2681,14 +2864,15 @@ if (crashedNotice != null) {
     appendAuditLog("FAIL", "QR_FAIL_CRASH_LEASE", cCid, cUser, cDetail);
     JSONArray targets = crashedNotice.optJSONArray("targets");
     if (targets != null) {
+        String pTok = (pubBotToken.length() > 0) ? pubBotToken : botToken;
         for (int ti = 0; ti < targets.length(); ti++) {
             JSONObject t = targets.optJSONObject(ti);
             if (t == null) continue;
-            notifyTargetFailure(t.optLong("chat_id", 0L), t.optLong("status_message_id", 0L), t.optBoolean("status_is_media", false), "❌ Previous request was interrupted. Please try again.", "⚠️ Interrupted • 🔄 Retry", false);
+            notifyTargetFailureWithToken(pTok, t.optLong("chat_id", 0L), t.optLong("status_message_id", 0L), t.optBoolean("status_is_media", false), "❌ Previous request was interrupted. Please try again.", "⚠️ Interrupted • 🔄 Retry", false);
         }
     }
     if (cAlert.length() > 0 && adminId > 0L) {
-        sendMsg(adminId, cAlert, null);
+        sendAdminAlert(adminId, cAlert, null);
     }
 }
 
@@ -2728,7 +2912,10 @@ def build_vision_script() -> str:
         "import javax.crypto.Cipher;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String botToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
+        "String botToken = pubBotToken;\n"
+        "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
         'String appName = "{lv=app_name}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
         + _BSH_READ_STREAM
@@ -2903,6 +3090,9 @@ synchronized (System.class) {{
     cfg.put("worker_heartbeat_ms", System.currentTimeMillis());
 }}
 String mode = cfg.optString("capture_mode", "qr");
+if (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0) {{
+    botToken = adminBotToken;
+}}
 long cid = cfg.optLong("active_chat_id", 0L);
 long adminId = cfg.optLong("admin_id", 0L);
 long statusMsgId = cfg.optLong("status_message_id", 0L);
@@ -3038,6 +3228,8 @@ try {{
     if (synced != cfg) {{
         cfg = synced;
         mode = cfg.optString("capture_mode", "qr");
+        botToken = (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0)
+            ? adminBotToken : pubBotToken;
         cid = cfg.optLong("active_chat_id", 0L);
         adminId = cfg.optLong("admin_id", 0L);
         stepCount = cfg.optInt("step_count", 1);
@@ -3126,8 +3318,39 @@ try {{
     void maybeStopGuestFpsHal(JSONObject cfg, boolean wasVmBooting) {{
         if (wasVmBooting && !cfg.optBoolean("fps_hal_checked", false)) {{
             cfg.put("fps_hal_checked", true);
-            guestAdbShell("setprop ctl.stop vendor.fps_hal", 700, false);
+            guestAdbShell(
+                "setprop ctl.stop vendor.fps_hal"
+                + "; settings put global window_animation_scale 0"
+                + "; settings put global transition_animation_scale 0"
+                + "; settings put global animator_duration_scale 0"
+                + "; settings put system screen_off_timeout 2147483647",
+                1200, false);
         }}
+    }}
+    String tryAdbLaunchApp(JSONObject cfg, long cid, long adminId, String mode) throws Exception {{
+        if (cfg.optBoolean("adb_launch_tried", false)) return null;
+        cfg.put("adb_launch_tried", true);
+        String targetPkg = (appName != null && appName.length() > 0) ? appName : "ru.deltapay.puntopago.telcell";
+        String cmd = "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "
+            + targetPkg + "/.activities.activation.ActivationActivity"
+            + " || monkey -p " + targetPkg + " -c android.intent.category.LAUNCHER 1";
+        JSONObject adbRes = guestAdbShell(cmd, 1500, false);
+        if (!adbRes.optBoolean("ok", false)) return null;
+        if (mode.equals("reset")) {{
+            cfg.put("reset_stage", 2);
+        }} else if (mode.equals("restart_vm")) {{
+            cfg.put("vm_restart_stage", 2);
+        }}
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        setVisionState(cfg, "ADB_LAUNCH_APP");
+        String launchLabel = mode.equals("reset")
+            ? "🚀 Reopening Telcell Wallet (ADB)..."
+            : (mode.equals("restart_vm") ? "🚀 Launching Telcell Wallet (ADB)..." : "🚀 Launching Telcell Wallet...");
+        String stepText = prepareStepStatus(cfg, cid, adminId, launchLabel, mode.equals("reset") ? 35 : 30);
+        queueStepStatus(cfg, stepText);
+        saveConfig(cfg);
+        return "WAIT";
     }}
     String tryAdbFastReset(JSONObject cfg, long cid, long adminId) throws Exception {{
         if (cfg.optBoolean("adb_reset_tried", false)) return null;
@@ -3181,9 +3404,25 @@ try {{
                 900, false);
             if (fragRes.optBoolean("ok", false)) {{
                 String fOut = fragRes.optString("out", "");
-                if (fOut.indexOf("TransportTicketDetailsFragment") >= 0) setVisionState(cfg, "ADB_QR_FRAG");
-                else if (fOut.indexOf("TransportTicketsContainerFragment") >= 0) setVisionState(cfg, "ADB_TICKET_FRAG");
-                else if (fOut.indexOf("HomeFragment") >= 0) setVisionState(cfg, "ADB_HOME_FRAG");
+                if (fOut.indexOf("TransportTicketDetailsFragment") >= 0) {{
+                    setVisionState(cfg, "ADB_QR_FRAG");
+                    saveConfig(cfg);
+                    return "WAIT";
+                }} else if (fOut.indexOf("TransportTicketsContainerFragment") >= 0) {{
+                    setVisionState(cfg, "ADB_TICKET_FRAG");
+                    if (cfg.optString("capture_mode", "qr").equals("qr")) {{
+                        cfg.put("other_count", 0);
+                        cfg.put("row_tap_ms", System.currentTimeMillis());
+                        saveConfig(cfg);
+                        return "CLICK_TICKET_ROW";
+                    }}
+                    saveConfig(cfg);
+                }} else if (fOut.indexOf("HomeFragment") >= 0) {{
+                    setVisionState(cfg, "ADB_HOME_FRAG");
+                    cfg.put("other_count", 0);
+                    saveConfig(cfg);
+                    return "CLICK_BACK";
+                }}
             }}
         }}
         return null;
@@ -3284,6 +3523,9 @@ try {{
         cfg.put("anr_count", 0);
     }}
 
+    boolean isRestartVm = mode.equals("restart_vm");
+    int vmRestartStage = cfg.optInt("vm_restart_stage", 0);
+
     // 1. Check VM Launcher vs VM Boot Loading (ignore pure-black pre-wake frames)
     if (isDark(360, 800) && isDark(100, 500) && isDark(360, 350)) {{
         int enterMax = 0;
@@ -3303,8 +3545,21 @@ try {{
             cfg.put("vm_seen", true);
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
+            if (isRestartVm && vmRestartStage == 0) {{
+                cfg.put("vm_restart_stage", 1);
+                cfg.put("fps_hal_checked", false);
+                cfg.put("adb_reset_tried", false);
+                cfg.put("adb_relaunch_tried", false);
+                cfg.put("adb_launch_tried", false);
+                setVisionState(cfg, "VM_SHUTDOWN");
+                String stepText = prepareStepStatus(cfg, cid, adminId, "🔌 Shutting down inner Android VM...", 20);
+                queueStepStatus(cfg, stepText);
+                saveConfig(cfg);
+                return "CLICK_VM_SHUTDOWN";
+            }}
             setVisionState(cfg, "VM_LAUNCHER");
-            String stepText = prepareStepStatus(cfg, cid, adminId, "🖥️ Entering Virtual Master...", 20);
+            String enterLabel = isRestartVm ? "🚀 Starting inner Android VM..." : "🖥️ Entering Virtual Master...";
+            String stepText = prepareStepStatus(cfg, cid, adminId, enterLabel, isRestartVm ? 30 : 20);
             queueStepStatus(cfg, stepText);
             saveConfig(cfg);
             return "CLICK_ENTER";
@@ -3325,6 +3580,19 @@ try {{
         queueStepStatus(cfg, waitText);
         saveConfig(cfg);
         return "WAIT";
+    }}
+
+    // 1b. If restarting the inner VM (stage 0) and not on VM_LAUNCHER, return to Virtual Master launcher first.
+    if (isRestartVm && vmRestartStage == 0) {{
+        int lt = cfg.optInt("vm_launcher_tries", 0) + 1;
+        cfg.put("vm_launcher_tries", lt);
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        setVisionState(cfg, "VM_RETURN_LAUNCHER");
+        String stepText = prepareStepStatus(cfg, cid, adminId, "🖥️ Returning to Virtual Master launcher...", 15);
+        queueStepStatus(cfg, stepText);
+        saveConfig(cfg);
+        return "LAUNCH_VM_LAUNCHER";
     }}
 
     // 2. Check Virtual Master 3x3 Floating Quick Menu Popup
@@ -3410,14 +3678,18 @@ try {{
                 return "OPEN_RECENTS";
             }}
             String prevHomeState = cfg.optString("last_state", "");
-            if (prevHomeState.equals("ADB_FORCE_RESTART") || prevHomeState.equals("ADB_RELAUNCH")) {{
+            if (prevHomeState.equals("ADB_FORCE_RESTART") || prevHomeState.equals("ADB_RELAUNCH") || prevHomeState.equals("ADB_LAUNCH_APP")) {{
                 setVisionState(cfg, (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
                 queueStepStatus(cfg, null);
                 saveConfig(cfg);
                 return "WAIT";
             }}
+            String adbLaunch = tryAdbLaunchApp(cfg, cid, adminId, mode);
+            if (adbLaunch != null) return adbLaunch;
             if (mode.equals("reset")) {{
                 cfg.put("reset_stage", 2);
+            }} else if (isRestartVm) {{
+                cfg.put("vm_restart_stage", 2);
             }}
             setVisionState(cfg, (o1 >= 15) ? "VM_HOME_1" : "VM_HOME_2");
             String launchLabel = mode.equals("reset") ? "🚀 Reopening Telcell Wallet..." : "🚀 Launching Telcell Wallet...";
@@ -3537,7 +3809,7 @@ try {{
                     boolean useJpg = (ri % 2 == 0);
                     upRes = postMultipartRaw("sendPhoto", cid, 0L, extraRetry, "photo",
                         useJpg ? "qr.jpg" : "qr.png", useJpg ? "image/jpeg" : "image/png",
-                        useJpg ? jpgBytes : pngBytes, 15000);
+                        useJpg ? jpgBytes : pngBytes, 6000);
                     code = upRes.optInt("code", -1);
                     lastUploadDesc = upRes.optString("desc", "");
                     uploadRetries = ri + 1;
@@ -3558,6 +3830,7 @@ try {{
                 if (curWStart > 0L && freshWStart > curWStart) {{
                     workerSuperseded = true;
                 }} else if (latestCfg.optString("capture_mode", "qr").equals("reset")
+                    || latestCfg.optString("capture_mode", "qr").equals("restart_vm")
                     || latestCfg.optLong("run_start_ms", 0L) > cfg.optLong("run_start_ms", 0L)) {{
                     latestCfg.put("last_ss_name", latestName);
                     latestCfg.put("last_ss_mtime", latestMtime);
@@ -3647,7 +3920,7 @@ try {{
                 appendAuditLog("FAIL", "QR_FAIL_UPLOAD", cid, formatUserDisplay(cfg, cid),
                     reasonDesc + " retries=" + uploadRetries + " trigger=" + activeTrig + " steps=" + stepCount + " elapsed=" + formatSec(elapsedMs) + " trace=" + finTrace);
                 if (adminId > 0L) {{
-                    sendMsg(adminId,
+                    sendAdminAlert(adminId,
                         buildFailureAlert(cfg, "🚨 QR Upload Failed", cid, activeTrig, reasonDesc, elapsedMs, stepCount, "QR_MODAL", finTrace, snapOther, snapWhite, snapLoad, ""),
                         null);
                 }}
@@ -3741,7 +4014,7 @@ try {{
             saveConfig(cfg);
             return "WAIT";
         }}
-        int minDashHighWaits = mode.equals("reset") ? 6 : 3;
+        int minDashHighWaits = (mode.equals("reset") || isRestartVm) ? 6 : 3;
         if (!useLow && cfg.optInt("loading_count", 0) < minDashHighWaits) {{
             // The HIGH Услуги row is often transient: lazy-loaded promo cards push it down
             // right after the PIN. Wait briefly for the layout to settle before tapping.
@@ -3773,7 +4046,7 @@ try {{
             cfg.put("white_count", 0);
             return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 9, 70, cid, adminId);
         }}
-        if (mode.equals("reset")) {{
+        if (mode.equals("reset") || isRestartVm) {{
             long popNextCid = 0L;
             long popNextMid = 0L;
             boolean hasNext = false;
@@ -3799,6 +4072,7 @@ try {{
                     cfg.put("_pop_queue", true);
                     cfg.put("queue", rem);
                     cfg.put("capture_mode", "qr");
+                    cfg.put("active_reply_bot", "public");
                     cfg.put("active_chat_id", popNextCid);
                     cfg.put("status_message_id", popNextMid);
                     cfg.put("status_is_media", nextIsMedia);
@@ -3810,6 +4084,8 @@ try {{
                     cfg.put("reset_kills", 0);
                     cfg.put("reset_recents_checked", false);
                     cfg.put("reset_open_tries", 0);
+                    cfg.put("vm_restart_stage", 0);
+                    cfg.put("vm_launcher_tries", 0);
                     cfg.put("reset_notified", false);
                     cfg.put("busy_until", nowMs + 45000L);
                     cfg.put("worker_heartbeat_ms", nowMs);
@@ -3831,14 +4107,18 @@ try {{
             long rstNow = System.currentTimeMillis();
             long rstElapsed = (rstStartMs > 0L && rstNow >= rstStartMs) ? (rstNow - rstStartMs) : 0L;
             String rstTrace = cfg.optString("state_trace", "");
-            appendAuditLog("ADMIN", "RESET_DONE", cid, formatUserDisplay(cfg, cid),
+            String doneEvent = isRestartVm ? "VM_RESTART_DONE" : "RESET_DONE";
+            String doneMsg = isRestartVm
+                ? "✅ Inner Android VM restarted — Telcell is ready."
+                : "✅ VM app reset complete — Telcell restarted & ready.";
+            appendAuditLog("ADMIN", doneEvent, cid, formatUserDisplay(cfg, cid),
                 "steps=" + stepCount + " elapsed=" + formatSec(rstElapsed) + " queued_handoff=" + hasNext
                 + (rstTrace.length() > 0 ? (" trace=" + rstTrace) : ""));
             if (hasNext) {{
-                updateStatus(cid, statusMsgId, "✅ VM app reset complete — Telcell restarted & ready.");
+                updateStatus(cid, statusMsgId, doneMsg);
                 return "CLICK_TICKET_ROW";
             }}
-            updateStatus(cid, statusMsgId, "✅ VM app reset complete — Telcell restarted & ready.");
+            updateStatus(cid, statusMsgId, doneMsg);
             synchronized (System.class) {{
                 long nowMs = System.currentTimeMillis();
                 cfg.put("_pop_queue", true);
@@ -3901,7 +4181,7 @@ try {{
         }}
         if (whiteHits >= 34) {{
             cfg.put("loading_count", 0);
-            int maxWhite = (vmBooting || mode.equals("reset")) ? 18 : 7;
+            int maxWhite = (vmBooting || mode.equals("reset") || isRestartVm) ? 18 : 7;
             return handleLoadingWait(cfg, "white_count", "WHITE_LOADING", maxWhite, 40, cid, adminId);
         }}
     }}
@@ -3982,7 +4262,10 @@ def build_post_step_script() -> str:
         "import java.net.URL;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String botToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
+        "String botToken = pubBotToken;\n"
+        "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
         'String stepCmd = "{lv=step_cmd}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
         + _BSH_READ_STREAM
@@ -4003,7 +4286,8 @@ else if (stepCmd.equals("OPEN_RECENTS") || stepCmd.equals("SWIPE_KILL_RECENT")) 
 else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
 else if (stepCmd.equals("CLICK_TRANSPORT_LOW") || stepCmd.equals("CLICK_TRANSPORT_HIGH")) waitMs = 750L;
 else if (stepCmd.equals("ENTER_PIN")) waitMs = 850L;
-else if (stepCmd.equals("CLICK_ENTER") || stepCmd.equals("LAUNCH_VM")) waitMs = 900L;
+else if (stepCmd.equals("CLICK_ENTER") || stepCmd.equals("LAUNCH_VM") || stepCmd.equals("LAUNCH_VM_LAUNCHER")) waitMs = 900L;
+else if (stepCmd.equals("CLICK_VM_SHUTDOWN")) waitMs = 600L;
 else if (stepCmd.equals("CLICK_TICKET_ROW")) waitMs = 520L;
 else if (stepCmd.equals("LAUNCH_1") || stepCmd.equals("LAUNCH_2")) waitMs = 1100L;
 
@@ -4020,10 +4304,14 @@ synchronized (System.class) {
         // The first capture already blocked for the display to unblock.
         waitMs = 80L;
     } else if (stepCmd.equals("WAIT") && (cfg.optString("last_state", "").equals("ADB_FORCE_RESTART")
-        || cfg.optString("last_state", "").equals("ADB_RELAUNCH"))) {
+        || cfg.optString("last_state", "").equals("ADB_RELAUNCH")
+        || cfg.optString("last_state", "").equals("ADB_LAUNCH_APP"))) {
         waitMs = 900L;
     } else if (stepCmd.equals("WAIT") && cfg.optBoolean("vm_booting", false)) {
         waitMs = 500L;
+    }
+    if (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0) {
+        botToken = adminBotToken;
     }
     if (cfg.has("active_chat_id") || cfg.optBoolean("worker_active", false)) {
         cfg.put("worker_heartbeat_ms", System.currentTimeMillis());
@@ -4080,7 +4368,10 @@ def build_timeout_script() -> str:
         "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String botToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
+        "String botToken = pubBotToken;\n"
+        "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n'
         'String stepCmd = "{lv=step_cmd}".trim();\n\n'
         + _BSH_READ_STREAM
@@ -4103,6 +4394,7 @@ long cid = 0L;
 long mid = 0L;
 long activeStartMs = 0L;
 String activeTrigger = "cmd";
+String captureMode = "qr";
 String lastState = "UNKNOWN";
 String stateTrace = "";
 int stepCount = 0;
@@ -4130,6 +4422,10 @@ synchronized (System.class) {
             mid = cfg.optLong("status_message_id", 0L);
             activeStartMs = cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L));
             activeTrigger = cfg.optString("active_trigger", statusIsMedia ? "callback_media" : "cmd");
+            captureMode = cfg.optString("capture_mode", "qr");
+            if (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0) {
+                botToken = adminBotToken;
+            }
             lastState = cfg.optString("last_state", "UNKNOWN");
             stateTrace = cfg.optString("state_trace", "");
             stepCount = cfg.optInt("step_count", 0);
@@ -4192,8 +4488,11 @@ if (notifyCleanup) {
     long nowMs = System.currentTimeMillis();
     long elapsedMs = (activeStartMs > 0L && nowMs >= activeStartMs) ? (nowMs - activeStartMs) : 0L;
     boolean isResetDone = stepCmd.equals("DONE_RESET");
+    boolean isRestartVmMode = captureMode.equals("restart_vm");
     String msg = isResetDone
-        ? "✅ VM app reset complete — Telcell restarted & ready."
+        ? (isRestartVmMode
+            ? "✅ Inner Android VM restarted — Telcell is ready."
+            : "✅ VM app reset complete — Telcell restarted & ready.")
         : (cid == adminId
             ? "❌ Timed out waiting for QR screen (last state: " + lastState + "). Please try again."
             : "❌ Timed out generating QR code. Please try again.");
@@ -4202,7 +4501,7 @@ if (notifyCleanup) {
 
     if (isResetDone) {
         if (cid > 0L) {
-            appendAuditLog("ADMIN", "RESET_DONE", cid, formatUserDisplay(cfgSnap, cid),
+            appendAuditLog("ADMIN", isRestartVmMode ? "VM_RESTART_DONE" : "RESET_DONE", cid, formatUserDisplay(cfgSnap, cid),
                 "steps=" + stepCount + " elapsed=" + formatSec(elapsedMs) + " trace=" + stateTrace);
         }
     } else {
@@ -4265,7 +4564,7 @@ if (notifyCleanup) {
             loadingCount,
             failedQueueSummary
         );
-        sendMsg(adminId, adminAlert, null);
+        sendAdminAlert(adminId, adminAlert, null);
     }
 }
 return "SCREEN_OFF";
@@ -4278,10 +4577,21 @@ def build_macro(
     admin_id_var: str = "",
     app_pin_var: str = "",
     app_name_var: str = "",
+    admin_bot_token_var: str = "",
 ) -> dict:
     """Assemble the full MacroDroid macro JSON structure."""
     sg = SiguidGen("komobot-v2")
     actions: list[dict] = []
+
+    # 0. Identify which webhook trigger fired (komobotv2 vs komobotv2_admin)
+    actions.append(make_extract_text(sg, "public", "(.*)", "bot_role"))
+    actions.append(make_if_var_not_equals(sg, "admin_webhook_body", ""))
+    actions.append(make_extract_text(sg, "admin", "(.*)", "bot_role"))
+    actions.append(
+        make_extract_text(sg, "{lv=admin_webhook_body}", "([\\s\\S]*)", "webhook_body")
+    )
+    actions.append(make_extract_text(sg, "", "(.*)", "admin_webhook_body"))
+    actions.append(make_end_if(sg))
 
     # 1. Extract update_id, chat_id, msg_text safely from webhook_body
     actions.append(
@@ -4395,6 +4705,23 @@ def build_macro(
         "LAUNCH_VM",
         [make_launch_app(sg, "Virtual Master", "com.clone.android.dual.space")],
     )
+    add_cmd_branch(
+        "LAUNCH_VM_LAUNCHER",
+        [
+            make_launch_app(
+                sg, "Virtual Master", "com.clone.android.dual.space", start_new=True
+            )
+        ],
+    )
+    add_cmd_branch(
+        "CLICK_VM_SHUTDOWN",
+        [
+            make_click_xy(sg, 75, 272),
+            make_pause(sg, millis=900),
+            make_click_xy(sg, 542, 884),
+            make_pause(sg, seconds=2, millis=500),
+        ],
+    )
 
     pin_actions: list[dict] = [
         make_extract_text(sg, "{lv=app_pin}", "^(\\d)", "pin_d1"),
@@ -4436,10 +4763,13 @@ def build_macro(
     actions.append(make_end_if(sg))
 
     local_vars = [
+        make_var("admin_bot_token", value=admin_bot_token_var, supports_input=True),
         make_var("admin_id", value=admin_id_var, supports_input=True),
+        make_var("admin_webhook_body", working=True, supports_input=False),
         make_var("app_name", value=app_name_var, supports_input=True),
         make_var("app_pin", value=app_pin_var, supports_input=True),
         make_var("bot_action"),
+        make_var("bot_role", supports_input=False),
         make_var("bot_token", value=bot_token_var, supports_input=True),
         make_var("callback_data", supports_input=False),
         make_var("callback_id", supports_input=False),
@@ -4504,7 +4834,21 @@ def build_macro(
                     "m_constraintList": [],
                     "m_isDisabled": False,
                     "m_isOrCondition": False,
-                }
+                },
+                {
+                    "identifier": "komobotv2_admin",
+                    "ipAddressWhiteList": [],
+                    "saveBodyVariableName": "admin_webhook_body",
+                    "variableWhiteList": [],
+                    "variableWhiteListEnabled": False,
+                    "disableLogging": False,
+                    "m_SIGUID": -7390523152389324001,
+                    "m_classType": "WebHookTrigger",
+                    "m_comment": "",
+                    "m_constraintList": [],
+                    "m_isDisabled": False,
+                    "m_isOrCondition": False,
+                },
             ],
         },
         "macroExportVersion": 1,
@@ -4531,6 +4875,11 @@ def main() -> None:
         default="",
         help="Target app package for MacroDroid app_name variable",
     )
+    parser.add_argument(
+        "--admin-bot-token",
+        default="",
+        help="Optional separate Telegram admin bot token for admin_bot_token variable",
+    )
     args = parser.parse_args()
 
     deploy_data = build_macro(
@@ -4538,6 +4887,7 @@ def main() -> None:
         admin_id_var=args.admin_id,
         app_pin_var=args.app_pin,
         app_name_var=args.app_name,
+        admin_bot_token_var=args.admin_bot_token,
     )
     OUT_MACRO.write_text(
         json.dumps(deploy_data, indent=2, ensure_ascii=False), encoding="utf-8"
