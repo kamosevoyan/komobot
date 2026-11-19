@@ -1478,8 +1478,10 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         )
         self.env.tg_calls.clear()
         self.env.guest_adb_responses["dumpsys activity activities"] = (
-            "topResumedActivity=ActivityRecord{MainActivity}\n"
-            "===PID===\n4321\n===FPS===\nstopped\n===UP===\n1234.5\n"
+            "topResumedActivity=ActivityRecord{f25acdd u0 "
+            "ru.deltapay.puntopago.telcell/.activities.main.MainActivity t12}\n"
+            "===PID===\n4321\n===FPS===\nstopping\n===UP===\n03:04:40\n"
+            "===U2===\nrunning\n"
         )
 
         # 1. Public bot stays QR-only even for admin when admin_bot_token is configured
@@ -1575,7 +1577,13 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertIn("92%", vh_txt)
         self.assertIn("TestWiFi", vh_txt)
         self.assertIn("4321", vh_txt)
-        self.assertIn("stopped", vh_txt)
+        self.assertIn("stopping (stuck)", vh_txt)
+        self.assertIn("u2.jar RPC: 🟢 Running (9008)", vh_txt)
+        self.assertIn("Guest Uptime: 03:04:40", vh_txt)
+        self.assertIn(
+            "Top Activity: ru.deltapay.puntopago.telcell/.activities.main.MainActivity",
+            vh_txt,
+        )
 
         # 5. Restart VM sets capture_mode="restart_vm" & active_reply_bot="admin"
         self.env.tg_calls.clear()

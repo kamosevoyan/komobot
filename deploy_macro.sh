@@ -296,19 +296,53 @@ stop_guest_fps_hal() {
 		timeout 10 adb connect "$guest" >/dev/null 2>&1 || true
 		out="$(timeout 20 adb -s "$guest" shell '
 state=$(getprop init.svc.vendor.fps_hal)
-if [ "$state" != running ]; then echo "idle:${state:-missing}"; exit 0; fi
-pid=$(getprop init.svc_debug_pid.vendor.fps_hal)
-setprop ctl.stop vendor.fps_hal
-sleep 1
-[ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
-sleep 1
-echo "state:$(getprop init.svc.vendor.fps_hal)"' 2>/dev/null | tr -d '\r' || true)"
+if [ "$state" = running ] || [ "$state" = stopping ]; then
+  pid=$(getprop init.svc_debug_pid.vendor.fps_hal)
+  setprop ctl.stop vendor.fps_hal
+  sleep 0.5
+  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+  sleep 0.5
+  echo "state:$(getprop init.svc.vendor.fps_hal)"
+else
+  echo "idle:${state:-missing}"
+fi' 2>/dev/null | tr -d '\r' || true)"
 		case "$out" in
-		"state:running") echo "  fps_hal is still running (could not stop it)" ;;
+		"state:running" | "state:stopping") echo "  fps_hal is still active (${out#state:})" ;;
 		state:stopped) echo "  guest fps_hal stopped" ;;
 		idle:*) echo "  guest fps_hal already not running (${out#idle:}), nothing to do" ;;
 		*) echo "  guest ADB not reachable/authorized, skipping" ;;
 		esac
+		if [[ "$out" == state:* || "$out" == idle:* ]]; then
+			if ! timeout 10 adb -s "$guest" shell '[ -f /data/local/tmp/u2.jar ]' >/dev/null 2>&1; then
+				if [[ ! -f /tmp/u2.jar ]]; then
+					echo "  fetching u2.jar (uiautomator2==3.7.0)..."
+					python3 -c '
+import io, json, urllib.request, zipfile
+meta = json.loads(urllib.request.urlopen("https://pypi.org/pypi/uiautomator2/3.7.0/json", timeout=15).read())
+whl_url = next(u["url"] for u in meta["urls"] if u["packagetype"] == "bdist_wheel")
+raw = urllib.request.urlopen(whl_url, timeout=30).read()
+with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+    jar_name = next(n for n in zf.namelist() if n.endswith("u2.jar"))
+    open("/tmp/u2.jar", "wb").write(zf.read(jar_name))
+' >/dev/null 2>&1 || true
+				fi
+				if [[ -f /tmp/u2.jar ]]; then
+					echo "  pushing u2.jar to guest /data/local/tmp/u2.jar..."
+					timeout 20 adb -s "$guest" push /tmp/u2.jar /data/local/tmp/u2.jar >/dev/null 2>&1 || true
+				fi
+			fi
+			timeout 15 adb -s "$guest" shell '
+settings put global window_animation_scale 0
+settings put global transition_animation_scale 0
+settings put global animator_duration_scale 0
+settings put system screen_off_timeout 2147483647
+if [ -f /data/local/tmp/u2.jar ]; then
+  if ! (printf "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" | nc -w 1 127.0.0.1 9008 | grep -q pong); then
+    nohup sh -c "CLASSPATH=/data/local/tmp/u2.jar app_process / com.wetest.uia2.Main -p 9008" >/data/local/tmp/u2.log 2>&1 </dev/null &
+  fi
+fi' >/dev/null 2>&1 || true
+			echo "  guest VM animations disabled & u2.jar server checked"
+		fi
 		timeout 10 adb disconnect "$guest" >/dev/null 2>&1 || true
 		adb -s "$host_serial" forward --remove "tcp:${local_port}" >/dev/null 2>&1 || true
 	else

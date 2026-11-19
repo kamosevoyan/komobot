@@ -1272,6 +1272,54 @@ String guestAdbStatusLabel() {
     if (st.equals("OK")) return "🟢 Connected";
     if (st.equals("UNAUTHORIZED") || st.equals("UNPAIRED")) return "🟡 Pair Needed";
     return "🔴 VM Offline";
+}
+
+String guestColdBootInitCmd() {
+    return "pid=$(getprop init.svc_debug_pid.vendor.fps_hal)"
+        + "; setprop ctl.stop vendor.fps_hal"
+        + "; sleep 0.3"
+        + "; [ -n \\"$pid\\" ] && kill -9 \\"$pid\\" 2>/dev/null"
+        + "; settings put global window_animation_scale 0"
+        + "; settings put global transition_animation_scale 0"
+        + "; settings put global animator_duration_scale 0"
+        + "; settings put system screen_off_timeout 2147483647"
+        + "; if [ -f /data/local/tmp/u2.jar ]; then"
+        + " (printf 'GET /ping HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' | nc -w 1 127.0.0.1 9008 | grep -q pong)"
+        + " || (nohup sh -c 'CLASSPATH=/data/local/tmp/u2.jar app_process / com.wetest.uia2.Main -p 9008' >/data/local/tmp/u2.log 2>&1 </dev/null &);"
+        + " fi";
+}
+
+JSONObject guestU2Rpc(String method, String paramsJson, int timeoutMs) {
+    JSONObject out = new JSONObject();
+    out.put("ok", false);
+    out.put("result", false);
+    try {
+        String body = "{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"" + method + "\\",\\"params\\":" + paramsJson + "}";
+        int bodyLen = body.getBytes("UTF-8").length;
+        String safeBody = body.replace("'", "'\\\\''");
+        String cmd = "printf 'POST /jsonrpc/0 HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: " + bodyLen + "\\r\\nConnection: close\\r\\n\\r\\n%s' '" + safeBody + "' | nc -w 3 127.0.0.1 9008";
+        JSONObject res = guestAdbShell(cmd, timeoutMs, false);
+        if (!res.optBoolean("ok", false)) return out;
+        String raw = res.optString("out", "");
+        int sep = raw.indexOf("\\r\\n\\r\\n");
+        if (sep < 0) sep = raw.indexOf("\\n\\n");
+        String jsonStr = (sep >= 0) ? raw.substring(sep).trim() : raw.trim();
+        if (jsonStr.startsWith("{")) {
+            JSONObject j = new JSONObject(jsonStr);
+            out.put("ok", !j.has("error"));
+            if (j.has("result")) {
+                out.put("result", j.optBoolean("result", false));
+                out.put("result_str", j.optString("result", ""));
+            }
+        }
+    } catch (Exception e) {
+    }
+    return out;
+}
+
+boolean guestU2Click(String selectorJson, int timeoutMs) {
+    JSONObject r = guestU2Rpc("click", "[" + selectorJson + "]", timeoutMs);
+    return r.optBoolean("ok", false) && r.optBoolean("result", false);
 }"""
 
 
@@ -1633,8 +1681,9 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
         String diagCmd = "dumpsys activity activities | grep -E 'mResumedActivity|topResumed' | head -n 1"
             + "; echo '===PID==='; pidof " + targetPkg
             + "; echo '===FPS==='; getprop init.svc.vendor.fps_hal"
-            + "; echo '===UP==='; cut -d' ' -f1 /proc/uptime";
-        JSONObject hRes = guestAdbShell(diagCmd, 1500, false);
+            + "; echo '===UP==='; ps -o etime= -p $(pidof system_server) 2>/dev/null | tail -n 1"
+            + "; echo '===U2==='; (printf 'GET /ping HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' | nc -w 1 127.0.0.1 9008 | grep -q pong && echo running) || ([ -f /data/local/tmp/u2.jar ] && echo stopped || echo missing)";
+        JSONObject hRes = guestAdbShell(diagCmd, 1800, false);
         StringBuilder hsb = new StringBuilder();
         hsb.append("🩺 System & VM Health\\n\\n");
         hsb.append("📱 Outer Android (Host)\\n");
@@ -1648,16 +1697,32 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
             int pIdx = rawOut.indexOf("===PID===");
             int fIdx = rawOut.indexOf("===FPS===");
             int uIdx = rawOut.indexOf("===UP===");
+            int u2Idx = rawOut.indexOf("===U2===");
             String topAct = (pIdx > 0) ? rawOut.substring(0, pIdx).trim() : rawOut.trim();
+            int u0Idx = topAct.indexOf(" u0 ");
+            if (u0Idx >= 0) {{
+                topAct = topAct.substring(u0Idx + 4).trim();
+                int spIdx = topAct.indexOf(" ");
+                if (spIdx > 0) topAct = topAct.substring(0, spIdx);
+                if (topAct.endsWith("}}")) topAct = topAct.substring(0, topAct.length() - 1);
+            }}
             String pidStr = (pIdx >= 0 && fIdx > pIdx) ? rawOut.substring(pIdx + 9, fIdx).trim() : "";
             String fpsStr = (fIdx >= 0 && uIdx > fIdx) ? rawOut.substring(fIdx + 9, uIdx).trim() : "";
-            String upStr = (uIdx >= 0) ? rawOut.substring(uIdx + 8).trim() : "";
-            if (topAct.length() > 90) topAct = topAct.substring(0, 87) + "...";
+            String upStr = (uIdx >= 0 && u2Idx > uIdx) ? rawOut.substring(uIdx + 8, u2Idx).trim() : ((uIdx >= 0) ? rawOut.substring(uIdx + 8).trim() : "");
+            String u2Str = (u2Idx >= 0) ? rawOut.substring(u2Idx + 8).trim() : "missing";
+            if (topAct.length() > 80) topAct = topAct.substring(0, 77) + "...";
             if (topAct.length() == 0) topAct = "unknown";
+            String fpsDisp = fpsStr.equals("running")
+                ? "⚠️ running"
+                : (fpsStr.equals("stopping") ? "⚠️ stopping (stuck)" : ("🟢 " + (fpsStr.length() > 0 ? fpsStr : "stopped")));
+            String u2Disp = u2Str.equals("running")
+                ? "🟢 Running (9008)"
+                : (u2Str.equals("stopped") ? "🟡 Stopped" : "⚪ Not installed");
             hsb.append("• Guest ADB: 🟢 Connected\\n");
+            hsb.append("• u2.jar RPC: ").append(u2Disp).append("\\n");
             hsb.append("• Telcell PID: ").append(pidStr.length() > 0 ? ("🟢 " + pidStr) : "🔴 Not running").append("\\n");
-            hsb.append("• vendor.fps_hal: ").append(fpsStr.equals("running") ? "⚠️ running" : ("🟢 " + (fpsStr.length() > 0 ? fpsStr : "stopped"))).append("\\n");
-            hsb.append("• Guest Uptime: ").append(upStr.length() > 0 ? (upStr + "s") : "unknown").append("\\n");
+            hsb.append("• vendor.fps_hal: ").append(fpsDisp).append("\\n");
+            hsb.append("• Guest Uptime: ").append(upStr.length() > 0 ? upStr : "unknown").append("\\n");
             hsb.append("• Top Activity: ").append(topAct);
         }}
         JSONArray rows = new JSONArray();
@@ -2530,6 +2595,7 @@ synchronized (System.class) {{
                         cfg.put("adb_reset_tried", false);
                         cfg.put("adb_relaunch_tried", false);
                         cfg.put("adb_launch_tried", false);
+                        cfg.put("u2_dash_tried", false);
                         cfg.put("fps_hal_checked", false);
                         cfg.put("reset_notified", false);
                         cfg.put("reset_stage", 0);
@@ -2917,6 +2983,7 @@ def build_vision_script() -> str:
         "String botToken = pubBotToken;\n"
         "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
         'String appName = "{lv=app_name}".trim();\n'
+        'String appPin = "{lv=app_pin}".trim();\n'
         'String configPath = "/storage/emulated/0/Download/komobot_config.json";\n\n'
         + _BSH_READ_STREAM
         + "\n\n"
@@ -3318,14 +3385,60 @@ try {{
     void maybeStopGuestFpsHal(JSONObject cfg, boolean wasVmBooting) {{
         if (wasVmBooting && !cfg.optBoolean("fps_hal_checked", false)) {{
             cfg.put("fps_hal_checked", true);
-            guestAdbShell(
-                "setprop ctl.stop vendor.fps_hal"
-                + "; settings put global window_animation_scale 0"
-                + "; settings put global transition_animation_scale 0"
-                + "; settings put global animator_duration_scale 0"
-                + "; settings put system screen_off_timeout 2147483647",
-                1200, false);
+            guestAdbShell(guestColdBootInitCmd(), 2200, false);
         }}
+    }}
+    String tryAdbEnterPin(JSONObject cfg, long cid, long adminId) throws Exception {{
+        if (appPin == null || appPin.length() == 0) return null;
+        int[] xs = new int[]{{360, 170, 360, 550, 170, 360, 550, 170, 360, 550}};
+        int[] ys = new int[]{{1360, 1054, 1046, 1054, 1150, 1150, 1150, 1255, 1255, 1255}};
+        StringBuilder u2Seq = new StringBuilder();
+        StringBuilder tapSeq = new StringBuilder();
+        for (int i = 0; i < appPin.length(); i++) {{
+            int d = -1;
+            try {{
+                d = (int) Long.parseLong(appPin.substring(i, i + 1));
+            }} catch (Exception ignored) {{
+            }}
+            if (d < 0 || d > 9) continue;
+            String b = "{{\\"jsonrpc\\":\\"2.0\\",\\"id\\":" + (i + 1) + ",\\"method\\":\\"click\\",\\"params\\":[{{\\"text\\":\\"" + d + "\\",\\"mask\\":1}}]}}";
+            if (u2Seq.length() > 0) u2Seq.append("; ");
+            u2Seq.append("b='").append(b).append("'; printf 'POST /jsonrpc/0 HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s' \\"${{#b}}\\" \\"$b\\" | nc -w 3 127.0.0.1 9008 >/dev/null");
+            if (tapSeq.length() > 0) tapSeq.append(" && sleep 0.2 && ");
+            tapSeq.append("input tap ").append(xs[d]).append(" ").append(ys[d]);
+        }}
+        if (tapSeq.length() == 0) return null;
+        String cmd = "if printf 'GET /ping HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' | nc -w 1 127.0.0.1 9008 | grep -q pong; then "
+            + u2Seq.toString()
+            + "; else "
+            + tapSeq.toString()
+            + "; fi";
+        JSONObject adbRes = guestAdbShell(cmd, 4500, false);
+        if (!adbRes.optBoolean("ok", false)) return null;
+        setVisionState(cfg, "ADB_ENTER_PIN");
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        String stepText = prepareStepStatus(cfg, cid, adminId, "🔐 Entering PIN...", 50);
+        queueStepStatus(cfg, stepText);
+        saveConfig(cfg);
+        return "WAIT";
+    }}
+    String tryU2OpenTransport(JSONObject cfg, long cid, long adminId) throws Exception {{
+        if (cfg.optBoolean("u2_dash_tried", false)) return null;
+        boolean clicked = guestU2Click("{{\\"resourceId\\":\\"ru.deltapay.puntopago.telcell:id/rootLayout\\",\\"instance\\":1,\\"mask\\":18874368}}", 1500);
+        if (!clicked) {{
+            clicked = guestU2Click("{{\\"text\\":\\"Транспорт\\",\\"mask\\":1}}", 1200);
+        }}
+        if (!clicked) return null;
+        cfg.put("u2_dash_tried", true);
+        cfg.put("qr_was_closed", true);
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        setVisionState(cfg, "U2_OPEN_TRANSPORT");
+        String stepText = prepareStepStatus(cfg, cid, adminId, "📲 Opening Transport tickets...", 60);
+        queueStepStatus(cfg, stepText);
+        saveConfig(cfg);
+        return "WAIT";
     }}
     String tryAdbLaunchApp(JSONObject cfg, long cid, long adminId, String mode) throws Exception {{
         if (cfg.optBoolean("adb_launch_tried", false)) return null;
@@ -3368,7 +3481,7 @@ try {{
         cfg.put("vm_booting", false);
         cfg.put("vm_seen", true);
         cfg.put("fps_hal_checked", true);
-        guestAdbShell("setprop ctl.stop vendor.fps_hal", 700, false);
+        guestAdbShell(guestColdBootInitCmd(), 2200, false);
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         setVisionState(cfg, "ADB_FORCE_RESTART");
@@ -3413,6 +3526,11 @@ try {{
                     if (cfg.optString("capture_mode", "qr").equals("qr")) {{
                         cfg.put("other_count", 0);
                         cfg.put("row_tap_ms", System.currentTimeMillis());
+                        if (guestU2Click("{{\\"resourceId\\":\\"ru.deltapay.puntopago.telcell:id/ticket_name\\",\\"instance\\":0,\\"mask\\":18874368}}", 1200)) {{
+                            setVisionState(cfg, "U2_CLICK_TICKET");
+                            saveConfig(cfg);
+                            return "WAIT";
+                        }}
                         saveConfig(cfg);
                         return "CLICK_TICKET_ROW";
                     }}
@@ -3964,13 +4082,10 @@ try {{
                 cfg.put("white_count", 0);
                 return handleLoadingWait(cfg, "loading_count", "PIN_SPINNER", 9, 40, cid, adminId);
             }}
-            setVisionState(cfg, "PIN_PAD");
-            cfg.put("other_count", 0);
-            resetWaitCounters(cfg);
-            String stepText = prepareStepStatus(cfg, cid, adminId, "🔐 Entering PIN...", 50);
-            queueStepStatus(cfg, stepText);
-            saveConfig(cfg);
-            return "ENTER_PIN";
+            String adbPinRes = tryAdbEnterPin(cfg, cid, adminId);
+            if (adbPinRes != null) return adbPinRes;
+            cfg.put("white_count", 0);
+            return handleLoadingWait(cfg, "loading_count", "PIN_ADB_WAIT", 6, 45, cid, adminId);
         }}
     }}
 
@@ -3987,6 +4102,14 @@ try {{
             cfg.put("white_count", 0);
             return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
         }}
+        String prevDashState = cfg.optString("last_state", "");
+        if (prevDashState.equals("U2_OPEN_TRANSPORT")) {{
+            setVisionState(cfg, "DASH_OPENING");
+            saveConfig(cfg);
+            return "WAIT";
+        }}
+        String u2Dash = tryU2OpenTransport(cfg, cid, adminId);
+        if (u2Dash != null) return u2Dash;
         int svcLow = 0;
         int svcHigh = 0;
         for (int x = 50; x <= 340; x += 8) {{
@@ -4007,7 +4130,6 @@ try {{
             return handleLoadingWait(cfg, "loading_count", "DASH_LOADING", 9, 50, cid, adminId);
         }}
         boolean useLow = (svcLow >= 3) || (svcHigh < 3 && isWhite(360, 1100) && !isWhite(360, 800));
-        String prevDashState = cfg.optString("last_state", "");
         if (prevDashState.equals(useLow ? "DASHBOARD_LOW" : "DASHBOARD_HIGH")) {{
             // Transport row was just tapped; give the page one short tick to navigate.
             setVisionState(cfg, "DASH_OPENING");
@@ -4307,6 +4429,12 @@ synchronized (System.class) {
         || cfg.optString("last_state", "").equals("ADB_RELAUNCH")
         || cfg.optString("last_state", "").equals("ADB_LAUNCH_APP"))) {
         waitMs = 900L;
+    } else if (stepCmd.equals("WAIT") && cfg.optString("last_state", "").equals("ADB_ENTER_PIN")) {
+        waitMs = 850L;
+    } else if (stepCmd.equals("WAIT") && cfg.optString("last_state", "").equals("U2_OPEN_TRANSPORT")) {
+        waitMs = 750L;
+    } else if (stepCmd.equals("WAIT") && cfg.optString("last_state", "").equals("U2_CLICK_TICKET")) {
+        waitMs = 520L;
     } else if (stepCmd.equals("WAIT") && cfg.optBoolean("vm_booting", false)) {
         waitMs = 500L;
     }
@@ -4723,23 +4851,6 @@ def build_macro(
         ],
     )
 
-    pin_actions: list[dict] = [
-        make_extract_text(sg, "{lv=app_pin}", "^(\\d)", "pin_d1"),
-        make_extract_text(sg, "{lv=app_pin}", "^\\d(\\d)", "pin_d2"),
-        make_extract_text(sg, "{lv=app_pin}", "^\\d\\d(\\d)", "pin_d3"),
-        make_extract_text(sg, "{lv=app_pin}", "^\\d\\d\\d(\\d)", "pin_d4"),
-    ]
-    pin_vars = ("pin_d1", "pin_d2", "pin_d3", "pin_d4")
-    for idx, d_var in enumerate(pin_vars):
-        for digit in ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"):
-            px, py = PIN_COORDS[digit]
-            pin_actions.append(make_if_var_equals(sg, d_var, digit))
-            pin_actions.append(make_click_xy(sg, px, py))
-            pin_actions.append(make_end_if(sg))
-        if idx < len(pin_vars) - 1:
-            pin_actions.append(make_pause(sg, millis=250))
-    add_cmd_branch("ENTER_PIN", pin_actions)
-
     add_cmd_branch("CLICK_TRANSPORT_LOW", [make_click_xy(sg, 360, 1100)])
     add_cmd_branch("CLICK_TRANSPORT_HIGH", [make_click_xy(sg, 360, 840)])
     add_cmd_branch("CLICK_AVAILABLE_TAB", [make_click_xy(sg, 277, 200)])
@@ -4777,10 +4888,6 @@ def build_macro(
         make_var("chat_id", supports_input=False),
         make_var("forward_user_id", supports_input=False),
         make_var("msg_text", supports_input=False),
-        make_var("pin_d1", supports_input=False),
-        make_var("pin_d2", supports_input=False),
-        make_var("pin_d3", supports_input=False),
-        make_var("pin_d4", supports_input=False),
         make_var("screen_action"),
         make_var("sender_name", supports_input=False),
         make_var("sender_username", supports_input=False),

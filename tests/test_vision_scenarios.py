@@ -16,7 +16,11 @@ POST_STEP_SCRIPT = gm.build_post_step_script()
 ADMIN_ID = 111222333
 USER_2 = 222333444
 USER_3 = 555666777
-LOCAL_VARS = {"bot_token": "test-token", "app_name": "ru.deltapay.puntopago.telcell"}
+LOCAL_VARS = {
+    "bot_token": "test-token",
+    "app_name": "ru.deltapay.puntopago.telcell",
+    "app_pin": "1234",
+}
 
 
 class ScreenFactory:
@@ -229,7 +233,7 @@ class TestVisionScenarios(unittest.TestCase):
             (ScreenFactory.vm_launcher(True), "CLICK_ENTER", "VM_LAUNCHER"),
             (ScreenFactory.vm_home(slot=1), "LAUNCH_1", "VM_HOME_1"),
             (ScreenFactory.pin_screen(spinner=True), "WAIT", "PIN_SPINNER"),
-            (ScreenFactory.pin_screen(spinner=False), "ENTER_PIN", "PIN_PAD"),
+            (ScreenFactory.pin_screen(spinner=False), "WAIT", "PIN_ADB_WAIT"),
             (ScreenFactory.dashboard("skeleton"), "WAIT", "DASH_LOADING"),
             (ScreenFactory.dashboard("low"), "CLICK_TRANSPORT_LOW", "DASHBOARD_LOW"),
             (ScreenFactory.buy_ticket_tab(), "CLICK_AVAILABLE_TAB", "BUY_TICKET_TAB"),
@@ -284,8 +288,8 @@ class TestVisionScenarios(unittest.TestCase):
     ) -> None:
         cmd = self._step(ScreenFactory.pin_screen(spinner=False))
         cfg = self.env.read_config()
-        self.assertEqual(cmd, "ENTER_PIN")
-        self.assertEqual(cfg["last_state"], "PIN_PAD")
+        self.assertEqual(cmd, "WAIT")
+        self.assertEqual(cfg["last_state"], "PIN_ADB_WAIT")
         self.assertEqual(cfg["white_count"], 0)
 
     def test_regression_unloaded_dashboard_waits_five_ticks_before_fallback(
@@ -447,7 +451,7 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertEqual(self._step(ScreenFactory.vm_home(slot=2)), "LAUNCH_2")
         self.assertEqual(self.env.read_config()["reset_stage"], 2)
         self.assertEqual(self._step(ScreenFactory.white_blank()), "WAIT")
-        self.assertEqual(self._step(ScreenFactory.pin_screen()), "ENTER_PIN")
+        self.assertEqual(self._step(ScreenFactory.pin_screen()), "WAIT")
         self.assertEqual(
             self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
         )
@@ -509,9 +513,7 @@ class TestVisionScenarios(unittest.TestCase):
     def test_resolution_scaling_filtering_decode_err_and_http_error(self) -> None:
         # 1080x2400 scaling works for both PIN pad and QR modal crop (690x690)
         self._seed_active_run(step_count=1)
-        self.assertEqual(
-            self._step(ScreenFactory.pin_screen(w=1080, h=2400)), "ENTER_PIN"
-        )
+        self.assertEqual(self._step(ScreenFactory.pin_screen(w=1080, h=2400)), "WAIT")
         self.env.http_status_overrides["sendPhoto"] = 500
         self.assertEqual(
             self._step(ScreenFactory.qr_modal(loaded=True, w=1080, h=2400)), "DONE"
@@ -568,8 +570,8 @@ class TestVisionScenarios(unittest.TestCase):
             (ScreenFactory.vm_home(slot=1), "LAUNCH_1", "VM_HOME_1"),
             *[(ScreenFactory.white_blank(), "WAIT", "WHITE_LOADING")] * 5,
             *[(ScreenFactory.pin_screen(spinner=True), "WAIT", "PIN_SPINNER")] * 3,
-            (ScreenFactory.pin_screen(spinner=False), "ENTER_PIN", "PIN_PAD"),
-            *[(ScreenFactory.dashboard("unloaded"), "WAIT", "DASH_LOADING")] * 3,
+            (ScreenFactory.pin_screen(spinner=False), "WAIT", "PIN_ADB_WAIT"),
+            (ScreenFactory.dashboard("unloaded"), "WAIT", "DASH_LOADING"),
             (ScreenFactory.dashboard("low"), "CLICK_TRANSPORT_LOW", "DASHBOARD_LOW"),
             (ScreenFactory.buy_ticket_tab(), "CLICK_AVAILABLE_TAB", "BUY_TICKET_TAB"),
             (ScreenFactory.ticket_list(card_loaded=False), "WAIT", "TICKET_LOADING"),
@@ -586,7 +588,7 @@ class TestVisionScenarios(unittest.TestCase):
             self.assertEqual(self.env.read_config()["last_state"], expected_state)
 
         cfg = self.env.read_config()
-        self.assertEqual(cfg["step_count"], 30)
+        self.assertEqual(cfg["step_count"], 28)
         self.assertLessEqual(cfg["step_count"], 45)
         self.assertEqual(cfg["busy_until"], 0)
         self.assertEqual(
@@ -652,16 +654,35 @@ class TestVisionScenarios(unittest.TestCase):
             ],
         )
 
+        # Pair mock Guest ADB so PIN_PAD runs ADB_ENTER_PIN and emits 50% progress
+        self.env.guest_adb_mode = "ok"
+        run_bsh_script(
+            gm.build_router_script(),
+            self.env,
+            {
+                "bot_token": LOCAL_VARS["bot_token"],
+                "app_name": LOCAL_VARS["app_name"],
+                "admin_id": str(ADMIN_ID),
+                "chat_id": str(ADMIN_ID),
+                "update_id": "0",
+                "msg_text": "",
+                "callback_id": "cb-pair-prog",
+                "callback_data": "adm:adbpair",
+                "callback_msg_id": "10",
+            },
+        )
+        self.env.tg_calls.clear()
+
         # Navigate USER_2 through VM + Telcell + wait nudge + backward retry guard
         steps = [
             (ScreenFactory.vm_launcher(True), "CLICK_ENTER"),
-            (ScreenFactory.vm_home(slot=1), "LAUNCH_1"),
+            (ScreenFactory.vm_home(slot=1), "WAIT"),
             (ScreenFactory.white_blank(), "WAIT"),  # wait tick 1: no redundant edit
             (ScreenFactory.white_blank(), "WAIT"),  # wait tick 2: nudges to 40%
-            (ScreenFactory.pin_screen(spinner=False), "ENTER_PIN"),
+            (ScreenFactory.pin_screen(spinner=False), "WAIT"),
             (ScreenFactory.dashboard("low"), "CLICK_TRANSPORT_LOW"),
             # Simulated transient return to PIN screen must never move bar backward
-            (ScreenFactory.pin_screen(spinner=False), "ENTER_PIN"),
+            (ScreenFactory.pin_screen(spinner=False), "WAIT"),
             (ScreenFactory.buy_ticket_tab(), "CLICK_AVAILABLE_TAB"),
             (ScreenFactory.ticket_list(card_loaded=True), "CLICK_TICKET_ROW"),
         ]
@@ -800,9 +821,7 @@ class TestVisionScenarios(unittest.TestCase):
             self._step(ScreenFactory.vm_recents(has_card=False)), "RESET_TO_HOME"
         )
         self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "LAUNCH_1")
-        self.assertEqual(
-            self._step(ScreenFactory.pin_screen(spinner=False)), "ENTER_PIN"
-        )
+        self.assertEqual(self._step(ScreenFactory.pin_screen(spinner=False)), "WAIT")
         self.assertEqual(
             self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
         )
@@ -1318,7 +1337,7 @@ class TestVisionScenarios(unittest.TestCase):
     def test_usage_accounting_and_detailed_upload_error_alert(self) -> None:
         # 1. Successful regular user QR delivery updates per-user/global stats & log
         self._seed_active_run(active_chat_id=USER_2, status_message_id=2002)
-        self.assertEqual(self._step(ScreenFactory.pin_screen()), "ENTER_PIN")
+        self.assertEqual(self._step(ScreenFactory.pin_screen()), "WAIT")
         self.assertEqual(
             self._step(ScreenFactory.ticket_list(card_loaded=True)), "CLICK_TICKET_ROW"
         )
@@ -1541,6 +1560,85 @@ class TestVisionScenarios(unittest.TestCase):
             self._step(MockBitmap(720, 1600, (120, 140, 160))), "CLICK_BACK"
         )
         self.assertEqual(self.env.read_config()["last_state"], "ADB_HOME_FRAG")
+
+    def test_u2_pin_dashboard_transport_and_ticket_recovery_with_fallback(self) -> None:
+        self.env.guest_adb_mode = "ok"
+        run_bsh_script(
+            gm.build_router_script(),
+            self.env,
+            {
+                "bot_token": LOCAL_VARS["bot_token"],
+                "app_name": LOCAL_VARS["app_name"],
+                "admin_id": str(ADMIN_ID),
+                "chat_id": str(ADMIN_ID),
+                "update_id": "0",
+                "msg_text": "",
+                "callback_id": "cb-pair-u2",
+                "callback_data": "adm:adbpair",
+                "callback_msg_id": "10",
+            },
+        )
+
+        # 1. Cold VM boot hard-kills vendor.fps_hal (kill -9) and checks u2.jar
+        self._seed_active_run(mode="qr", vm_seen=False)
+        cfg = self.env.read_config()
+        cfg["vm_booting"] = True
+        cfg["fps_hal_checked"] = False
+        cfg["adb_launch_tried"] = False
+        self.env.write_config(cfg)
+        self.env.guest_adb_commands.clear()
+        self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "WAIT")
+        self.assertTrue(any("kill -9" in c for c in self.env.guest_adb_commands))
+        self.assertTrue(any("u2.jar" in c for c in self.env.guest_adb_commands))
+
+        # 2. PIN_PAD runs single-call Guest ADB/u2 PIN entry -> WAIT (ADB_ENTER_PIN)
+        self.env.guest_adb_commands.clear()
+        self.assertEqual(self._step(ScreenFactory.pin_screen(spinner=False)), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "ADB_ENTER_PIN")
+        self.assertEqual(len(self.env.guest_adb_commands), 1)
+        pin_cmd = self.env.guest_adb_commands[0]
+        self.assertIn("POST /jsonrpc/0", pin_cmd)
+        self.assertIn("input tap 170 1054", pin_cmd)  # digit '1' fallback
+        self.assertIn("input tap 170 1150", pin_cmd)  # digit '4' fallback
+
+        # 3. DASHBOARD with u2 returning true skips promo waits -> U2_OPEN_TRANSPORT
+        self.env.guest_adb_responses["POST /jsonrpc/0"] = (
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+            '{"jsonrpc":"2.0","id":1,"result":true}'
+        )
+        self.assertEqual(self._step(ScreenFactory.dashboard("high")), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "U2_OPEN_TRANSPORT")
+        self.assertTrue(self.env.read_config()["u2_dash_tried"])
+
+        # 4. If u2 returns false/down on DASHBOARD, falls back cleanly to pixel logic
+        self._seed_active_run(mode="qr", vm_seen=True)
+        cfg_fb = self.env.read_config()
+        cfg_fb["u2_dash_tried"] = False
+        self.env.write_config(cfg_fb)
+        self.env.guest_adb_responses["POST /jsonrpc/0"] = ""
+        self.assertEqual(
+            self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
+        )
+
+        # 5. Stalled TransportTicketsContainerFragment uses u2 ticket_name click
+        self._seed_active_run(mode="qr", vm_seen=True)
+        cfg_tk = self.env.read_config()
+        cfg_tk["other_count"] = 1
+        cfg_tk["adb_relaunch_tried"] = False
+        self.env.write_config(cfg_tk)
+        self.env.guest_adb_responses["dumpsys activity activities"] = (
+            "topResumedActivity=ActivityRecord{u0 "
+            "ru.deltapay.puntopago.telcell/.activities.main.MainActivity}\n"
+        )
+        self.env.guest_adb_responses[
+            "dumpsys activity ru.deltapay.puntopago.telcell"
+        ] = "TransportTicketsContainerFragment{xyz}\n"
+        self.env.guest_adb_responses["POST /jsonrpc/0"] = (
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+            '{"jsonrpc":"2.0","id":1,"result":true}'
+        )
+        self.assertEqual(self._step(MockBitmap(720, 1600, (120, 140, 160))), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "U2_CLICK_TICKET")
 
         # 5. Unauthorized Guest ADB falls back to CLOSE_MODAL / OPEN_RECENTS on reset
         self.env.guest_adb_mode = "unauthorized"

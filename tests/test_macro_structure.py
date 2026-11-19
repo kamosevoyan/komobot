@@ -97,10 +97,6 @@ class TestMacroStructure(unittest.TestCase):
             "chat_id",
             "forward_user_id",
             "msg_text",
-            "pin_d1",
-            "pin_d2",
-            "pin_d3",
-            "pin_d4",
             "screen_action",
             "sender_name",
             "sender_username",
@@ -191,32 +187,15 @@ class TestMacroStructure(unittest.TestCase):
             self.assertGreater(len(branch), 0, f"Empty branch for {cmd}")
 
     def test_enter_pin_digits_pauses_and_centered_nav_coords(self) -> None:
-        pin_branch = _find_cmd_branch(self.actions, "ENTER_PIN")
-        click_map: dict[tuple[str, str], tuple[int, int]] = {}
-        current_cond: tuple[str, str] | None = None
-        top_pauses: list[tuple[int, int]] = []
-        depth = 0
-        for action in pin_branch:
-            ct = action.get("m_classType")
-            if ct == "IfConditionAction":
-                depth += 1
-                c0 = action["m_constraintList"][0]
-                current_cond = (c0["m_variable"]["m_name"], c0["m_stringValue"])
-            elif ct == "EndIfAction":
-                depth -= 1
-                current_cond = None
-            elif ct == "UIInteractionAction" and current_cond is not None:
-                pt = action["uiInteractionConfiguration"]["xyPoint"]
-                click_map[current_cond] = (pt["x"], pt["y"])
-            elif ct == "PauseAction" and depth == 0:
-                top_pauses.append(
-                    (action["m_delayInSeconds"], action["m_delayInMilliSeconds"])
-                )
-
-        for var_name in ("pin_d1", "pin_d2", "pin_d3", "pin_d4"):
-            for digit, coords in gm.PIN_COORDS.items():
-                self.assertEqual(click_map[(var_name, digit)], coords)
-        self.assertEqual(top_pauses, [(0, 250), (0, 250), (0, 250)])
+        # PIN entry runs via Guest ADB/u2 inside build_vision_script(), eliminating
+        # the old 127-action MacroDroid ENTER_PIN tree and shrinking macro JSON ~50%.
+        with self.assertRaises(AssertionError):
+            _find_cmd_branch(self.actions, "ENTER_PIN")
+        self.assertLess(len(self.actions), 120)
+        vision_src = gm.build_vision_script()
+        for x, y in gm.PIN_COORDS.values():
+            self.assertIn(str(x), vision_src)
+            self.assertIn(str(y), vision_src)
 
         def xy_points(cmd: str) -> list[tuple[int, int]]:
             return [
