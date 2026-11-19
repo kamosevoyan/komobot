@@ -1579,7 +1579,7 @@ class TestVisionScenarios(unittest.TestCase):
             },
         )
 
-        # 1. Cold VM boot hard-kills vendor.fps_hal (kill -9) and checks u2.jar
+        # 1. Cold VM boot stops vendor.fps_hal gracefully (no kill -9) and checks u2.jar
         self._seed_active_run(mode="qr", vm_seen=False)
         cfg = self.env.read_config()
         cfg["vm_booting"] = True
@@ -1588,7 +1588,13 @@ class TestVisionScenarios(unittest.TestCase):
         self.env.write_config(cfg)
         self.env.guest_adb_commands.clear()
         self.assertEqual(self._step(ScreenFactory.vm_home(slot=1)), "WAIT")
-        self.assertTrue(any("kill -9" in c for c in self.env.guest_adb_commands))
+        self.assertTrue(
+            any(
+                "setprop ctl.stop vendor.fps_hal" in c
+                for c in self.env.guest_adb_commands
+            )
+        )
+        self.assertFalse(any("kill -9" in c for c in self.env.guest_adb_commands))
         self.assertTrue(any("u2.jar" in c for c in self.env.guest_adb_commands))
 
         # 2. PIN_PAD runs single-call Guest ADB/u2 PIN entry -> WAIT (ADB_ENTER_PIN)
@@ -1659,6 +1665,35 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertNotEqual(self._step(ScreenFactory.anr_dialog()), "DISMISS_ANR")
         # Normal screens never match the detector
         self.assertNotEqual(self._step(ScreenFactory.ticket_list()), "DISMISS_ANR")
+
+    def test_vm_dialog_dismissal_and_reset_from_settings_without_adb(self) -> None:
+        # 1. Centered Virtual Master dialog ("Shutdown succeeded" / VM crash)
+        self._seed_active_run(mode="restart_vm")
+        vm_dlg = MockBitmap(720, 1600, (12, 10, 16))
+        vm_dlg.fill_rect(80, 660, 640, 940, 48, 44, 56)
+        self.assertEqual(self._step(vm_dlg), "DISMISS_VM_DIALOG")
+        self.assertEqual(self.env.read_config()["last_state"], "VM_DIALOG")
+        self.assertEqual(self._step(vm_dlg), "DISMISS_VM_DIALOG")
+        self.assertEqual(self._step(vm_dlg), "CLICK_BACK")
+        self.assertEqual(self._step(vm_dlg), "CLICK_BACK")
+        # Bounded at 4 attempts
+        self.assertNotIn(self._step(vm_dlg), ("DISMISS_VM_DIALOG", "CLICK_BACK"))
+        # Normal dark VM_LAUNCHER never false-positives as VM_DIALOG
+        self.assertEqual(
+            self._step(ScreenFactory.vm_launcher(True)), "CLICK_VM_SHUTDOWN"
+        )
+        self.assertEqual(self._step(ScreenFactory.vm_launcher(True)), "CLICK_ENTER")
+
+        # 2. Reset from guest Android Settings (vm_seen=False, Guest ADB offline)
+        self.setUp()
+        self._seed_active_run(mode="reset", vm_seen=False)
+        self.env.guest_adb_online = False
+        settings_screen = MockBitmap(720, 1600, (100, 110, 120))
+        self.assertEqual(self._step(settings_screen), "WAIT")
+        self.assertEqual(self._step(settings_screen), "LAUNCH_VM")
+        self.assertTrue(self.env.read_config()["vm_launched"])
+        self.assertEqual(self._step(settings_screen), "OPEN_RECENTS")
+        self.assertEqual(self.env.read_config()["last_state"], "RESET_OPEN_RECENTS")
 
 
 if __name__ == "__main__":

@@ -1301,10 +1301,7 @@ String guestAdbStatusLabel() {
 }
 
 String guestColdBootInitCmd() {
-    return "pid=$(getprop init.svc_debug_pid.vendor.fps_hal)"
-        + "; setprop ctl.stop vendor.fps_hal"
-        + "; sleep 0.3"
-        + "; [ -n \\"$pid\\" ] && kill -9 \\"$pid\\" 2>/dev/null"
+    return "setprop ctl.stop vendor.fps_hal"
         + "; settings put global window_animation_scale 0"
         + "; settings put global transition_animation_scale 0"
         + "; settings put global animator_duration_scale 0"
@@ -2385,13 +2382,10 @@ synchronized (System.class) {{
                 r1.put("📊 Admin Dashboard");
                 r1.put("🧹 Reset VM App");
                 JSONArray r2 = new JSONArray();
-                r2.put("🔁 Restart VM");
                 r2.put("👥 List Users");
-                JSONArray r3 = new JSONArray();
-                r3.put("🛑 Toggle Public Access");
+                r2.put("🛑 Toggle Public Access");
                 keyboard.put(r1);
                 keyboard.put(r2);
-                keyboard.put(r3);
                 markup.put("keyboard", keyboard);
                 saveConfig(cfg);
                 replyText = "👑 Admin Control Ready\\nTap 📊 Admin Dashboard or use /dashboard, /restartvm, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle.";
@@ -2408,6 +2402,11 @@ synchronized (System.class) {{
         }} else if (canUseAdmin && (msgText.equals("/dashboard") || msgText.equals("/admin") || msgText.indexOf("Admin Dashboard") >= 0)) {{
             saveConfig(cfg);
             JSONObject view = renderDashboard(cfg, "home", 0, 0L, adminId);
+            replyText = view.optString("text", "");
+            replyMarkup = view.optJSONObject("markup");
+        }} else if (canUseAdmin && (msgText.equalsIgnoreCase("/restartvm") || msgText.indexOf("Restart VM") >= 0)) {{
+            saveConfig(cfg);
+            JSONObject view = renderDashboard(cfg, "restart_vm", 0, 0L, adminId);
             replyText = view.optString("text", "");
             replyMarkup = view.optJSONObject("markup");
         }} else if (canUseAdmin && (msgText.equals("/usage") || msgText.equals("/listusers") || msgText.indexOf("List Users") >= 0)) {{
@@ -2510,7 +2509,7 @@ synchronized (System.class) {{
                 busyUntil = cfg.optLong("busy_until", 0L);
                 String lowerMsg = msgText.toLowerCase();
                 String requestedMode = "";
-                if (canUseAdmin && (msgText.indexOf("Restart VM") >= 0 || lowerMsg.equals("/restartvm") || callbackData.equals("adm:restart_vm_ok"))) {{
+                if (canUseAdmin && callbackData.equals("adm:restart_vm_ok")) {{
                     requestedMode = "restart_vm";
                 }} else if (canUseAdmin && msgText.indexOf("Reset VM") >= 0) {{
                     requestedMode = "reset";
@@ -3506,8 +3505,6 @@ try {{
         cfg.put("reset_open_tries", 0);
         cfg.put("vm_booting", false);
         cfg.put("vm_seen", true);
-        cfg.put("fps_hal_checked", true);
-        guestAdbShell(guestColdBootInitCmd(), 2200, false);
         cfg.put("other_count", 0);
         resetWaitCounters(cfg);
         setVisionState(cfg, "ADB_FORCE_RESTART");
@@ -3665,6 +3662,34 @@ try {{
     }}
     if (anrCount > 0 && !(anrCardUniform && anrPillUniform)) {{
         cfg.put("anr_count", 0);
+    }}
+
+    // 0b. Check centered Virtual Master modal dialog (e.g. "Shutdown succeeded" or VM crash dialog)
+    boolean vmDlgOuterDark = isDark(40, 200) && isDark(680, 200) && isDark(40, 1400) && isDark(680, 1400);
+    int vmDlgR = getR(120, 720);
+    int vmDlgG = getG(120, 720);
+    int vmDlgB = getB(120, 720);
+    boolean vmDlgCardUniform = vmDlgOuterDark
+        && vmDlgR >= 28 && vmDlgR <= 85 && vmDlgG >= 28 && vmDlgG <= 85 && vmDlgB >= 28 && vmDlgB <= 95
+        && Math.abs(vmDlgR - vmDlgG) < 14 && Math.abs(vmDlgG - vmDlgB) < 18
+        && nearRgb(600, 720, vmDlgR, vmDlgG, vmDlgB, 10)
+        && nearRgb(120, 900, vmDlgR, vmDlgG, vmDlgB, 10)
+        && nearRgb(600, 900, vmDlgR, vmDlgG, vmDlgB, 10);
+    int vmDlgDiff = Math.abs(vmDlgR - getR(40, 200)) + Math.abs(vmDlgG - getG(40, 200)) + Math.abs(vmDlgB - getB(40, 200));
+    int vmDlgCount = cfg.optInt("vm_dialog_count", 0);
+    if (vmDlgCardUniform && vmDlgDiff >= 15 && vmDlgCount < 4) {{
+        cfg.put("vm_dialog_count", vmDlgCount + 1);
+        setVisionState(cfg, "VM_DIALOG");
+        cfg.put("other_count", 0);
+        resetWaitCounters(cfg);
+        queueStepStatus(cfg, null);
+        saveConfig(cfg);
+        appendAuditLog("WARN", "VM_DIALOG_DISMISSED", cid, formatUserDisplay(cfg, cid),
+            "attempt=" + (vmDlgCount + 1) + " step=" + stepCount + " mode=" + mode);
+        return (vmDlgCount >= 2) ? "CLICK_BACK" : "DISMISS_VM_DIALOG";
+    }}
+    if (vmDlgCount > 0 && !vmDlgCardUniform) {{
+        cfg.put("vm_dialog_count", 0);
     }}
 
     boolean isRestartVm = mode.equals("restart_vm");
@@ -4335,7 +4360,7 @@ try {{
     }}
 
     // 11. Unknown / transition screen
-    if (cfg.optBoolean("vm_seen", false) && !vmBooting && mode.equals("reset") && resetStage == 0) {{
+    if ((cfg.optBoolean("vm_seen", false) || cfg.optBoolean("vm_launched", false)) && !vmBooting && mode.equals("reset") && resetStage == 0) {{
         return handleResetInApp(cfg, cid, adminId);
     }}
     long rowTapAge = System.currentTimeMillis() - cfg.optLong("row_tap_ms", 0L);
@@ -4428,7 +4453,7 @@ def build_post_step_script() -> str:
 long t0 = System.currentTimeMillis();
 long waitMs = 350L;
 if (stepCmd.equals("WAIT")) waitMs = 180L;
-else if (stepCmd.equals("DISMISS_POPUP") || stepCmd.equals("DISMISS_ANR")) waitMs = 350L;
+else if (stepCmd.equals("DISMISS_POPUP") || stepCmd.equals("DISMISS_ANR") || stepCmd.equals("DISMISS_VM_DIALOG")) waitMs = 350L;
 else if (stepCmd.equals("CLOSE_MODAL") || stepCmd.equals("CLICK_BACK") || stepCmd.equals("RESET_TO_HOME")) waitMs = 450L;
 else if (stepCmd.equals("OPEN_RECENTS") || stepCmd.equals("SWIPE_KILL_RECENT")) waitMs = 550L;
 else if (stepCmd.equals("CLICK_AVAILABLE_TAB")) waitMs = 700L;
@@ -4853,6 +4878,7 @@ def build_macro(
     add_cmd_branch("CLICK_ENTER", [make_click_xy(sg, 627, 250)])
     add_cmd_branch("DISMISS_POPUP", [make_click_xy(sg, 100, 200)])
     add_cmd_branch("DISMISS_ANR", [make_click_xy(sg, 360, 1412)])
+    add_cmd_branch("DISMISS_VM_DIALOG", [make_click_xy(sg, 542, 884)])
     add_cmd_branch("OPEN_RECENTS", [make_click_xy(sg, 567, 1553)])
     add_cmd_branch(
         "SWIPE_KILL_RECENT", [make_gesture_swipe(sg, 360, 900, 360, 200, 200)]

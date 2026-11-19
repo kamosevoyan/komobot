@@ -1527,7 +1527,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             for btn in row
         ]
         self.assertIn("🧹 Reset VM App", kb_flat)
-        self.assertIn("🔁 Restart VM", kb_flat)
+        self.assertNotIn("🔁 Restart VM", kb_flat)
         self.assertNotIn("📸 Take QR Screenshot", kb_flat)
         self.assertEqual(
             self.env.tg_urls[-1].split("/bot")[1].split("/")[0], "admin-tok"
@@ -1585,7 +1585,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             vh_txt,
         )
 
-        # 5. Restart VM sets capture_mode="restart_vm" & active_reply_bot="admin"
+        # 5. Text "🔁 Restart VM" shows confirmation instead of running immediately
         self.env.tg_calls.clear()
         self.env.tg_urls.clear()
         self.assertEqual(
@@ -1594,6 +1594,35 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
                 ADMIN_ID,
                 "🔁 Restart VM",
                 update_id="53",
+                admin_bot_token="admin-tok",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        self.assertIn(
+            "Restart Inner Android VM?", self.env.tg_calls[-1]["payload"]["text"]
+        )
+        confirm_cbs = [
+            b["callback_data"]
+            for row in self.env.tg_calls[-1]["payload"]["reply_markup"][
+                "inline_keyboard"
+            ]
+            for b in row
+        ]
+        self.assertIn("adm:restart_vm_ok", confirm_cbs)
+
+        # 6. Confirming via adm:restart_vm_ok starts restart_vm on admin bot
+        self.env.tg_calls.clear()
+        self.env.tg_urls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="54",
+                callback_id="cb-rst-ok",
+                callback_data="adm:restart_vm_ok",
+                callback_msg_id="701",
                 admin_bot_token="admin-tok",
                 bot_role="admin",
             ),
