@@ -364,6 +364,29 @@ def make_gesture_swipe(
 
 SCREENSHOT_DIR = "/storage/emulated/0/komobot_ss"
 SCREENSHOT_FILE_BASE = "frame"
+DEFAULT_KEEPALIVE_MINUTES = 25
+
+
+def make_regular_interval_trigger(
+    interval_seconds: int = DEFAULT_KEEPALIVE_MINUTES * 60,
+    siguid: int = -7390523152389324002,
+) -> dict:
+    """Build a MacroDroid RegularIntervalTrigger using exact Android alarms."""
+    return {
+        "m_seconds": interval_seconds,
+        "m_minutes": 0,
+        "m_useAlarm": True,
+        "m_ignoreReferenceStartTime": True,
+        "m_startHour": 0,
+        "m_startMinute": 0,
+        "disableLogging": False,
+        "m_SIGUID": siguid,
+        "m_classType": "RegularIntervalTrigger",
+        "m_comment": "Periodic full-pipeline keepalive (gated to 06:00-00:00 in Router)",
+        "m_constraintList": [],
+        "m_isDisabled": False,
+        "m_isOrCondition": False,
+    }
 
 
 def make_take_screenshot(sg: SiguidGen) -> dict:
@@ -763,6 +786,49 @@ void notifyPreemptNotices(JSONArray notices) {
         boolean nMedia = nItem.optBoolean("status_is_media", false);
         notifyTargetFailureWithToken(tok, nCid, nMid, nMedia, cancelMsg, "❌ Cancelled • 🔄 Retry", true);
     }
+}
+
+int postWebhookPing(String webhookUrl, long pingMs, int timeoutMs) {
+    if (webhookUrl == null || (!webhookUrl.startsWith("https://") && !webhookUrl.startsWith("http://"))) {
+        return -1;
+    }
+    HttpURLConnection conn = null;
+    try {
+        JSONObject chatObj = new JSONObject();
+        chatObj.put("id", 0L);
+        JSONObject msgObj = new JSONObject();
+        msgObj.put("message_id", 0);
+        msgObj.put("chat", chatObj);
+        msgObj.put("text", "__keepalive_ping__:" + pingMs);
+        JSONObject payload = new JSONObject();
+        payload.put("update_id", 0L);
+        payload.put("message", msgObj);
+        URL url = new URL(webhookUrl);
+        conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        conn.setRequestProperty("Connection", "close");
+        byte[] outBytes = payload.toString().getBytes("UTF-8");
+        OutputStream os = conn.getOutputStream();
+        os.write(outBytes);
+        os.flush();
+        os.close();
+        int code = conn.getResponseCode();
+        InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
+        if (is != null) readStream(is);
+        return code;
+    } catch (Exception e) {
+        if (conn != null) {
+            try {
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+        return -1;
+    }
 }"""
 
 _BSH_AUDIT_HELPERS = """String eventLogPath = "/storage/emulated/0/Download/komobot_events.log";
@@ -1074,6 +1140,33 @@ void saveConfig(JSONObject cfg) {
             if (fresh.has("admin_pending_action")) {
                 cfg.put("admin_pending_action", fresh.optString("admin_pending_action", ""));
                 cfg.put("admin_pending_msg_id", fresh.optLong("admin_pending_msg_id", 0L));
+            }
+            if (fresh.has("keepalive_enabled")) {
+                cfg.put("keepalive_enabled", fresh.optBoolean("keepalive_enabled", true));
+            }
+            if (fresh.has("keepalive_interval_min")) {
+                cfg.put("keepalive_interval_min", fresh.optInt("keepalive_interval_min", 25));
+            }
+            if (fresh.has("keepalive_start_hour")) {
+                cfg.put("keepalive_start_hour", fresh.optInt("keepalive_start_hour", 6));
+            }
+            if (fresh.has("keepalive_end_hour")) {
+                cfg.put("keepalive_end_hour", fresh.optInt("keepalive_end_hour", 24));
+            }
+            if (fresh.optLong("keepalive_webhook_checked_ms", 0L) > cfg.optLong("keepalive_webhook_checked_ms", 0L)) {
+                cfg.put("keepalive_webhook_url", fresh.optString("keepalive_webhook_url", ""));
+                cfg.put("keepalive_webhook_checked_ms", fresh.optLong("keepalive_webhook_checked_ms", 0L));
+            }
+            if (fresh.optLong("last_webhook_pong_ms", 0L) > cfg.optLong("last_webhook_pong_ms", 0L)) {
+                cfg.put("last_webhook_pong_ms", fresh.optLong("last_webhook_pong_ms", 0L));
+                cfg.put("last_webhook_rtt_ms", fresh.optLong("last_webhook_rtt_ms", -1L));
+            }
+            if (fresh.optLong("last_webhook_ping_ms", 0L) > cfg.optLong("last_webhook_ping_ms", 0L)) {
+                cfg.put("last_webhook_ping_ms", fresh.optLong("last_webhook_ping_ms", 0L));
+                cfg.put("last_webhook_ping_code", fresh.optInt("last_webhook_ping_code", -1));
+            }
+            if (fresh.optLong("last_warm_ms", 0L) > cfg.optLong("last_warm_ms", 0L)) {
+                cfg.put("last_warm_ms", fresh.optLong("last_warm_ms", 0L));
             }
             File outFile = new File(configPath);
             if (outFile.getParentFile() != null && !outFile.getParentFile().exists()) {
@@ -1426,8 +1519,9 @@ boolean guestU2Click(String selectorJson, int timeoutMs) {
 }"""
 
 
-def build_router_script() -> str:
+def build_router_script(keepalive_minutes: int = DEFAULT_KEEPALIVE_MINUTES) -> str:
     """BeanShell Java 7 script for Telegram routing, auth, and user management."""
+    default_ka_min = max(0, int(keepalive_minutes))
     return f"""import android.util.Base64;
 import java.io.*;
 import java.math.BigInteger;
@@ -1460,6 +1554,7 @@ String hostBattery = "{{battery}}".trim();
 String hostPower = "{{power}}".trim();
 String hostBattTemp = "{{battery_temp}}".trim();
 String hostWifiSsid = "{{wifi_ssid}}".trim();
+int defaultKeepaliveMin = {default_ka_min};
 long defaultAdminId = 0L;
 try {{
     defaultAdminId = Long.parseLong("{{lv=admin_id}}".trim());
@@ -1846,6 +1941,10 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
                     String wUrl = rWh.optString("url", "");
                     int pend = rWh.optInt("pending_update_count", 0);
                     String wErr = rWh.optString("last_error_message", "");
+                    if (wUrl.length() > 0) {{
+                        cfg.put("keepalive_webhook_url", wUrl);
+                        cfg.put("keepalive_webhook_checked_ms", now);
+                    }}
                     String shortUrl = wUrl;
                     if (shortUrl.length() > 45) {{
                         shortUrl = "..." + shortUrl.substring(shortUrl.length() - 42);
@@ -1868,7 +1967,22 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
         boolean cfgWAct = cfg.optBoolean("worker_active", false);
         String busyDisp = (cfgBusy <= 0L) ? "0 (idle)" : ((cfgBusy > now) ? ("+" + formatSec(cfgBusy - now) + " left") : "expired");
         hsb.append("• UIDs: QR=").append(cfgUidQr).append(" | Admin=").append(cfgUidAdm).append("\\n");
-        hsb.append("• Lock: ").append(busyDisp).append(" | worker=").append(cfgWAct).append(" | last=").append(cfg.optString("last_state", "NONE"));
+        hsb.append("• Lock: ").append(busyDisp).append(" | worker=").append(cfgWAct).append(" | last=").append(cfg.optString("last_state", "NONE")).append("\\n");
+        boolean kaEn = cfg.optBoolean("keepalive_enabled", defaultKeepaliveMin > 0);
+        int kaMin = cfg.optInt("keepalive_interval_min", defaultKeepaliveMin > 0 ? defaultKeepaliveMin : 25);
+        int kaStartH = cfg.optInt("keepalive_start_hour", 6);
+        int kaEndH = cfg.optInt("keepalive_end_hour", 24);
+        long kaWarmMs = cfg.optLong("last_warm_ms", 0L);
+        String kaWarmAge = (kaWarmMs > 0L && now >= kaWarmMs) ? (((now - kaWarmMs) / 60000L) + "m ago") : "never";
+        long kaRttMs = cfg.optLong("last_webhook_rtt_ms", -1L);
+        String kaRttDisp = (kaRttMs >= 0L) ? (kaRttMs + "ms") : "-";
+        int kaFails = cfg.optInt("keepalive_consec_fails", 0);
+        String kaWin = (kaStartH < 10 ? "0" : "") + kaStartH + ":00-" + ((kaEndH % 24) < 10 ? "0" : "") + (kaEndH % 24) + ":00";
+        hsb.append("• Keepalive: ").append(kaEn ? ("🟢 ON (" + kaWin + ", " + kaMin + "m)") : "🔴 OFF")
+           .append(" | warm=").append(kaWarmAge).append(" | WH RTT=").append(kaRttDisp);
+        if (kaFails > 0) {{
+            hsb.append(" | ⚠️ fails=").append(kaFails);
+        }}
 
         JSONArray rows = new JSONArray();
         JSONArray r1 = new JSONArray();
@@ -1876,9 +1990,12 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
         r1.put(makeBtn("🧹 Reset QR State", "adm:resetqr"));
         rows.put(r1);
         JSONArray r2 = new JSONArray();
+        r2.put(makeBtn(kaEn ? "⏱️ Keepalive: ON" : "⏱️ Keepalive: OFF", "adm:keepalive"));
         r2.put(makeBtn("🔄 Refresh", "adm:health"));
-        r2.put(makeBtn("◀️ Console", "adm:home"));
         rows.put(r2);
+        JSONArray r3 = new JSONArray();
+        r3.put(makeBtn("◀️ Console", "adm:home"));
+        rows.put(r3);
         out.put("text", hsb.toString());
         out.put("markup", wrapInlineKb(rows));
         return out;
@@ -2037,7 +2154,9 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     String runStatus = "🟢 Idle (last: " + cfg.optString("last_state", "NONE") + ")";
     if (now < busyUntil && busyUntil > 0L) {{
         long actCid = cfg.optLong("active_chat_id", 0L);
-        runStatus = "🟡 Active (" + cfg.optString("capture_mode", "qr") + " • " + formatUserDisplay(cfg, actCid) + " @ " + cfg.optString("last_state", "INIT") + ", Q=" + qLen + ")";
+        String actMode = cfg.optString("capture_mode", "qr");
+        String actWho = (actCid == 0L && actMode.equals("keepalive")) ? "keepalive" : (actMode + " • " + formatUserDisplay(cfg, actCid));
+        runStatus = "🟡 Active (" + actWho + " @ " + cfg.optString("last_state", "INIT") + ", Q=" + qLen + ")";
     }}
     long okPct = (tReq > 0L) ? ((tOk * 100L) / tReq) : 0L;
     StringBuilder sb = new StringBuilder();
@@ -2082,6 +2201,133 @@ try {{
     appendAuditLog("WARN", "BAD_CHAT_ID", 0L, "", "role=" + botRole + " chatId=" + chatIdStr + " uid=" + updateIdStr);
     if (callbackId.length() > 0) answerCallback(callbackId, "");
     return "IGNORE";
+}}
+if (cid == 0L && msgText.startsWith("__keepalive_ping__:")) {{
+    long pingTs = 0L;
+    try {{
+        pingTs = Long.parseLong(msgText.substring(19).trim());
+    }} catch (Exception ignored) {{
+    }}
+    long pongNow = System.currentTimeMillis();
+    long rtt = (pingTs > 0L && pongNow >= pingTs) ? (pongNow - pingTs) : -1L;
+    synchronized (System.class) {{
+        JSONObject pCfg = loadConfig();
+        pCfg.put("last_webhook_pong_ms", pongNow);
+        if (rtt >= 0L) {{
+            pCfg.put("last_webhook_rtt_ms", rtt);
+        }}
+        saveConfig(pCfg);
+    }}
+    return "IGNORE";
+}}
+if (botRole.equals("keepalive")) {{
+    long kaWaitDeadline = System.currentTimeMillis() + 2000L;
+    while (System.currentTimeMillis() < kaWaitDeadline) {{
+        JSONObject kaProbe = loadConfig();
+        long kaPend = kaProbe.optLong("worker_pending_start_ms", 0L);
+        long kaBusy = kaProbe.optLong("busy_until", 0L);
+        long kaExit = kaProbe.optLong("worker_exiting_ms", 0L);
+        long kaN = System.currentTimeMillis();
+        boolean kaPendAct = kaPend > 0L && kaBusy > 0L && (kaN - kaPend) < 2000L;
+        boolean kaExitAct = kaExit > 0L && kaBusy == 0L && (kaN - kaExit) < 800L;
+        if (!kaPendAct && !kaExitAct) break;
+        try {{
+            Thread.sleep(25L);
+        }} catch (Exception ignored) {{
+            break;
+        }}
+    }}
+    boolean kaRun = false;
+    synchronized (System.class) {{
+        JSONObject kCfg = loadConfig();
+        long kNow = System.currentTimeMillis();
+        boolean kaEnabled = kCfg.optBoolean("keepalive_enabled", defaultKeepaliveMin > 0);
+        int kaIntervalMin = kCfg.optInt("keepalive_interval_min", defaultKeepaliveMin > 0 ? defaultKeepaliveMin : 25);
+        int kaStartH = kCfg.optInt("keepalive_start_hour", 6);
+        int kaEndH = kCfg.optInt("keepalive_end_hour", 24);
+        int curHour = 12;
+        try {{
+            curHour = (int) Long.parseLong(new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date(kNow)).substring(0, 2));
+        }} catch (Exception ignored) {{
+        }}
+        boolean inActiveHours = (kaStartH < kaEndH)
+            ? (curHour >= kaStartH && curHour < kaEndH)
+            : (curHour >= kaStartH || curHour < kaEndH);
+        boolean isCharging = hostPower.equalsIgnoreCase("on") || hostPower.equalsIgnoreCase("true") || hostPower.equals("1");
+        int battPct = -1;
+        if (hostBattery.length() > 0 && !hostBattery.startsWith("{{")) {{
+            try {{
+                battPct = (int) Long.parseLong(hostBattery);
+            }} catch (Exception ignored) {{
+            }}
+        }}
+        boolean lowBattSkip = (!isCharging && battPct > 0 && battPct < 20);
+        long kBusy = kCfg.optLong("busy_until", 0L);
+        long kActiveCid = kCfg.optLong("active_chat_id", 0L);
+        boolean isBusyNow = (kBusy > 0L && kNow < kBusy)
+            || (kBusy > 0L && kNow >= kBusy && kActiveCid != 0L && kNow < kBusy + 60000L);
+        long lastWarm = kCfg.optLong("last_warm_ms", 0L);
+        long minGapMs = ((kaIntervalMin > 2) ? (kaIntervalMin - 2L) : 1L) * 60000L;
+        boolean recentlyWarmed = (lastWarm > 0L && kNow >= lastWarm && (kNow - lastWarm) < minGapMs);
+        if (kaEnabled && kaIntervalMin > 0 && inActiveHours && !lowBattSkip && !isBusyNow && !recentlyWarmed) {{
+            if (kBusy > 0L && kNow >= kBusy && kActiveCid == 0L) {{
+                kCfg.put("keepalive_consec_fails", kCfg.optInt("keepalive_consec_fails", 0) + 1);
+            }}
+            long prevStart = kCfg.optLong("run_start_ms", 0L);
+            long runStart = (kNow > prevStart) ? kNow : (prevStart + 1L);
+            kCfg.put("busy_until", kNow + 45000L);
+            kCfg.put("active_chat_id", 0L);
+            kCfg.put("active_reply_bot", "public");
+            kCfg.put("app_name", appName);
+            kCfg.put("capture_mode", "keepalive");
+            kCfg.put("active_trigger", "keepalive");
+            kCfg.put("active_start_ms", runStart);
+            kCfg.put("state_trace", "KA_INIT");
+            kCfg.put("queue", new JSONArray());
+            kCfg.put("qr_was_closed", false);
+            kCfg.put("keepalive_touched", false);
+            kCfg.put("adb_reset_tried", false);
+            kCfg.put("adb_relaunch_tried", false);
+            kCfg.put("adb_launch_tried", false);
+            kCfg.put("u2_dash_tried", false);
+            kCfg.put("fps_hal_checked", false);
+            kCfg.put("reset_notified", false);
+            kCfg.put("reset_stage", 0);
+            kCfg.put("reset_kills", 0);
+            kCfg.put("reset_recents_checked", false);
+            kCfg.put("reset_open_tries", 0);
+            kCfg.put("vm_restart_stage", 0);
+            kCfg.put("vm_launcher_tries", 0);
+            kCfg.put("step_count", 0);
+            kCfg.put("row_tap_ms", 0L);
+            kCfg.put("other_count", 0);
+            kCfg.put("white_count", 0);
+            kCfg.put("loading_count", 0);
+            kCfg.put("last_state", "KA_INIT");
+            kCfg.put("progress_pct", 0);
+            kCfg.put("pending_status_text", "");
+            kCfg.put("pending_delete_cid", 0L);
+            kCfg.put("pending_delete_mid", 0L);
+            kCfg.put("vm_seen", false);
+            kCfg.put("vm_launched", false);
+            kCfg.put("vm_booting", false);
+            kCfg.put("last_ss_deleted", true);
+            kCfg.put("run_start_ms", runStart);
+            kCfg.put("status_is_media", false);
+            kCfg.put("media_init_pending", false);
+            kCfg.put("status_message_id", 0L);
+            kCfg.put("pending_cb_id", "");
+            kCfg.put("worker_active", true);
+            kCfg.put("worker_heartbeat_ms", kNow);
+            kCfg.put("worker_pending_start_ms", kNow);
+            kCfg.put("worker_start_ms", runStart);
+            kCfg.put("worker_exiting_ms", 0L);
+            saveConfig(kCfg);
+            deletePrivateFrames();
+            kaRun = true;
+        }}
+    }}
+    return kaRun ? "RUN" : "IGNORE";
 }}
 if (cid == 0L) {{
     appendAuditLog("WARN", "BAD_CHAT_ID", 0L, "", "role=" + botRole + " chatId=0 uid=" + updateIdStr + " msg=" + cleanLogText(msgText));
@@ -2287,6 +2533,13 @@ synchronized (System.class) {{
                 cfg.put("worker_active", false);
                 cfg.put("worker_pending_start_ms", 0L);
                 cfg.put("worker_exiting_ms", 0L);
+            }} else if (staleCid == 0L && cfg.optString("capture_mode", "").equals("keepalive")) {{
+                cfg.put("keepalive_consec_fails", cfg.optInt("keepalive_consec_fails", 0) + 1);
+                cfg.put("busy_until", 0L);
+                cfg.put("queue", new JSONArray());
+                cfg.put("worker_active", false);
+                cfg.put("worker_pending_start_ms", 0L);
+                cfg.put("worker_exiting_ms", 0L);
             }}
         }}
 
@@ -2457,6 +2710,18 @@ synchronized (System.class) {{
                     }}
                     viewTab = "health";
                 }} else if (sub.equals("health") || sub.equals("vmhealth") || sub.equals("qrdiag")) {{
+                    viewTab = "health";
+                }} else if (sub.equals("keepalive")) {{
+                    boolean nextKa = !cfg.optBoolean("keepalive_enabled", defaultKeepaliveMin > 0);
+                    cfg.put("keepalive_enabled", nextKa);
+                    if (nextKa) {{
+                        cfg.put("keepalive_consec_fails", 0);
+                    }}
+                    callbackToast = nextKa ? "⏱️ Keepalive ENABLED (06:00-00:00)" : "⏱️ Keepalive DISABLED";
+                    auditLevel = "ADMIN";
+                    auditEvent = "KEEPALIVE_TOGGLE";
+                    auditUserDisp = formatUserDisplay(cfg, cid);
+                    auditDetail = "keepalive_enabled=" + nextKa;
                     viewTab = "health";
                 }} else if (sub.equals("resetqr")) {{
                     cfg.put("last_update_id", 0L);
@@ -2695,14 +2960,48 @@ synchronized (System.class) {{
                 }}
                 boolean isMediaRefresh = callbackId.length() > 0 && cbMsgId > 0L && requestedMode.equals("qr");
                 boolean isVmMaintenance = requestedMode.equals("reset") || requestedMode.equals("restart_vm");
+                String curCaptureMode = cfg.optString("capture_mode", "qr");
                 boolean isResetPreempt = (now < busyUntil)
                     && isVmMaintenance
-                    && !cfg.optString("capture_mode", "qr").equals(requestedMode);
+                    && !curCaptureMode.equals(requestedMode);
                 boolean workerActive = cfg.optBoolean("worker_active", false);
                 long heartbeatMs = cfg.optLong("worker_heartbeat_ms", 0L);
                 boolean isLiveWorker = workerActive && heartbeatMs > 0L && (now - heartbeatMs) < 20000L;
+                boolean isKeepalivePromote = (now < busyUntil)
+                    && requestedMode.equals("qr")
+                    && curCaptureMode.equals("keepalive")
+                    && isLiveWorker;
 
-                if (now < busyUntil && !isResetPreempt) {{
+                if (isKeepalivePromote) {{
+                    long prevStart = cfg.optLong("run_start_ms", 0L);
+                    long runStart = (now > prevStart) ? now : (prevStart + 1L);
+                    cfg.put("busy_until", now + 45000L);
+                    cfg.put("active_chat_id", cid);
+                    cfg.put("active_reply_bot", isAdminBot ? "admin" : "public");
+                    cfg.put("capture_mode", "qr");
+                    cfg.put("active_trigger", isMediaRefresh ? "callback_media" : "cmd");
+                    cfg.put("active_start_ms", runStart);
+                    cfg.put("run_start_ms", runStart);
+                    cfg.put("status_is_media", isMediaRefresh);
+                    cfg.put("media_init_pending", false);
+                    cfg.put("status_message_id", isMediaRefresh ? cbMsgId : 0L);
+                    cfg.put("progress_pct", (canUseAdmin && !isMediaRefresh) ? 0 : 20);
+                    cfg.put("step_count", 0);
+                    cfg.put("other_count", 0);
+                    cfg.put("white_count", 0);
+                    cfg.put("loading_count", 0);
+                    cfg.put("row_tap_ms", 0L);
+                    cfg.put("qr_was_closed", false);
+                    cfg.put("keepalive_touched", false);
+                    cfg.put("state_trace", "PROMOTED_FROM_KA");
+                    cfg.put("pending_status_text", "");
+                    cfg.put("worker_heartbeat_ms", now);
+                    saveConfig(cfg);
+                    coopRunStart = runStart;
+                    isMediaStatus = isMediaRefresh;
+                    statusStage = "COOP_PROMOTE";
+                    actionResult = "IGNORE";
+                }} else if (now < busyUntil && !isResetPreempt) {{
                     if (cid == cfg.optLong("active_chat_id", 0L)) {{
                         saveConfig(cfg);
                         if (now - cfg.optLong("run_start_ms", 0L) >= 3000L) {{
@@ -2937,6 +3236,31 @@ if (statusStage.equals("COOP_RESET")) {{
     notifyPreemptNotices(coopPreemptNotices);
     return "IGNORE";
 }}
+if (statusStage.equals("COOP_PROMOTE")) {{
+    if (isMediaStatus && cbMsgId > 0L) {{
+        editButton(cid, cbMsgId, formatButtonProgress(20), "noop");
+    }} else {{
+        String promoText = (isAdminUser && !splitAdminBot)
+            ? "🔍 Waking phone & checking Virtual Master..."
+            : formatProgress("⏳ Generating QR code...", 20);
+        JSONObject sent = sendMsg(cid, promoText, null);
+        long promoMsgId = sent.has("result") ? sent.getJSONObject("result").optLong("message_id", 0L) : 0L;
+        if (promoMsgId > 0L) {{
+            synchronized (System.class) {{
+                JSONObject fresh = loadConfig();
+                if (fresh.optLong("active_chat_id", 0L) == cid
+                    && fresh.optLong("run_start_ms", 0L) == coopRunStart
+                    && fresh.optLong("status_message_id", 0L) == 0L) {{
+                    fresh.put("status_message_id", promoMsgId);
+                    fresh.put("status_is_media", false);
+                    fresh.put("media_init_pending", false);
+                    saveConfig(fresh);
+                }}
+            }}
+        }}
+    }}
+    return "IGNORE";
+}}
 if (exportAuditDoc) {{
     byte[] docBytes = readAuditDocumentBytes();
     if (docBytes.length == 0) {{
@@ -3029,6 +3353,8 @@ long claimedRunStart = 0L;
 long existingMid = 0L;
 String captureMode = "qr";
 String pendingCbId = "";
+String kaWebhookUrl = "";
+long kaWebhookCheckedMs = 0L;
 boolean statusIsMedia = false;
 boolean mediaInitPending = false;
 synchronized (System.class) {
@@ -3050,9 +3376,60 @@ synchronized (System.class) {
     claimedRunStart = cfg.optLong("run_start_ms", 0L);
     existingMid = cfg.optLong("status_message_id", 0L);
     captureMode = cfg.optString("capture_mode", "qr");
+    kaWebhookUrl = cfg.optString("keepalive_webhook_url", "");
+    kaWebhookCheckedMs = cfg.optLong("keepalive_webhook_checked_ms", 0L);
     if (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0) {
         botToken = adminBotToken;
     }
+}
+if (captureMode.equals("keepalive")) {
+    long nowKa = System.currentTimeMillis();
+    boolean urlUpdated = false;
+    if (pubBotToken.length() > 0) {
+        if (kaWebhookUrl.length() == 0 || (nowKa - kaWebhookCheckedMs) > 21600000L) {
+            JSONObject wh = tgPostDirect(pubBotToken, "getWebhookInfo", new JSONObject(), 2500);
+            JSONObject rWh = wh.optJSONObject("result");
+            if (wh.optBoolean("ok", false) && rWh != null) {
+                String wUrl = rWh.optString("url", "");
+                if (wUrl.length() > 0) {
+                    kaWebhookUrl = wUrl;
+                    kaWebhookCheckedMs = nowKa;
+                    urlUpdated = true;
+                }
+            }
+        } else {
+            tgPostDirect(pubBotToken, "getMe", new JSONObject(), 2000);
+        }
+    }
+    long pingSentMs = 0L;
+    int pingCode = -1;
+    if (kaWebhookUrl.length() > 0) {
+        pingSentMs = System.currentTimeMillis();
+        pingCode = postWebhookPing(kaWebhookUrl, pingSentMs, 2500);
+    }
+    if (urlUpdated || pingSentMs > 0L) {
+        synchronized (System.class) {
+            JSONObject fresh = loadConfig();
+            if (urlUpdated) {
+                fresh.put("keepalive_webhook_url", kaWebhookUrl);
+                fresh.put("keepalive_webhook_checked_ms", kaWebhookCheckedMs);
+            }
+            if (pingSentMs > 0L) {
+                fresh.put("last_webhook_ping_ms", pingSentMs);
+                fresh.put("last_webhook_ping_code", pingCode);
+            }
+            fresh.put("worker_heartbeat_ms", System.currentTimeMillis());
+            saveConfig(fresh);
+        }
+    }
+    long kaRem = 550L - (System.currentTimeMillis() - t0);
+    if (kaRem > 0L) {
+        try {
+            Thread.sleep(kaRem);
+        } catch (Exception e) {
+        }
+    }
+    return "KEEPALIVE";
 }
 if (cid <= 0L || (existingMid > 0L && !mediaInitPending)) {
     if (pendingCbId.length() > 0) {
@@ -3373,7 +3750,8 @@ long cid = cfg.optLong("active_chat_id", 0L);
 long adminId = cfg.optLong("admin_id", 0L);
 long statusMsgId = cfg.optLong("status_message_id", 0L);
 int prevStepCount = cfg.optInt("step_count", 0);
-if (prevStepCount >= 95) {{
+int maxSteps = mode.equals("keepalive") ? 35 : 95;
+if (prevStepCount >= maxSteps) {{
     return "ABORT_TIMEOUT";
 }}
 int stepCount = prevStepCount + 1;
@@ -3565,6 +3943,7 @@ try {{
         cfg.put("loading_count", 0);
     }}
     String prepareStepStatus(JSONObject cfg, long targetCid, long adminId, String adminText, int userPct) {{
+        if (targetCid <= 0L) return null;
         boolean isMedia = cfg.optBoolean("status_is_media", false);
         if (!isMedia && targetCid == adminId) {{
             return adminText;
@@ -4058,13 +4437,13 @@ try {{
         isWhite(150, 400) && isWhite(570, 400) && isWhite(130, 590) && isWhite(590, 590)) {{
         cfg.put("vm_booting", false);
         cfg.put("vm_seen", true);
-        if (mode.equals("reset")) {{
-            if (resetStage == 0) {{
+        if (mode.equals("reset") || mode.equals("keepalive")) {{
+            if (mode.equals("reset") && resetStage == 0) {{
                 String fastReset = tryAdbFastReset(cfg, cid, adminId);
                 if (fastReset != null) return fastReset;
             }}
             cfg.put("qr_was_closed", true);
-            setVisionState(cfg, "RESET_CLOSE_QR");
+            setVisionState(cfg, mode.equals("keepalive") ? "KA_CLOSE_QR" : "RESET_CLOSE_QR");
             cfg.put("other_count", 0);
             resetWaitCounters(cfg);
             queueStepStatus(cfg, null);
@@ -4238,6 +4617,8 @@ try {{
                         cfg.put("_pop_queue", true);
                         cfg.put("queue", new JSONArray());
                         cfg.put("last_state", "QR_SENT");
+                        cfg.put("last_warm_ms", nowMs);
+                        cfg.put("keepalive_consec_fails", 0);
                         cfg.put("busy_until", 0L);
                         cfg.put("worker_active", false);
                         cfg.put("worker_pending_start_ms", 0L);
@@ -4403,6 +4784,67 @@ try {{
             cfg.put("white_count", 0);
             return handleLoadingWait(cfg, "loading_count", "TICKET_LOADING", 9, 70, cid, adminId);
         }}
+        if (mode.equals("keepalive")) {{
+            boolean kaPromoted = false;
+            boolean kaNeedTouch = false;
+            boolean kaDone = false;
+            long kaStartMs = cfg.optLong("active_start_ms", cfg.optLong("run_start_ms", 0L));
+            long kaDoneMs = System.currentTimeMillis();
+            synchronized (System.class) {{
+                JSONObject latestCfg = loadConfig();
+                if (latestCfg.optLong("run_start_ms", 0L) > cfg.optLong("run_start_ms", 0L)) {{
+                    cfg = latestCfg;
+                    kaPromoted = true;
+                }} else if (!cfg.optBoolean("keepalive_touched", false) && stepCount <= 2) {{
+                    kaNeedTouch = true;
+                }} else {{
+                    kaDoneMs = System.currentTimeMillis();
+                    cfg.put("_pop_queue", true);
+                    cfg.put("queue", new JSONArray());
+                    cfg.put("qr_was_closed", true);
+                    cfg.put("other_count", 0);
+                    resetWaitCounters(cfg);
+                    cfg.put("last_state", "KEEPALIVE");
+                    cfg.put("last_warm_ms", kaDoneMs);
+                    cfg.put("keepalive_consec_fails", 0);
+                    cfg.put("busy_until", 0L);
+                    cfg.put("worker_active", false);
+                    cfg.put("worker_pending_start_ms", 0L);
+                    cfg.put("worker_exiting_ms", kaDoneMs);
+                    cfg.put("worker_heartbeat_ms", kaDoneMs);
+                    queueStepStatus(cfg, null);
+                    saveConfig(cfg);
+                    kaDone = true;
+                }}
+            }}
+            if (kaPromoted) {{
+                mode = cfg.optString("capture_mode", "qr");
+                botToken = (cfg.optString("active_reply_bot", "public").equals("admin") && adminBotToken.length() > 0)
+                    ? adminBotToken : pubBotToken;
+                cid = cfg.optLong("active_chat_id", 0L);
+                adminId = cfg.optLong("admin_id", 0L);
+                stepCount = cfg.optInt("step_count", 1);
+                if (!mode.equals("qr")) {{
+                    return "WAIT";
+                }}
+            }} else if (kaNeedTouch) {{
+                cfg.put("keepalive_touched", true);
+                cfg.put("qr_was_closed", true);
+                cfg.put("other_count", 0);
+                resetWaitCounters(cfg);
+                setVisionState(cfg, "KEEPALIVE_TOUCH");
+                queueStepStatus(cfg, null);
+                saveConfig(cfg);
+                return "CLICK_AVAILABLE_TAB";
+            }} else if (kaDone) {{
+                long kaElapsed = (kaStartMs > 0L && kaDoneMs >= kaStartMs) ? (kaDoneMs - kaStartMs) : 0L;
+                String kaTrace = cfg.optString("state_trace", "");
+                appendAuditLog("INFO", "KEEPALIVE_OK", 0L, "system",
+                    "steps=" + stepCount + " elapsed=" + formatSec(kaElapsed)
+                    + (kaTrace.length() > 0 ? (" trace=" + kaTrace) : ""));
+                return "DONE_KEEPALIVE";
+            }}
+        }}
         if (mode.equals("reset") || isRestartVm) {{
             long popNextCid = 0L;
             long popNextMid = 0L;
@@ -4481,6 +4923,8 @@ try {{
                 cfg.put("_pop_queue", true);
                 cfg.put("queue", new JSONArray());
                 cfg.put("last_state", "RESET");
+                cfg.put("last_warm_ms", nowMs);
+                cfg.put("keepalive_consec_fails", 0);
                 cfg.put("reset_notified", true);
                 cfg.put("busy_until", 0L);
                 cfg.put("worker_active", false);
@@ -4804,6 +5248,8 @@ synchronized (System.class) {
             boolean newRunClaimed = (
                 stepCmd.equals("DONE") && (workerActive || busyUntil > 0L)
             ) || (
+                stepCmd.equals("DONE_KEEPALIVE") && (workerActive || busyUntil > 0L)
+            ) || (
                 stepCmd.equals("DONE_RESET")
                 && resetAlreadyNotified
                 && (workerActive || busyUntil > 0L)
@@ -4820,8 +5266,8 @@ synchronized (System.class) {
                     cfg.put("worker_exiting_ms", 0L);
                     dirty = true;
                 }
-                if (stepCmd.equals("DONE")) {
-                    // Already completed QR flow; only clear worker flags
+                if (stepCmd.equals("DONE") || stepCmd.equals("DONE_KEEPALIVE")) {
+                    // Already completed QR or keepalive flow; only clear worker flags
                 } else if (busyUntil > 0L || (stepCmd.equals("DONE_RESET") && !resetAlreadyNotified)) {
                     queue = cfg.optJSONArray("queue");
                     cfg.put("busy_until", 0L);
@@ -4831,6 +5277,9 @@ synchronized (System.class) {
                     cfg.put("media_init_pending", false);
                     cfg.put("pending_cb_id", "");
                     cfg.put("state_trace", "");
+                    if (captureMode.equals("keepalive")) {
+                        cfg.put("keepalive_consec_fails", cfg.optInt("keepalive_consec_fails", 0) + 1);
+                    }
                     dirty = true;
                     notifyCleanup = true;
                 }
@@ -4855,6 +5304,23 @@ deletePrivateFrames();
 if (notifyCleanup) {
     long nowMs = System.currentTimeMillis();
     long elapsedMs = (activeStartMs > 0L && nowMs >= activeStartMs) ? (nowMs - activeStartMs) : 0L;
+    boolean isKeepaliveMode = captureMode.equals("keepalive");
+    if (isKeepaliveMode) {
+        int kaFails = cfgSnap.optInt("keepalive_consec_fails", 1);
+        appendAuditLog("WARN", "KEEPALIVE_TIMEOUT", 0L, "system",
+            "step=" + stepCount + " state=" + lastState + " fails=" + kaFails
+            + " elapsed=" + formatSec(elapsedMs) + " trace=" + stateTrace);
+        if (kaFails == 3 && adminId > 0L) {
+            sendAdminAlert(adminId,
+                "⚠️ Periodic Keepalive Failed 3x in a Row\\n"
+                + "• Last State: " + lastState + " (step " + stepCount + ")\\n"
+                + "• Elapsed: " + formatSec(elapsedMs) + "\\n"
+                + "• Trace: " + (stateTrace.length() > 0 ? stateTrace : "none") + "\\n"
+                + "• Check 🩺 System & Diag in /dashboard.",
+                null);
+        }
+        return "SCREEN_OFF";
+    }
     boolean isResetDone = stepCmd.equals("DONE_RESET");
     boolean isRestartVmMode = captureMode.equals("restart_vm");
     String msg = isResetDone
@@ -4946,14 +5412,16 @@ def build_macro(
     app_pin_var: str = "",
     app_name_var: str = "",
     admin_bot_token_var: str = "",
+    keepalive_minutes: int = DEFAULT_KEEPALIVE_MINUTES,
 ) -> dict:
     """Assemble the full MacroDroid macro JSON structure."""
     sg = SiguidGen("komobot-v2")
     actions: list[dict] = []
 
-    # 0. Identify which webhook trigger fired (komobotv2 vs komobotv2_admin) into transient raw_body
-    #    and clear the source trigger variable immediately so stale JSON cannot leak across bots.
-    actions.append(make_extract_text(sg, "public", "(.*)", "bot_role"))
+    # 0. Identify which trigger fired (komobotv2, komobotv2_admin, or RegularIntervalTrigger)
+    #    into transient raw_body and clear the source trigger variable immediately so stale JSON
+    #    cannot leak across bots.
+    actions.append(make_extract_text(sg, "keepalive", "(.*)", "bot_role"))
     actions.append(make_extract_text(sg, "", "(.*)", "raw_body"))
     actions.append(make_if_var_not_equals(sg, "admin_webhook_body", ""))
     actions.append(make_extract_text(sg, "admin", "(.*)", "bot_role"))
@@ -4962,11 +5430,14 @@ def build_macro(
     )
     actions.append(make_extract_text(sg, "", "(.*)", "admin_webhook_body"))
     actions.append(make_end_if(sg))
-    actions.append(make_if_var_equals(sg, "bot_role", "public"))
+    actions.append(make_if_var_equals(sg, "bot_role", "keepalive"))
+    actions.append(make_if_var_not_equals(sg, "webhook_body", ""))
+    actions.append(make_extract_text(sg, "public", "(.*)", "bot_role"))
     actions.append(
         make_extract_text(sg, "{lv=webhook_body}", "([\\s\\S]*)", "raw_body")
     )
     actions.append(make_extract_text(sg, "", "(.*)", "webhook_body"))
+    actions.append(make_end_if(sg))
     actions.append(make_end_if(sg))
 
     # 1. Extract update_id, chat_id, msg_text safely from raw_body, then clear raw_body
@@ -5040,7 +5511,11 @@ def build_macro(
 
     # 2. JavaAction #1: Telegram Router, Auth & Command Handler
     actions.append(
-        make_java_action(sg, build_router_script(), response_var="bot_action")
+        make_java_action(
+            sg,
+            build_router_script(keepalive_minutes=keepalive_minutes),
+            response_var="bot_action",
+        )
     )
 
     # 3. If bot_action == "RUN": temporarily disable Samsung pocket/palm screen-off guards via
@@ -5068,6 +5543,7 @@ def build_macro(
         [make_click_xy(sg, 626, 121), make_pause(sg, millis=250), make_break_loop(sg)],
     )
     add_cmd_branch("DONE_RESET", [make_break_loop(sg)])
+    add_cmd_branch("DONE_KEEPALIVE", [make_break_loop(sg)])
     add_cmd_branch("ABORT_PREEMPTED", [make_break_loop(sg)])
     add_cmd_branch("ABORT_TIMEOUT", [make_break_loop(sg)])
     add_cmd_branch("CLICK_ENTER", [make_click_xy(sg, 627, 250)])
@@ -5151,6 +5627,39 @@ def build_macro(
         make_var("webhook_body", working=True, supports_input=False),
     ]
 
+    triggers: list[dict] = [
+        {
+            "identifier": "komobotv2",
+            "ipAddressWhiteList": [],
+            "saveBodyVariableName": "webhook_body",
+            "variableWhiteList": [],
+            "variableWhiteListEnabled": False,
+            "disableLogging": False,
+            "m_SIGUID": -7390523152389324000,
+            "m_classType": "WebHookTrigger",
+            "m_comment": "",
+            "m_constraintList": [],
+            "m_isDisabled": False,
+            "m_isOrCondition": False,
+        },
+        {
+            "identifier": "komobotv2_admin",
+            "ipAddressWhiteList": [],
+            "saveBodyVariableName": "admin_webhook_body",
+            "variableWhiteList": [],
+            "variableWhiteListEnabled": False,
+            "disableLogging": False,
+            "m_SIGUID": -7390523152389324001,
+            "m_classType": "WebHookTrigger",
+            "m_comment": "",
+            "m_constraintList": [],
+            "m_isDisabled": False,
+            "m_isOrCondition": False,
+        },
+    ]
+    if keepalive_minutes > 0:
+        triggers.append(make_regular_interval_trigger(keepalive_minutes * 60))
+
     return {
         "globalVariables": [],
         "macro": {
@@ -5182,36 +5691,7 @@ def build_macro(
             "m_headingColor": 0,
             "m_isOrCondition": False,
             "m_name": "Komobot Controller",
-            "m_triggerList": [
-                {
-                    "identifier": "komobotv2",
-                    "ipAddressWhiteList": [],
-                    "saveBodyVariableName": "webhook_body",
-                    "variableWhiteList": [],
-                    "variableWhiteListEnabled": False,
-                    "disableLogging": False,
-                    "m_SIGUID": -7390523152389324000,
-                    "m_classType": "WebHookTrigger",
-                    "m_comment": "",
-                    "m_constraintList": [],
-                    "m_isDisabled": False,
-                    "m_isOrCondition": False,
-                },
-                {
-                    "identifier": "komobotv2_admin",
-                    "ipAddressWhiteList": [],
-                    "saveBodyVariableName": "admin_webhook_body",
-                    "variableWhiteList": [],
-                    "variableWhiteListEnabled": False,
-                    "disableLogging": False,
-                    "m_SIGUID": -7390523152389324001,
-                    "m_classType": "WebHookTrigger",
-                    "m_comment": "",
-                    "m_constraintList": [],
-                    "m_isDisabled": False,
-                    "m_isOrCondition": False,
-                },
-            ],
+            "m_triggerList": triggers,
         },
         "macroExportVersion": 1,
     }
@@ -5242,6 +5722,12 @@ def main() -> None:
         default="",
         help="Optional separate Telegram admin bot token for admin_bot_token variable",
     )
+    parser.add_argument(
+        "--keepalive-minutes",
+        type=int,
+        default=DEFAULT_KEEPALIVE_MINUTES,
+        help="Periodic full-pipeline keepalive interval in minutes (0 to disable trigger)",
+    )
     args = parser.parse_args()
 
     deploy_data = build_macro(
@@ -5250,6 +5736,7 @@ def main() -> None:
         app_pin_var=args.app_pin,
         app_name_var=args.app_name,
         admin_bot_token_var=args.admin_bot_token,
+        keepalive_minutes=args.keepalive_minutes,
     )
     OUT_MACRO.write_text(
         json.dumps(deploy_data, indent=2, ensure_ascii=False), encoding="utf-8"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 
 import generate_macro as gm
 from tests.bsh_runtime import MockAndroidEnv, run_bsh_script
@@ -31,6 +32,8 @@ def _run_router(
     pub_bot_token: str = "test-token",
     admin_bot_token: str = "",
     bot_role: str = "public",
+    battery: str = "92",
+    power: str = "On",
 ) -> str:
     return run_bsh_script(
         ROUTER_SCRIPT,
@@ -50,6 +53,8 @@ def _run_router(
             "sender_name": sender_name,
             "sender_username": sender_username,
             "forward_user_id": forward_user_id,
+            "battery": battery,
+            "power": power,
         },
     )
 
@@ -1878,6 +1883,183 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             "QR Bot Token Unauthorized (HTTP 401)",
             admin_alerts[0][1]["payload"]["text"],
         )
+
+    def test_keepalive_schedule_self_ping_promotion_toggle_and_timeout(self) -> None:
+        def local_ms(hour: int, minute: int = 0) -> int:
+            return int(datetime(2026, 11, 21, hour, minute, 0).timestamp() * 1000)
+
+        # 1. Overnight hours (00:00 and 05:59) are skipped silently without waking
+        for h, m in ((0, 0), (5, 59)):
+            self.env.now_ms = local_ms(h, m)
+            self.assertEqual(
+                _run_router(self.env, "0", "", bot_role="keepalive"), "IGNORE"
+            )
+            self.assertEqual(self.env.read_config()["busy_until"], 0)
+            self.assertEqual(self.env.tg_calls, [])
+
+        # 2. Active hours (06:00-00:00), unplugged low battery (<20%) skips
+        self.env.now_ms = local_ms(10, 0)
+        self.assertEqual(
+            _run_router(
+                self.env, "0", "", bot_role="keepalive", battery="15", power="Off"
+            ),
+            "IGNORE",
+        )
+        # Plugged in at 15% is allowed to run
+        self.assertEqual(
+            _run_router(
+                self.env, "0", "", bot_role="keepalive", battery="15", power="On"
+            ),
+            "RUN",
+        )
+        cfg = self.env.read_config()
+        self.assertEqual(cfg["capture_mode"], "keepalive")
+        self.assertEqual(cfg["active_chat_id"], 0)
+        self.assertEqual(cfg["active_trigger"], "keepalive")
+        self.assertGreater(cfg["busy_until"], self.env.now_ms)
+
+        # 3. InitStatus for keepalive fetches webhook URL, fires self-ping, keeps 550ms
+        #    wake settle, and sends zero Telegram chat messages.
+        t_before = self.env.now_ms
+        self.assertEqual(_run_init_status(self.env), "KEEPALIVE")
+        self.assertGreaterEqual(self.env.now_ms - t_before, 550)
+        methods = [c["method"] for c in self.env.tg_calls]
+        self.assertIn("getWebhookInfo", methods)
+        self.assertIn("komobotv2", methods)
+        self.assertNotIn("sendMessage", methods)
+        ping_call = next(c for c in self.env.tg_calls if c["method"] == "komobotv2")
+        ping_text = ping_call["payload"]["message"]["text"]
+        self.assertTrue(ping_text.startswith("__keepalive_ping__:"))
+        self.assertEqual(ping_call["payload"]["update_id"], 0)
+
+        # 4. Self-webhook pong records RTT silently (no BAD_CHAT_ID / last_update_id)
+        self.env.advance_time(420)
+        self.assertEqual(
+            _run_router(self.env, "0", ping_text, update_id="0", bot_role="public"),
+            "IGNORE",
+        )
+        cfg_pong = self.env.read_config()
+        self.assertEqual(cfg_pong["last_update_id"], 500)
+        self.assertGreaterEqual(cfg_pong["last_webhook_rtt_ms"], 420)
+        log_entry = self.env.files.get(
+            "/storage/emulated/0/Download/komobot_events.log"
+        )
+        self.assertNotIn(
+            "BAD_CHAT_ID", log_entry.data.decode("utf-8") if log_entry else ""
+        )
+
+        # 5. Cooperative promotion: real user /qr arriving during live keepalive
+        #    upgrades the in-flight worker in-place instead of queueing!
+        self.env.tg_calls.clear()
+        orig_worker_start = cfg_pong["worker_start_ms"]
+        orig_run_start = cfg_pong["run_start_ms"]
+        self.assertEqual(
+            _run_router(
+                self.env, ALLOWED_USER, "/qr", update_id="501", bot_role="public"
+            ),
+            "IGNORE",
+        )
+        cfg_promo = self.env.read_config()
+        self.assertEqual(cfg_promo["capture_mode"], "qr")
+        self.assertEqual(cfg_promo["active_chat_id"], int(ALLOWED_USER))
+        self.assertEqual(cfg_promo["worker_start_ms"], orig_worker_start)
+        self.assertGreater(cfg_promo["run_start_ms"], orig_run_start)
+        self.assertEqual(cfg_promo["state_trace"], "PROMOTED_FROM_KA")
+        self.assertEqual(cfg_promo["queue"], [])
+        self.assertGreater(cfg_promo["status_message_id"], 0)
+        self.assertEqual(len(self.env.tg_calls), 1)
+        self.assertEqual(self.env.tg_calls[0]["method"], "sendMessage")
+
+        # 6. Recently warmed phone skips keepalive until interval - 2m elapses
+        cfg_warm = self.env.read_config()
+        cfg_warm["busy_until"] = 0
+        cfg_warm["worker_active"] = False
+        cfg_warm["last_warm_ms"] = self.env.now_ms
+        self.env.write_config(cfg_warm)
+        self.env.advance_time(15 * 60 * 1000)  # 15m < 23m threshold
+        self.assertEqual(_run_router(self.env, "0", "", bot_role="keepalive"), "IGNORE")
+        self.env.advance_time(10 * 60 * 1000)  # 25m total >= 23m threshold
+        self.assertEqual(_run_router(self.env, "0", "", bot_role="keepalive"), "RUN")
+        # Second InitStatus reuses cached webhook URL (getMe instead of getWebhookInfo)
+        self.env.tg_calls.clear()
+        self.assertEqual(_run_init_status(self.env), "KEEPALIVE")
+        self.assertEqual(
+            [c["method"] for c in self.env.tg_calls], ["getMe", "komobotv2"]
+        )
+
+        # 7. Keepalive timeout: no user_stats pollution; alerts admin on 3rd fail
+        self.env.tg_calls.clear()
+        for expected_fails in (1, 2, 3):
+            cfg_t = self.env.read_config()
+            cfg_t["capture_mode"] = "keepalive"
+            cfg_t["active_chat_id"] = 0
+            cfg_t["busy_until"] = self.env.now_ms + 30000
+            cfg_t["worker_active"] = True
+            cfg_t["last_state"] = "VM_LOADING"
+            cfg_t["step_count"] = 35
+            self.env.write_config(cfg_t)
+            self.assertEqual(_run_timeout(self.env, "ABORT_TIMEOUT"), "SCREEN_OFF")
+            after = self.env.read_config()
+            self.assertEqual(after["keepalive_consec_fails"], expected_fails)
+            self.assertEqual(after["busy_until"], 0)
+            self.assertFalse(after.get("user_stats"))
+            if expected_fails < 3:
+                self.assertEqual(self.env.tg_calls, [])
+            else:
+                self.assertEqual(len(self.env.tg_calls), 1)
+                self.assertIn(
+                    "Periodic Keepalive Failed 3x",
+                    self.env.tg_calls[0]["payload"]["text"],
+                )
+
+        # 8. Admin Console adm:keepalive toggle + WH RTT shown in adm:health
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="502",
+                callback_id="cb-ka-off",
+                callback_data="adm:keepalive",
+                callback_msg_id="777",
+            ),
+            "IGNORE",
+        )
+        self.assertFalse(self.env.read_config()["keepalive_enabled"])
+        edit_calls = [c for c in self.env.tg_calls if c["method"] == "editMessageText"]
+        self.assertEqual(len(edit_calls), 1)
+        self.assertIn("Keepalive: 🔴 OFF", edit_calls[0]["payload"]["text"])
+        self.assertIn("WH RTT=", edit_calls[0]["payload"]["text"])
+        # Disabled keepalive skips even when stale during active hours
+        self.env.advance_time(30 * 60 * 1000)
+        self.assertEqual(_run_router(self.env, "0", "", bot_role="keepalive"), "IGNORE")
+        # Re-enabling resets consec_fails to 0
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="503",
+                callback_id="cb-ka-on",
+                callback_data="adm:keepalive",
+                callback_msg_id="777",
+            ),
+            "IGNORE",
+        )
+        self.assertTrue(self.env.read_config()["keepalive_enabled"])
+        self.assertEqual(self.env.read_config()["keepalive_consec_fails"], 0)
+
+        # 9. DONE_KEEPALIVE returns SCREEN_OFF when idle, KEEP_ON if a new run claimed
+        cfg_done = self.env.read_config()
+        cfg_done["busy_until"] = 0
+        cfg_done["worker_active"] = False
+        self.env.write_config(cfg_done)
+        self.assertEqual(_run_timeout(self.env, "DONE_KEEPALIVE"), "SCREEN_OFF")
+        cfg_done["busy_until"] = self.env.now_ms + 45000
+        cfg_done["worker_active"] = True
+        self.env.write_config(cfg_done)
+        self.assertEqual(_run_timeout(self.env, "DONE_KEEPALIVE"), "KEEP_ON")
 
 
 if __name__ == "__main__":

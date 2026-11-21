@@ -220,7 +220,7 @@ class TestVisionScenarios(unittest.TestCase):
             with_thumbnail=with_thumb,
         )
         cmd = run_bsh_script(VISION_SCRIPT, self.env, LOCAL_VARS)
-        if cmd not in ("DONE", "DONE_RESET"):
+        if cmd not in ("DONE", "DONE_RESET", "DONE_KEEPALIVE"):
             run_bsh_script(
                 POST_STEP_SCRIPT,
                 self.env,
@@ -1706,6 +1706,96 @@ class TestVisionScenarios(unittest.TestCase):
         self.env.write_config(cfg_adm)
         self.assertEqual(self._step(ScreenFactory.ticket_list()), "CLICK_TICKET_ROW")
         self.assertEqual(self.env.read_config()["last_update_id_admin"], 777001)
+
+    def test_keepalive_cold_recovery_warm_touch_qr_close_and_promotion(self) -> None:
+        # 1. Cold keepalive: VM_LAUNCHER -> PIN_PAD -> DASHBOARD -> TICKET_LIST ->
+        #    DONE_KEEPALIVE (never taps ticket row / uploads QR; logs KEEPALIVE_OK).
+        self.env.guest_adb_mode = "ok"
+        self.env.write_text(
+            "/storage/emulated/0/Download/komobot_adb_key.pk8",
+            json.dumps({"n": hex((1 << 2047) | 1), "e": 65537}),
+        )
+        self.env.write_text("/storage/emulated/0/Download/komobot_adb_key.pub", "pub")
+        self._seed_active_run(
+            active_chat_id=0, status_message_id=0, mode="keepalive", vm_seen=False
+        )
+        cfg0 = self.env.read_config()
+        cfg0["keepalive_consec_fails"] = 2
+        self.env.write_config(cfg0)
+
+        self.assertEqual(self._step(ScreenFactory.vm_launcher(True)), "CLICK_ENTER")
+        self.assertEqual(self._step(ScreenFactory.pin_screen()), "WAIT")
+        self.assertEqual(self.env.read_config()["last_state"], "ADB_ENTER_PIN")
+        self.assertEqual(
+            self._step(ScreenFactory.dashboard("low")), "CLICK_TRANSPORT_LOW"
+        )
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "DONE_KEEPALIVE")
+        cfg_done = self.env.read_config()
+        self.assertEqual(cfg_done["last_state"], "KEEPALIVE")
+        self.assertEqual(cfg_done["busy_until"], 0)
+        self.assertEqual(cfg_done["keepalive_consec_fails"], 0)
+        self.assertGreater(cfg_done["last_warm_ms"], 0)
+        self.assertEqual(self.env.tg_calls, [])
+        log_txt = self.env.files[
+            "/storage/emulated/0/Download/komobot_events.log"
+        ].data.decode("utf-8")
+        self.assertIn("KEEPALIVE_OK", log_txt)
+
+        # 2. Warm keepalive arriving directly on TICKET_LIST taps Доступно tab once,
+        #    then exits with DONE_KEEPALIVE without opening any ticket/QR.
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=0, status_message_id=0, mode="keepalive", vm_seen=True
+        )
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "CLICK_AVAILABLE_TAB")
+        self.assertTrue(self.env.read_config()["keepalive_touched"])
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "DONE_KEEPALIVE")
+        self.assertEqual(self.env.tg_calls, [])
+
+        # 3. Unexpected QR_MODAL during keepalive is closed, never uploaded
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=0, status_message_id=0, mode="keepalive", vm_seen=True
+        )
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "CLOSE_MODAL")
+        self.assertEqual(self.env.read_config()["last_state"], "KA_CLOSE_QR")
+        self.assertEqual(self.env.tg_calls, [])
+
+        # 4. Mid-run cooperative promotion (keepalive -> qr) via syncActiveConfig
+        #    transitions straight into CLICK_TICKET_ROW -> QR_SENT.
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=0, status_message_id=0, mode="keepalive", vm_seen=True
+        )
+        cfg_ka = self.env.read_config()
+        cfg_ka["run_start_ms"] += 100
+        cfg_ka["capture_mode"] = "qr"
+        cfg_ka["active_chat_id"] = USER_2
+        cfg_ka["status_message_id"] = 2020
+        self.env.write_config(cfg_ka)
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "CLICK_TICKET_ROW")
+        self.assertEqual(self._step(ScreenFactory.qr_modal(loaded=True)), "DONE")
+        self.assertEqual(self.env.read_config()["last_state"], "QR_SENT")
+        self.assertGreater(self.env.read_config()["last_warm_ms"], 0)
+        self.assertTrue(any(c["method"] == "sendPhoto" for c in self.env.tg_calls))
+
+        # 5. Keepalive uses a 35-step cap and preserves webhook RTT on saveConfig
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=0, status_message_id=0, mode="keepalive", step_count=35
+        )
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "ABORT_TIMEOUT")
+
+        self.setUp()
+        self._seed_active_run(
+            active_chat_id=0, status_message_id=0, mode="keepalive", vm_seen=True
+        )
+        cfg_rtt = self.env.read_config()
+        cfg_rtt["last_webhook_pong_ms"] = self.env.now_ms + 500
+        cfg_rtt["last_webhook_rtt_ms"] = 615
+        self.env.write_config(cfg_rtt)
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "CLICK_AVAILABLE_TAB")
+        self.assertEqual(self.env.read_config()["last_webhook_rtt_ms"], 615)
 
 
 if __name__ == "__main__":

@@ -45,12 +45,14 @@ DEFAULT_ADMIN_BOT_TOKEN="$(read_env_default ADMIN_BOT_TOKEN)"
 DEFAULT_ADMIN_ID="$(read_env_default ADMIN_ID)"
 DEFAULT_APP_PIN="$(read_env_default APP_PIN)"
 DEFAULT_APP_NAME="$(read_env_default APP_NAME)"
+DEFAULT_KEEPALIVE_MINUTES="$(read_env_default KEEPALIVE_MINUTES)"
 
 BOT_TOKEN_VAL="${BOT_TOKEN:-}"
 ADMIN_BOT_TOKEN_VAL="${ADMIN_BOT_TOKEN:-$DEFAULT_ADMIN_BOT_TOKEN}"
 ADMIN_ID_VAL="${ADMIN_ID:-}"
 APP_PIN_VAL="${APP_PIN:-}"
 APP_NAME_VAL="${APP_NAME:-}"
+KEEPALIVE_MINUTES_VAL="${KEEPALIVE_MINUTES:-${DEFAULT_KEEPALIVE_MINUTES:-25}}"
 
 prompt_var BOT_TOKEN_VAL "BOT_TOKEN" "$DEFAULT_BOT_TOKEN" 1
 prompt_var ADMIN_ID_VAL "ADMIN_ID" "$DEFAULT_ADMIN_ID" 0
@@ -123,7 +125,8 @@ python3 "$SCRIPT_DIR/generate_macro.py" \
 	--admin-bot-token "$ADMIN_BOT_TOKEN_VAL" \
 	--admin-id "$ADMIN_ID_VAL" \
 	--app-pin "$APP_PIN_VAL" \
-	--app-name "$APP_NAME_VAL"
+	--app-name "$APP_NAME_VAL" \
+	--keepalive-minutes "$KEEPALIVE_MINUTES_VAL"
 
 echo "==> Checking ADB device..."
 adb wait-for-device
@@ -276,6 +279,7 @@ adb shell settings put global settings_enable_monitor_phantom_procs false 2>/dev
 adb shell cmd device_config override activity_manager max_phantom_processes 2147483647 2>/dev/null || adb shell cmd device_config put activity_manager max_phantom_processes 2147483647 2>/dev/null || true
 adb shell settings put global wifi_power_save 0 2>/dev/null || true
 adb shell settings put global wifi_sleep_policy 2 2>/dev/null || true
+adb shell settings put global wifi_suspend_optimizations_enabled 0 2>/dev/null || true
 adb shell settings put system screen_off_timeout 120000 2>/dev/null || true
 adb shell locksettings set-disabled true 2>/dev/null || true
 adb shell settings put secure lockscreen.disabled 1 2>/dev/null || true

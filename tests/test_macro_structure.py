@@ -65,13 +65,20 @@ class TestMacroStructure(unittest.TestCase):
         self.assertEqual(self.macro["m_name"], "Komobot Controller")
         self.assertTrue(self.macro["m_enabled"])
         triggers = self.macro["m_triggerList"]
-        self.assertEqual(len(triggers), 2)
+        self.assertEqual(len(triggers), 3)
         self.assertEqual(triggers[0]["m_classType"], "WebHookTrigger")
         self.assertEqual(triggers[0]["identifier"], "komobotv2")
         self.assertEqual(triggers[0]["saveBodyVariableName"], "webhook_body")
         self.assertEqual(triggers[1]["m_classType"], "WebHookTrigger")
         self.assertEqual(triggers[1]["identifier"], "komobotv2_admin")
         self.assertEqual(triggers[1]["saveBodyVariableName"], "admin_webhook_body")
+        self.assertEqual(triggers[2]["m_classType"], "RegularIntervalTrigger")
+        self.assertEqual(triggers[2]["m_seconds"], gm.DEFAULT_KEEPALIVE_MINUTES * 60)
+        self.assertTrue(triggers[2]["m_useAlarm"])
+        self.assertLess(triggers[2]["m_SIGUID"], 0)
+
+        no_ka_triggers = gm.build_macro(keepalive_minutes=0)["macro"]["m_triggerList"]
+        self.assertEqual(len(no_ka_triggers), 2)
 
     def test_unique_negative_siguids_and_defined_local_vars(self) -> None:
         seen_ids: set[int] = set()
@@ -228,13 +235,19 @@ class TestMacroStructure(unittest.TestCase):
 
         self.assertEqual(xy_points("DONE"), [(626, 121)])
         self.assertEqual(xy_points("DONE_RESET"), [])
+        self.assertEqual(xy_points("DONE_KEEPALIVE"), [])
         self.assertEqual(xy_points("ABORT_PREEMPTED"), [])
         self.assertEqual(xy_points("ABORT_TIMEOUT"), [])
         self.assertEqual(xy_points("OPEN_RECENTS"), [(567, 1553)])
         self.assertEqual(xy_points("CLICK_BACK"), [(151, 1553)])
         self.assertEqual(xy_points("RESET_TO_HOME"), [(360, 1553)])
 
-        for break_cmd in ("DONE_RESET", "ABORT_PREEMPTED", "ABORT_TIMEOUT"):
+        for break_cmd in (
+            "DONE_RESET",
+            "DONE_KEEPALIVE",
+            "ABORT_PREEMPTED",
+            "ABORT_TIMEOUT",
+        ):
             classes = [
                 a["m_classType"] for a in _find_cmd_branch(self.actions, break_cmd)
             ]
@@ -290,23 +303,26 @@ class TestMacroStructure(unittest.TestCase):
             self.assertTrue(act["useHelper"])
 
     def test_stage1_webhook_regex_extractors(self) -> None:
-        # Stage 0 isolates admin_webhook_body/webhook_body into raw_body and clears them
+        # Stage 0 isolates admin_webhook_body/webhook_body into raw_body, clears them,
+        # and defaults bot_role to "keepalive" when neither webhook fired.
+        self.assertEqual(self.actions[0]["variableName"], "bot_role")
+        self.assertEqual(self.actions[0]["m_text"], "keepalive")
         cleared_vars = [
             a["variableName"]
-            for a in self.actions[:21]
+            for a in self.actions[:24]
             if a.get("m_classType") == "TextManipulationAction"
             and a.get("m_text") == ""
         ]
         self.assertIn("admin_webhook_body", cleared_vars)
         self.assertIn("webhook_body", cleared_vars)
         self.assertIn("raw_body", cleared_vars)
-        # Action 20 clears raw_body right before JavaAction #1
-        self.assertEqual(self.actions[20]["variableName"], "raw_body")
-        self.assertEqual(self.actions[20]["m_text"], "")
-        self.assertEqual(self.actions[21]["m_classType"], "JavaAction")
+        # Action 23 clears raw_body right before JavaAction #1
+        self.assertEqual(self.actions[23]["variableName"], "raw_body")
+        self.assertEqual(self.actions[23]["m_text"], "")
+        self.assertEqual(self.actions[24]["m_classType"], "JavaAction")
 
         extractors: dict[str, tuple[str, str]] = {}
-        for action in self.actions[11:20]:
+        for action in self.actions[14:23]:
             self.assertEqual(action["m_classType"], "TextManipulationAction")
             suffix = action["m_text"].split("{lv=raw_body}", 1)[1]
             regex = action["m_textManipulation"]["params"][0]
