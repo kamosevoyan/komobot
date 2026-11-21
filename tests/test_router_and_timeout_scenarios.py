@@ -28,6 +28,7 @@ def _run_router(
     sender_name: str = "",
     sender_username: str = "",
     forward_user_id: str = "0",
+    pub_bot_token: str = "test-token",
     admin_bot_token: str = "",
     bot_role: str = "public",
 ) -> str:
@@ -35,7 +36,7 @@ def _run_router(
         ROUTER_SCRIPT,
         env,
         {
-            "bot_token": "test-token",
+            "pub_bot_token": pub_bot_token,
             "admin_bot_token": admin_bot_token,
             "bot_role": bot_role,
             "app_name": "ru.deltapay.puntopago.telcell",
@@ -53,11 +54,13 @@ def _run_router(
     )
 
 
-def _run_init_status(env: MockAndroidEnv, admin_bot_token: str = "") -> str:
+def _run_init_status(
+    env: MockAndroidEnv, admin_bot_token: str = "", pub_bot_token: str = "test-token"
+) -> str:
     return run_bsh_script(
         INIT_STATUS_SCRIPT,
         env,
-        {"bot_token": "test-token", "admin_bot_token": admin_bot_token},
+        {"pub_bot_token": pub_bot_token, "admin_bot_token": admin_bot_token},
     )
 
 
@@ -94,7 +97,7 @@ def _dispatch_qr(
 
 def _run_timeout(env: MockAndroidEnv, step_cmd: str) -> str:
     return run_bsh_script(
-        TIMEOUT_SCRIPT, env, {"bot_token": "test-token", "step_cmd": step_cmd}
+        TIMEOUT_SCRIPT, env, {"pub_bot_token": "test-token", "step_cmd": step_cmd}
     )
 
 
@@ -165,7 +168,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             f"adm:addid:{UNKNOWN_USER}",
         )
 
-        # Admin /start includes Admin Dashboard & Reset VM App; regular user does not
+        # Admin /start shows unified Admin Console button (no duplicate keyboard cmds)
         self.env.tg_calls.clear()
         self.assertEqual(_run_router(self.env, ADMIN_ID, "/start"), "IGNORE")
         admin_kb = [
@@ -173,14 +176,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             for row in self.env.tg_calls[0]["payload"]["reply_markup"]["keyboard"]
             for b in row
         ]
-        for btn in (
-            "📸 Take QR Screenshot",
-            "📊 Admin Dashboard",
-            "🧹 Reset VM App",
-            "👥 List Users",
-            "🛑 Toggle Public Access",
-        ):
-            self.assertIn(btn, admin_kb)
+        self.assertEqual(admin_kb, ["📸 Take QR Screenshot", "📊 Admin Console"])
 
         self.env.tg_calls.clear()
         self.assertEqual(_run_router(self.env, ALLOWED_USER, "/start"), "IGNORE")
@@ -665,7 +661,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             "Unauthorized Access Attempt", self.env.tg_calls[2]["payload"]["text"]
         )
 
-        # 5. Duplicate update_id skips all HTTP calls
+        # 5. Duplicate callback update_id acks "Already processed" & logs DUP_UID_DROP
         self.env.tg_calls.clear()
         self.assertEqual(
             _run_router(
@@ -678,7 +674,19 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             ),
             "IGNORE",
         )
-        self.assertEqual(self.env.tg_calls, [])
+        self.assertEqual(
+            self.env.tg_calls,
+            [
+                {
+                    "method": "answerCallbackQuery",
+                    "status": 200,
+                    "payload": {
+                        "callback_query_id": "cb-105",
+                        "text": "Already processed",
+                    },
+                }
+            ],
+        )
 
     def test_in_place_refresh_button_progress_noop_and_timeout(self) -> None:
         # 1. Idle callback with message_id edits inline button to 10% noop bar
@@ -1003,7 +1011,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         )
         self.assertEqual([c["method"] for c in self.env.tg_calls], ["sendMessage"])
         dash_payload = self.env.tg_calls[0]["payload"]
-        self.assertIn("Admin Dashboard", dash_payload["text"])
+        self.assertIn("Admin Console", dash_payload["text"])
         self.assertIn("Users: 8 authorized", dash_payload["text"])
         self.assertEqual(
             self.env.read_config()["user_meta"][ADMIN_ID]["username"], "kamo_s"
@@ -1241,7 +1249,7 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             _run_router(self.env, ADMIN_ID, "/dashboard", update_id="825"), "IGNORE"
         )
         self.assertEqual(self.env.read_config()["admin_pending_action"], "")
-        self.assertIn("Admin Dashboard", self.env.tg_calls[0]["payload"]["text"])
+        self.assertIn("Admin Console", self.env.tg_calls[0]["payload"]["text"])
 
         # 4. Paginated remove confirm flow removes target & protects Admin
         self.env.tg_calls.clear()
@@ -1396,7 +1404,8 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             for b in row
         ]
         self.assertIn("Guest ADB: 🟡 Pair Needed", ov_text)
-        self.assertIn("adm:adbpair", ov_kb)
+        self.assertIn("adm:health", ov_kb)
+        self.assertNotIn("adm:adbpair", ov_kb)
 
         # 2. Pairing against unauthorized guest creates RSA keys & sends AUTH(3)
         self.env.guest_adb_mode = "unauthorized"
@@ -1420,14 +1429,16 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         self.assertIn(
             "/storage/emulated/0/Download/komobot_adb_key.pub", self.env.files
         )
-        self.assertIn("Always allow", self.env.tg_calls[0]["payload"]["text"])
+        ack_calls = [
+            c for c in self.env.tg_calls if c["method"] == "answerCallbackQuery"
+        ]
+        edit_calls = [c for c in self.env.tg_calls if c["method"] == "editMessageText"]
+        self.assertIn("Always allow", ack_calls[-1]["payload"]["text"])
         self.assertIn(
             "ADB_PAIR_SENT",
             self.env.read_text("/storage/emulated/0/Download/komobot_events.log"),
         )
-        self.assertIn(
-            "Guest ADB: 🟡 Pair Needed", self.env.tg_calls[1]["payload"]["text"]
-        )
+        self.assertIn("Guest ADB: UNAUTHORIZED", edit_calls[-1]["payload"]["text"])
 
         # 3. Once trusted in VM, adm:home reports 🟢 Connected & adm:adbpair confirms
         self.env.guest_adb_mode = "ok"
@@ -1461,7 +1472,10 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             ),
             "IGNORE",
         )
-        self.assertIn("already paired", self.env.tg_calls[0]["payload"]["text"])
+        ack_calls2 = [
+            c for c in self.env.tg_calls if c["method"] == "answerCallbackQuery"
+        ]
+        self.assertIn("already paired", ack_calls2[-1]["payload"]["text"])
 
     def test_separate_admin_bot_routing_vmhealth_and_restart_vm(self) -> None:
         self.env.guest_adb_mode = "ok"
@@ -1520,15 +1534,13 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         )
         self.assertEqual(self.env.read_config()["last_update_id_admin"], 50)
         self.assertEqual(self.env.read_config()["last_update_id"], 1001)
-        self.assertIn("Admin Control Ready", self.env.tg_calls[-1]["payload"]["text"])
+        self.assertIn("Admin Console Ready", self.env.tg_calls[-1]["payload"]["text"])
         kb_flat = [
             btn
             for row in self.env.tg_calls[-1]["payload"]["reply_markup"]["keyboard"]
             for btn in row
         ]
-        self.assertIn("🧹 Reset VM App", kb_flat)
-        self.assertNotIn("🔁 Restart VM", kb_flat)
-        self.assertNotIn("📸 Take QR Screenshot", kb_flat)
+        self.assertEqual(kb_flat, ["📊 Admin Console"])
         self.assertEqual(
             self.env.tg_urls[-1].split("/bot")[1].split("/")[0], "admin-tok"
         )
@@ -1572,8 +1584,9 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             ),
             "IGNORE",
         )
-        vh_txt = self.env.tg_calls[1]["payload"]["text"]
-        self.assertIn("System & VM Health", vh_txt)
+        edit_calls = [c for c in self.env.tg_calls if c["method"] == "editMessageText"]
+        vh_txt = edit_calls[-1]["payload"]["text"]
+        self.assertIn("System & Diagnostics", vh_txt)
         self.assertIn("92%", vh_txt)
         self.assertIn("TestWiFi", vh_txt)
         self.assertIn("4321", vh_txt)
@@ -1584,6 +1597,16 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
             "Top Activity: ru.deltapay.puntopago.telcell/.activities.main.MainActivity",
             vh_txt,
         )
+        self.assertIn("QR Bot Diagnostics", vh_txt)
+        self.assertIn("@test_qr_bot", vh_txt)
+        vh_cbs = [
+            b["callback_data"]
+            for row in edit_calls[-1]["payload"]["reply_markup"]["inline_keyboard"]
+            for b in row
+        ]
+        self.assertIn("adm:adbpair", vh_cbs)
+        self.assertIn("adm:resetqr", vh_cbs)
+        self.assertNotIn("adm:restart_vm", vh_cbs)
 
         # 5. Text "🔁 Restart VM" shows confirmation instead of running immediately
         self.env.tg_calls.clear()
@@ -1639,6 +1662,221 @@ class TestRouterAndTimeoutScenarios(unittest.TestCase):
         )
         self.assertEqual(
             self.env.tg_urls[-1].split("/bot")[1].split("/")[0], "admin-tok"
+        )
+
+    def test_qrdiag_resetqr_drop_logs_401_alert_and_token_rotation(self) -> None:
+        # 1. Unified console buttons have zero duplicates across tabs
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "📊 Admin Console",
+                update_id="10",
+                pub_bot_token="11111:OLDTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        home_cbs = [
+            b["callback_data"]
+            for row in self.env.tg_calls[-1]["payload"]["reply_markup"][
+                "inline_keyboard"
+            ]
+            for b in row
+        ]
+        self.assertEqual(
+            home_cbs,
+            [
+                "adm:users:0",
+                "adm:logs:0",
+                "adm:health",
+                "adm:toggle",
+                "adm:reset_app",
+                "adm:restart_vm",
+                "adm:home",
+            ],
+        )
+
+        # 2. Inline adm:reset_app starts reset directly from console
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="11",
+                callback_id="cb-rst-app",
+                callback_data="adm:reset_app",
+                callback_msg_id="800",
+                pub_bot_token="11111:OLDTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="admin",
+            ),
+            "RUN",
+        )
+        self.assertEqual(self.env.read_config()["capture_mode"], "reset")
+
+        # 3. /resetqr clears poisoned last_update_id + active worker lock
+        cfg = self.env.read_config()
+        cfg["last_update_id"] = 596830294
+        cfg["busy_until"] = self.env.now_ms + 30_000
+        cfg["worker_active"] = True
+        cfg["queue"] = [{"chat_id": int(ALLOWED_USER), "status_message_id": 1}]
+        self.env.write_config(cfg)
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "/resetqr",
+                update_id="12",
+                pub_bot_token="11111:OLDTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        cfg_after = self.env.read_config()
+        self.assertEqual(cfg_after["last_update_id"], 0)
+        self.assertEqual(cfg_after["busy_until"], 0)
+        self.assertFalse(cfg_after["worker_active"])
+        self.assertEqual(cfg_after["queue"], [])
+        log_txt = self.env.files[
+            "/storage/emulated/0/Download/komobot_events.log"
+        ].data.decode("utf-8")
+        self.assertIn("QR_STATE_RESET", log_txt)
+
+        # 4. DUP_UID_DROP and BAD_CHAT_ID write audit entries (+ ack callback)
+        self.env.tg_calls.clear()
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="12",
+                callback_id="cb-dup",
+                callback_data="adm:home",
+                pub_bot_token="11111:OLDTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(
+            _run_router(
+                self.env,
+                "0",
+                "/qr",
+                update_id="0",
+                pub_bot_token="11111:OLDTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="public",
+            ),
+            "IGNORE",
+        )
+        log_txt = self.env.files[
+            "/storage/emulated/0/Download/komobot_events.log"
+        ].data.decode("utf-8")
+        self.assertIn("DUP_UID_DROP", log_txt)
+        self.assertIn("BAD_CHAT_ID", log_txt)
+        self.assertTrue(
+            any(
+                c["method"] == "answerCallbackQuery"
+                and c["payload"]["text"] == "Already processed"
+                for c in self.env.tg_calls
+            )
+        )
+
+        # 5. Token rotation auto-resets last_update_id and accepts lower update_id
+        cfg_rot = self.env.read_config()
+        cfg_rot["last_update_id"] = 999999
+        self.env.write_config(cfg_rot)
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                "/start",
+                update_id="42",
+                pub_bot_token="11111:NEWTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="public",
+            ),
+            "IGNORE",
+        )
+        self.assertEqual(self.env.read_config()["last_update_id"], 42)
+        self.assertEqual(self.env.read_config()["pub_token_tail"], "NEWTOK")
+        log_txt = self.env.files[
+            "/storage/emulated/0/Download/komobot_events.log"
+        ].data.decode("utf-8")
+        self.assertIn("TOKEN_ROTATED", log_txt)
+
+        # 6. Benign HTTP 400 "message is not modified" is NOT logged as TG_API_ERR,
+        # while HTTP 401 on pub_bot_token logs TG_API_ERR and alerts Admin Bot once.
+        self.env.files.pop("/storage/emulated/0/Download/komobot_events.log", None)
+        self.env.http_status_overrides["22222:ADMTK1:editMessageText"] = 400
+        self.env.http_error_bodies["22222:ADMTK1:editMessageText"] = {
+            "ok": False,
+            "error_code": 400,
+            "description": "Bad Request: message is not modified",
+        }
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ADMIN_ID,
+                "",
+                update_id="13",
+                callback_id="cb-noop-edit",
+                callback_data="adm:home",
+                callback_msg_id="801",
+                pub_bot_token="11111:NEWTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="admin",
+            ),
+            "IGNORE",
+        )
+        log_entry = self.env.files.get(
+            "/storage/emulated/0/Download/komobot_events.log"
+        )
+        self.assertNotIn(
+            "TG_API_ERR", log_entry.data.decode("utf-8") if log_entry else ""
+        )
+
+        self.env.http_status_overrides.clear()
+        self.env.http_error_bodies.clear()
+        self.env.tg_calls.clear()
+        self.env.tg_urls.clear()
+        self.env.http_status_overrides["11111:NEWTOK:sendMessage"] = 401
+        self.env.http_error_bodies["11111:NEWTOK:sendMessage"] = {
+            "ok": False,
+            "error_code": 401,
+            "description": "Unauthorized",
+        }
+        self.assertEqual(
+            _run_router(
+                self.env,
+                ALLOWED_USER,
+                "/start",
+                update_id="43",
+                pub_bot_token="11111:NEWTOK",
+                admin_bot_token="22222:ADMTK1",
+                bot_role="public",
+            ),
+            "IGNORE",
+        )
+        log_txt = self.env.files[
+            "/storage/emulated/0/Download/komobot_events.log"
+        ].data.decode("utf-8")
+        self.assertIn("TG_API_ERR", log_txt)
+        self.assertIn("http=401", log_txt)
+        admin_alerts = [
+            (u, c)
+            for u, c in zip(self.env.tg_urls, self.env.tg_calls)
+            if "22222:ADMTK1" in u and c["method"] == "sendMessage"
+        ]
+        self.assertEqual(len(admin_alerts), 1)
+        self.assertIn(
+            "QR Bot Token Unauthorized (HTTP 401)",
+            admin_alerts[0][1]["payload"]["text"],
         )
 
 

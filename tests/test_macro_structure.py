@@ -61,6 +61,7 @@ class TestMacroStructure(unittest.TestCase):
 
     def test_macro_metadata_and_webhook_trigger(self) -> None:
         self.assertEqual(self.macro_doc["macroExportVersion"], 1)
+        self.assertEqual(self.macro_doc["globalVariables"], [])
         self.assertEqual(self.macro["m_name"], "Komobot Controller")
         self.assertTrue(self.macro["m_enabled"])
         triggers = self.macro["m_triggerList"]
@@ -90,13 +91,14 @@ class TestMacroStructure(unittest.TestCase):
             "app_pin",
             "bot_action",
             "bot_role",
-            "bot_token",
             "callback_data",
             "callback_id",
             "callback_msg_id",
             "chat_id",
             "forward_user_id",
             "msg_text",
+            "pub_bot_token",
+            "raw_body",
             "screen_action",
             "sender_name",
             "sender_username",
@@ -288,10 +290,25 @@ class TestMacroStructure(unittest.TestCase):
             self.assertTrue(act["useHelper"])
 
     def test_stage1_webhook_regex_extractors(self) -> None:
+        # Stage 0 isolates admin_webhook_body/webhook_body into raw_body and clears them
+        cleared_vars = [
+            a["variableName"]
+            for a in self.actions[:21]
+            if a.get("m_classType") == "TextManipulationAction"
+            and a.get("m_text") == ""
+        ]
+        self.assertIn("admin_webhook_body", cleared_vars)
+        self.assertIn("webhook_body", cleared_vars)
+        self.assertIn("raw_body", cleared_vars)
+        # Action 20 clears raw_body right before JavaAction #1
+        self.assertEqual(self.actions[20]["variableName"], "raw_body")
+        self.assertEqual(self.actions[20]["m_text"], "")
+        self.assertEqual(self.actions[21]["m_classType"], "JavaAction")
+
         extractors: dict[str, tuple[str, str]] = {}
-        for action in self.actions[6:15]:
+        for action in self.actions[11:20]:
             self.assertEqual(action["m_classType"], "TextManipulationAction")
-            suffix = action["m_text"].split("{lv=webhook_body}", 1)[1]
+            suffix = action["m_text"].split("{lv=raw_body}", 1)[1]
             regex = action["m_textManipulation"]["params"][0]
             extractors[action["variableName"]] = (regex, suffix)
 

@@ -17,7 +17,7 @@ ADMIN_ID = 111222333
 USER_2 = 222333444
 USER_3 = 555666777
 LOCAL_VARS = {
-    "bot_token": "test-token",
+    "pub_bot_token": "test-token",
     "app_name": "ru.deltapay.puntopago.telcell",
     "app_pin": "1234",
 }
@@ -224,7 +224,7 @@ class TestVisionScenarios(unittest.TestCase):
             run_bsh_script(
                 POST_STEP_SCRIPT,
                 self.env,
-                {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+                {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": cmd},
             )
         return cmd
 
@@ -621,7 +621,10 @@ class TestVisionScenarios(unittest.TestCase):
             run_bsh_script(
                 POST_STEP_SCRIPT,
                 self.env,
-                {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": "CLICK_TICKET_ROW"},
+                {
+                    "pub_bot_token": LOCAL_VARS["pub_bot_token"],
+                    "step_cmd": "CLICK_TICKET_ROW",
+                },
             ),
             "OK",
         )
@@ -660,7 +663,7 @@ class TestVisionScenarios(unittest.TestCase):
             gm.build_router_script(),
             self.env,
             {
-                "bot_token": LOCAL_VARS["bot_token"],
+                "pub_bot_token": LOCAL_VARS["pub_bot_token"],
                 "app_name": LOCAL_VARS["app_name"],
                 "admin_id": str(ADMIN_ID),
                 "chat_id": str(ADMIN_ID),
@@ -1045,7 +1048,7 @@ class TestVisionScenarios(unittest.TestCase):
         run_bsh_script(
             POST_STEP_SCRIPT,
             self.env,
-            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+            {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": cmd},
         )
         self.assertEqual(
             [c["method"] for c in self.env.tg_calls],
@@ -1068,7 +1071,7 @@ class TestVisionScenarios(unittest.TestCase):
         run_bsh_script(
             POST_STEP_SCRIPT,
             self.env,
-            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": "WAIT"},
+            {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": "WAIT"},
         )
         normal_dt = self.env.now_ms - t0
         self.assertGreaterEqual(normal_dt, 180)
@@ -1080,7 +1083,7 @@ class TestVisionScenarios(unittest.TestCase):
         run_bsh_script(
             POST_STEP_SCRIPT,
             self.env,
-            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": "WAIT"},
+            {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": "WAIT"},
         )
         boot_dt = self.env.now_ms - t1
         self.assertGreaterEqual(boot_dt, 500)
@@ -1095,7 +1098,7 @@ class TestVisionScenarios(unittest.TestCase):
             run_bsh_script(
                 POST_STEP_SCRIPT,
                 self.env,
-                {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+                {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": cmd},
             )
             return self.env.now_ms - t0
 
@@ -1171,7 +1174,7 @@ class TestVisionScenarios(unittest.TestCase):
         run_bsh_script(
             POST_STEP_SCRIPT,
             self.env,
-            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+            {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": cmd},
         )
         # Even for Admin, media refresh advances progress on the inline button
         self.assertEqual(
@@ -1287,7 +1290,7 @@ class TestVisionScenarios(unittest.TestCase):
         run_bsh_script(
             POST_STEP_SCRIPT,
             self.env,
-            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd},
+            {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": cmd},
         )
         self.assertEqual(
             [c["method"] for c in self.env.tg_calls],
@@ -1324,7 +1327,7 @@ class TestVisionScenarios(unittest.TestCase):
         run_bsh_script(
             POST_STEP_SCRIPT,
             self.env,
-            {"bot_token": LOCAL_VARS["bot_token"], "step_cmd": cmd2},
+            {"pub_bot_token": LOCAL_VARS["pub_bot_token"], "step_cmd": cmd2},
         )
         self.assertEqual(
             [c["method"] for c in self.env.tg_calls],
@@ -1405,7 +1408,7 @@ class TestVisionScenarios(unittest.TestCase):
                 router_script,
                 self.env,
                 {
-                    "bot_token": "test-token",
+                    "pub_bot_token": "test-token",
                     "app_name": LOCAL_VARS["app_name"],
                     "admin_id": str(ADMIN_ID),
                     "chat_id": str(ADMIN_ID),
@@ -1492,7 +1495,7 @@ class TestVisionScenarios(unittest.TestCase):
             gm.build_router_script(),
             self.env,
             {
-                "bot_token": LOCAL_VARS["bot_token"],
+                "pub_bot_token": LOCAL_VARS["pub_bot_token"],
                 "app_name": LOCAL_VARS["app_name"],
                 "admin_id": str(ADMIN_ID),
                 "chat_id": str(ADMIN_ID),
@@ -1567,7 +1570,7 @@ class TestVisionScenarios(unittest.TestCase):
             gm.build_router_script(),
             self.env,
             {
-                "bot_token": LOCAL_VARS["bot_token"],
+                "pub_bot_token": LOCAL_VARS["pub_bot_token"],
                 "app_name": LOCAL_VARS["app_name"],
                 "admin_id": str(ADMIN_ID),
                 "chat_id": str(ADMIN_ID),
@@ -1694,6 +1697,15 @@ class TestVisionScenarios(unittest.TestCase):
         self.assertTrue(self.env.read_config()["vm_launched"])
         self.assertEqual(self._step(settings_screen), "OPEN_RECENTS")
         self.assertEqual(self.env.read_config()["last_state"], "RESET_OPEN_RECENTS")
+
+        # 3. Worker saveConfig preserves last_update_id_admin alongside last_update_id
+        self.setUp()
+        self._seed_active_run(mode="qr", vm_seen=True)
+        cfg_adm = self.env.read_config()
+        cfg_adm["last_update_id_admin"] = 777001
+        self.env.write_config(cfg_adm)
+        self.assertEqual(self._step(ScreenFactory.ticket_list()), "CLICK_TICKET_ROW")
+        self.assertEqual(self.env.read_config()["last_update_id_admin"], 777001)
 
 
 if __name__ == "__main__":

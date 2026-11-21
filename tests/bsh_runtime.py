@@ -404,19 +404,27 @@ class MockAndroidEnv:
         self, url_str: str, body: bytes, content_type: str
     ) -> tuple[int, str]:
         method = url_str.rsplit("/", 1)[-1]
-        status = self.http_status_overrides.get(method, 200)
+        tok_part = ""
+        if "/bot" in url_str:
+            tok_part = url_str.split("/bot", 1)[1].split("/", 1)[0]
+        status = self.http_status_overrides.get(
+            f"{tok_part}:{method}", self.http_status_overrides.get(method, 200)
+        )
         self.tg_urls.append(url_str)
         if method in ("sendPhoto", "editMessageMedia", "sendDocument"):
             record = _parse_multipart_form(body, content_type)
             self.tg_calls.append({"method": method, "status": status, **record})
             if status >= 400:
                 err_body = self.http_error_bodies.get(
-                    method,
-                    {
-                        "ok": False,
-                        "error_code": status,
-                        "description": f"HTTP {status} error",
-                    },
+                    f"{tok_part}:{method}",
+                    self.http_error_bodies.get(
+                        method,
+                        {
+                            "ok": False,
+                            "error_code": status,
+                            "description": f"HTTP {status} error",
+                        },
+                    ),
                 )
                 return status, json.dumps(err_body)
             if method == "editMessageMedia":
@@ -432,14 +440,32 @@ class MockAndroidEnv:
         self.tg_calls.append({"method": method, "status": status, "payload": payload})
         if status >= 400:
             err_body = self.http_error_bodies.get(
-                method,
-                {
-                    "ok": False,
-                    "error_code": status,
-                    "description": f"HTTP {status} error",
-                },
+                f"{tok_part}:{method}",
+                self.http_error_bodies.get(
+                    method,
+                    {
+                        "ok": False,
+                        "error_code": status,
+                        "description": f"HTTP {status} error",
+                    },
+                ),
             )
             return status, json.dumps(err_body)
+        if method == "getMe":
+            return status, json.dumps(
+                {"ok": True, "result": {"id": 12345, "username": "test_qr_bot"}}
+            )
+        if method == "getWebhookInfo":
+            return status, json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "url": "https://trigger.macrodroid.com/test-dev/komobotv2",
+                        "pending_update_count": 0,
+                        "last_error_message": "",
+                    },
+                }
+            )
         self.next_message_id += 1
         return status, json.dumps(
             {"ok": True, "result": {"message_id": self.next_message_id}}

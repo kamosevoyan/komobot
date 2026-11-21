@@ -436,8 +436,15 @@ _BSH_FRAME_HELPER = f"""void deletePrivateFrames() {{
     }}
 }}"""
 
-_BSH_TG_HTTP_HELPERS = """JSONObject tgPostWithToken(String tok, String method, JSONObject payload, int timeoutMs) {
-    if (tok == null || tok.length() == 0) return new JSONObject();
+_BSH_TG_HTTP_HELPERS = """boolean[] _tgAuthAlertSent = new boolean[]{false};
+
+JSONObject tgPostDirect(String tok, String method, JSONObject payload, int timeoutMs) {
+    JSONObject fallback = new JSONObject();
+    fallback.put("_http_code", -1);
+    if (tok == null || tok.length() == 0) {
+        fallback.put("_err", "empty_token");
+        return fallback;
+    }
     HttpURLConnection conn = null;
     try {
         URL url = new URL("https://api.telegram.org/bot" + tok + "/" + method);
@@ -457,9 +464,20 @@ _BSH_TG_HTTP_HELPERS = """JSONObject tgPostWithToken(String tok, String method, 
         InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
         String resp = readStream(is);
         if (resp.length() > 0) {
-            return new JSONObject(resp);
+            try {
+                JSONObject j = new JSONObject(resp);
+                j.put("_http_code", code);
+                return j;
+            } catch (Exception je) {
+                fallback.put("_http_code", code);
+                fallback.put("_err", resp.length() > 160 ? resp.substring(0, 160) : resp);
+                return fallback;
+            }
         }
+        fallback.put("_http_code", code);
+        return fallback;
     } catch (Exception e) {
+        fallback.put("_err", e + "");
         if (conn != null) {
             try {
                 conn.disconnect();
@@ -467,7 +485,52 @@ _BSH_TG_HTTP_HELPERS = """JSONObject tgPostWithToken(String tok, String method, 
             }
         }
     }
-    return new JSONObject();
+    return fallback;
+}
+
+void notifyPubToken401(String method, String detail) {
+    if (_tgAuthAlertSent[0]) return;
+    if (adminBotToken == null || adminBotToken.length() == 0 || adminBotToken.equals(pubBotToken)) return;
+    long admCid = 0L;
+    try {
+        File cf = new File(configPath);
+        if (cf.exists()) {
+            FileInputStream fis = new FileInputStream(cf);
+            String raw = readStream(fis);
+            fis.close();
+            if (raw.length() > 0) {
+                JSONObject cfObj = new JSONObject(raw);
+                admCid = cfObj.optLong("admin_id", 0L);
+            }
+        }
+    } catch (Exception ignored) {
+    }
+    if (admCid <= 0L) return;
+    _tgAuthAlertSent[0] = true;
+    try {
+        JSONObject body = new JSONObject();
+        body.put("chat_id", admCid);
+        body.put("text", "🚨 QR Bot Token Unauthorized (HTTP 401)\\n• Method: " + method
+            + "\\n• Detail: " + cleanLogText(detail)
+            + "\\n• Check BOT_TOKEN / run /qrdiag in Admin Console.");
+        tgPostDirect(adminBotToken, "sendMessage", body, 5000);
+    } catch (Exception ignored) {
+    }
+}
+
+JSONObject tgPostWithToken(String tok, String method, JSONObject payload, int timeoutMs) {
+    if (tok == null || tok.length() == 0) return new JSONObject();
+    JSONObject res = tgPostDirect(tok, method, payload, timeoutMs);
+    int code = res.optInt("_http_code", -1);
+    String desc = res.optString("description", res.optString("_err", ""));
+    boolean benign = (code == 400 && desc.indexOf("message is not modified") >= 0);
+    if ((code >= 400 || code < 0) && !benign) {
+        appendAuditLog("ERR", "TG_API_ERR", 0L, "", method + " http=" + code + " " + cleanLogText(desc));
+        if (code == 401 && tok.equals(pubBotToken)) {
+            notifyPubToken401(method, desc);
+        }
+    }
+    return res;
 }
 
 JSONObject tgPostRaw(String method, JSONObject payload, int timeoutMs) {
@@ -544,7 +607,6 @@ JSONObject postMultipartRaw(String endpoint, long cid, long mid, JSONObject extr
             } catch (Exception ignored) {
             }
         }
-        return res;
     } catch (Exception e) {
         res.put("desc", e + "");
         if (conn != null) {
@@ -553,8 +615,17 @@ JSONObject postMultipartRaw(String endpoint, long cid, long mid, JSONObject extr
             } catch (Exception ignored) {
             }
         }
-        return res;
     }
+    int rCode = res.optInt("code", -1);
+    String rDesc = res.optString("desc", "");
+    boolean rBenign = (rCode == 400 && rDesc.indexOf("message is not modified") >= 0);
+    if ((rCode >= 400 || rCode < 0) && !rBenign) {
+        appendAuditLog("ERR", "TG_API_ERR", cid, "", endpoint + " http=" + rCode + " " + cleanLogText(rDesc));
+        if (rCode == 401 && botToken.equals(pubBotToken)) {
+            notifyPubToken401(endpoint, rDesc);
+        }
+    }
+    return res;
 }
 
 void tgJson(String method, JSONObject payload) {
@@ -971,6 +1042,15 @@ void saveConfig(JSONObject cfg) {
             if (fresh.optLong("last_update_id", 0L) > cfg.optLong("last_update_id", 0L)) {
                 cfg.put("last_update_id", fresh.optLong("last_update_id", 0L));
             }
+            if (fresh.optLong("last_update_id_admin", 0L) > cfg.optLong("last_update_id_admin", 0L)) {
+                cfg.put("last_update_id_admin", fresh.optLong("last_update_id_admin", 0L));
+            }
+            if (fresh.has("pub_token_tail")) {
+                cfg.put("pub_token_tail", fresh.optString("pub_token_tail", ""));
+            }
+            if (fresh.has("admin_token_tail")) {
+                cfg.put("admin_token_tail", fresh.optString("admin_token_tail", ""));
+            }
             if (fresh.optLong("status_message_id", 0L) > 0L && cfg.optLong("status_message_id", 0L) == 0L &&
                 fresh.optLong("active_chat_id", 0L) == cfg.optLong("active_chat_id", 0L) &&
                 fresh.optLong("run_start_ms", 0L) == cfg.optLong("run_start_ms", 0L)) {
@@ -1368,7 +1448,7 @@ import javax.crypto.Cipher;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-String pubBotToken = "{{lv=bot_token}}".trim();
+String pubBotToken = "{{lv=pub_bot_token}}".trim();
 String adminBotToken = "{{lv=admin_bot_token}}".trim();
 String botRole = "{{lv=bot_role}}".trim();
 boolean splitAdminBot = (adminBotToken.length() > 0);
@@ -1699,7 +1779,7 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
         return out;
     }}
 
-    if (tab.equals("vmhealth")) {{
+    if (tab.equals("health") || tab.equals("vmhealth") || tab.equals("qrdiag")) {{
         String targetPkg = (appName != null && appName.length() > 0) ? appName : "ru.deltapay.puntopago.telcell";
         String diagCmd = "dumpsys activity activities | grep -E 'mResumedActivity|topResumed' | head -n 1"
             + "; echo '===PID==='; pidof " + targetPkg
@@ -1708,7 +1788,7 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
             + "; echo '===U2==='; (printf 'GET /ping HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' | nc -w 1 127.0.0.1 9008 | grep -q pong && echo running) || ([ -f /data/local/tmp/u2.jar ] && echo stopped || echo missing)";
         JSONObject hRes = guestAdbShell(diagCmd, 1800, false);
         StringBuilder hsb = new StringBuilder();
-        hsb.append("🩺 System & VM Health\\n\\n");
+        hsb.append("🩺 System & Diagnostics\\n\\n");
         hsb.append("📱 Outer Android (Host)\\n");
         hsb.append("• ").append(formatHostSummaryLine()).append("\\n\\n");
         hsb.append("🖥️ Inner Android (Guest VM)\\n");
@@ -1748,13 +1828,56 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
             hsb.append("• Guest Uptime: ").append(upStr.length() > 0 ? upStr : "unknown").append("\\n");
             hsb.append("• Top Activity: ").append(topAct);
         }}
+
+        hsb.append("\\n\\n🤖 QR Bot Diagnostics\\n");
+        String pubTailDisp = (pubBotToken.length() > 6) ? ("..." + pubBotToken.substring(pubBotToken.length() - 6)) : "(empty)";
+        hsb.append("• QR Token [").append(pubTailDisp).append("]: ");
+        if (pubBotToken.length() == 0) {{
+            hsb.append("⚪ Not set\\n");
+        }} else {{
+            JSONObject me = tgPostDirect(pubBotToken, "getMe", new JSONObject(), 3500);
+            if (me.optBoolean("ok", false)) {{
+                JSONObject rMe = me.optJSONObject("result");
+                String uName = (rMe != null) ? rMe.optString("username", "?") : "?";
+                hsb.append("🟢 LIVE (@").append(uName).append(")\\n");
+                JSONObject wh = tgPostDirect(pubBotToken, "getWebhookInfo", new JSONObject(), 3500);
+                JSONObject rWh = wh.optJSONObject("result");
+                if (rWh != null) {{
+                    String wUrl = rWh.optString("url", "");
+                    int pend = rWh.optInt("pending_update_count", 0);
+                    String wErr = rWh.optString("last_error_message", "");
+                    String shortUrl = wUrl;
+                    if (shortUrl.length() > 45) {{
+                        shortUrl = "..." + shortUrl.substring(shortUrl.length() - 42);
+                    }}
+                    hsb.append("• Webhook: ").append(wUrl.length() > 0 ? shortUrl : "🔴 EMPTY!").append(" (pending ").append(pend).append(")\\n");
+                    if (wErr.length() > 0) {{
+                        hsb.append("• WH Error: ⚠️ ").append(cleanLogText(wErr)).append("\\n");
+                    }}
+                }} else {{
+                    hsb.append("• Webhook: ⚠️ HTTP ").append(wh.optInt("_http_code", -1)).append("\\n");
+                }}
+            }} else {{
+                String dsc = me.optString("description", me.optString("_err", "unknown"));
+                hsb.append("🔴 HTTP ").append(me.optInt("_http_code", -1)).append(" (").append(cleanLogText(dsc)).append(")\\n");
+            }}
+        }}
+        long cfgUidQr = cfg.optLong("last_update_id", 0L);
+        long cfgUidAdm = cfg.optLong("last_update_id_admin", 0L);
+        long cfgBusy = cfg.optLong("busy_until", 0L);
+        boolean cfgWAct = cfg.optBoolean("worker_active", false);
+        String busyDisp = (cfgBusy <= 0L) ? "0 (idle)" : ((cfgBusy > now) ? ("+" + formatSec(cfgBusy - now) + " left") : "expired");
+        hsb.append("• UIDs: QR=").append(cfgUidQr).append(" | Admin=").append(cfgUidAdm).append("\\n");
+        hsb.append("• Lock: ").append(busyDisp).append(" | worker=").append(cfgWAct).append(" | last=").append(cfg.optString("last_state", "NONE"));
+
         JSONArray rows = new JSONArray();
         JSONArray r1 = new JSONArray();
-        r1.put(makeBtn("🔄 Refresh", "adm:vmhealth"));
-        r1.put(makeBtn("🔁 Restart VM", "adm:restart_vm"));
+        r1.put(makeBtn("🔗 Pair Guest ADB", "adm:adbpair"));
+        r1.put(makeBtn("🧹 Reset QR State", "adm:resetqr"));
         rows.put(r1);
         JSONArray r2 = new JSONArray();
-        r2.put(makeBtn("◀️ Dashboard", "adm:home"));
+        r2.put(makeBtn("🔄 Refresh", "adm:health"));
+        r2.put(makeBtn("◀️ Console", "adm:home"));
         rows.put(r2);
         out.put("text", hsb.toString());
         out.put("markup", wrapInlineKb(rows));
@@ -1899,7 +2022,8 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
         if (page + 1 < totalPages) r2.put(makeBtn("Older ➡️", prefix + (page + 1)));
         rows.put(r2);
         JSONArray r3 = new JSONArray();
-        r3.put(makeBtn("◀️ Back to Dashboard", "adm:home"));
+        r3.put(makeBtn("🗑️ Reset Stats", "adm:clrstats"));
+        r3.put(makeBtn("◀️ Console", "adm:home"));
         rows.put(r3);
         out.put("text", sb.toString());
         out.put("markup", wrapInlineKb(rows));
@@ -1917,7 +2041,7 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     }}
     long okPct = (tReq > 0L) ? ((tOk * 100L) / tReq) : 0L;
     StringBuilder sb = new StringBuilder();
-    sb.append("👑 Komobot Admin Dashboard\\n\\n");
+    sb.append("👑 Komobot Admin Console\\n\\n");
     sb.append("• Access: ").append(pubAccess ? "🟢 ENABLED (Public)" : "🔴 LOCKED (Admin only)").append("\\n");
     sb.append("• Status: ").append(runStatus).append("\\n");
     sb.append("• Host: ").append(formatHostSummaryLine()).append("\\n");
@@ -1933,27 +2057,19 @@ JSONObject renderDashboard(JSONObject cfg, String tab, int page, long targetUid,
     JSONArray rows = new JSONArray();
     JSONArray r1 = new JSONArray();
     r1.put(makeBtn("👥 Users & Usage", "adm:users:0"));
-    r1.put(makeBtn("📄 Recent Logs", "adm:logs:0"));
+    r1.put(makeBtn("📄 Logs & Stats", "adm:logs:0"));
     rows.put(r1);
     JSONArray r2 = new JSONArray();
+    r2.put(makeBtn("🩺 System & Diag", "adm:health"));
     r2.put(makeBtn(pubAccess ? "🔴 Lock Bot" : "🟢 Enable Public", "adm:toggle"));
-    r2.put(makeBtn("🔄 Refresh", "adm:home"));
     rows.put(r2);
     JSONArray r3 = new JSONArray();
-    r3.put(makeBtn("➕ Add User", "adm:add"));
-    r3.put(makeBtn("➖ Remove User", "adm:rmenu:0"));
+    r3.put(makeBtn("🧹 Reset Telcell", "adm:reset_app"));
+    r3.put(makeBtn("🔁 Restart VM", "adm:restart_vm"));
     rows.put(r3);
     JSONArray r4 = new JSONArray();
-    r4.put(makeBtn("📎 Export Log File", "adm:export"));
-    r4.put(makeBtn("🗑️ Reset Stats", "adm:clrstats"));
+    r4.put(makeBtn("🔄 Refresh", "adm:home"));
     rows.put(r4);
-    JSONArray r5 = new JSONArray();
-    r5.put(makeBtn("🔗 Pair Guest ADB", "adm:adbpair"));
-    r5.put(makeBtn("🩺 VM Health", "adm:vmhealth"));
-    rows.put(r5);
-    JSONArray r6 = new JSONArray();
-    r6.put(makeBtn("🔁 Restart VM", "adm:restart_vm"));
-    rows.put(r6);
     out.put("text", sb.toString());
     out.put("markup", wrapInlineKb(rows));
     return out;
@@ -1963,10 +2079,12 @@ long cid = 0L;
 try {{
     cid = Long.parseLong(chatIdStr);
 }} catch (Exception e) {{
+    appendAuditLog("WARN", "BAD_CHAT_ID", 0L, "", "role=" + botRole + " chatId=" + chatIdStr + " uid=" + updateIdStr);
     if (callbackId.length() > 0) answerCallback(callbackId, "");
     return "IGNORE";
 }}
 if (cid == 0L) {{
+    appendAuditLog("WARN", "BAD_CHAT_ID", 0L, "", "role=" + botRole + " chatId=0 uid=" + updateIdStr + " msg=" + cleanLogText(msgText));
     if (callbackId.length() > 0) answerCallback(callbackId, "");
     return "IGNORE";
 }}
@@ -2004,6 +2122,8 @@ JSONArray coopPreemptNotices = null;
 long coopRunStart = 0L;
 
 String coopRequestedMode = "reset";
+long dupLastUid = 0L;
+String tokenRotatedDetail = "";
 
 // Wait briefly if a new worker is starting Stage 3 or exiting Stage 5 to avoid MacroDroid shared-local-var races
 boolean sawExitWait = false;
@@ -2041,10 +2161,36 @@ if (exitClearedCleanly) {{
 
 synchronized (System.class) {{
     JSONObject cfg = loadConfig();
+    boolean tokenTailUpdated = false;
+    String pubTail = (pubBotToken.length() >= 6) ? pubBotToken.substring(pubBotToken.length() - 6) : pubBotToken;
+    String savedPubTail = cfg.optString("pub_token_tail", "");
+    if (pubTail.length() > 0 && !pubTail.equals(savedPubTail)) {{
+        cfg.put("pub_token_tail", pubTail);
+        tokenTailUpdated = true;
+        if (savedPubTail.length() > 0) {{
+            cfg.put("last_update_id", 0L);
+            tokenRotatedDetail = "bot=public old=..." + savedPubTail + " new=..." + pubTail;
+        }}
+    }}
+    String admTail = (adminBotToken.length() >= 6) ? adminBotToken.substring(adminBotToken.length() - 6) : adminBotToken;
+    String savedAdmTail = cfg.optString("admin_token_tail", "");
+    if (admTail.length() > 0 && !admTail.equals(savedAdmTail)) {{
+        cfg.put("admin_token_tail", admTail);
+        tokenTailUpdated = true;
+        if (savedAdmTail.length() > 0) {{
+            cfg.put("last_update_id_admin", 0L);
+            String admRot = "bot=admin old=..." + savedAdmTail + " new=..." + admTail;
+            tokenRotatedDetail = (tokenRotatedDetail.length() > 0) ? (tokenRotatedDetail + "; " + admRot) : admRot;
+        }}
+    }}
     String uidKey = isAdminBot ? "last_update_id_admin" : "last_update_id";
     long lastUid = cfg.optLong(uidKey, 0L);
     if (uid > 0L && uid <= lastUid) {{
         dupUid = true;
+        dupLastUid = lastUid;
+        if (tokenTailUpdated) {{
+            saveConfig(cfg);
+        }}
     }} else {{
         long now = System.currentTimeMillis();
         if (uid > 0L) {{
@@ -2153,6 +2299,7 @@ synchronized (System.class) {{
             || msgText.equals("/start")
             || msgText.equals("/dashboard")
             || msgText.equals("/admin")
+            || msgText.indexOf("Admin Console") >= 0
             || msgText.indexOf("Admin Dashboard") >= 0
             || msgText.equals("/listusers")
             || msgText.indexOf("List Users") >= 0
@@ -2161,6 +2308,8 @@ synchronized (System.class) {{
             || msgText.equals("/usage")
             || msgText.equals("/logs")
             || msgText.equals("/exportlogs")
+            || msgText.equals("/qrdiag")
+            || msgText.equals("/resetqr")
             || (callbackId.length() > 0);
         if (canUseAdmin && pendAction.length() > 0 && clearsAddPrompt) {{
             cfg.put("admin_pending_action", "");
@@ -2187,7 +2336,7 @@ synchronized (System.class) {{
                     adminAlertMarkup = wrapInlineKb(rows);
                 }}
             }}
-        }} else if (callbackId.length() > 0 && callbackData.startsWith("adm:") && !(canUseAdmin && callbackData.equals("adm:restart_vm_ok"))) {{
+        }} else if (callbackId.length() > 0 && callbackData.startsWith("adm:") && !(canUseAdmin && (callbackData.equals("adm:restart_vm_ok") || callbackData.equals("adm:reset_app")))) {{
             if (!canUseAdmin) {{
                 if (isAdmin && splitAdminBot && !isAdminBot) {{
                     saveConfig(cfg);
@@ -2306,9 +2455,22 @@ synchronized (System.class) {{
                     }} else {{
                         callbackToast = "🔴 Guest VM offline (" + pState + ")";
                     }}
-                    viewTab = "home";
-                }} else if (sub.equals("vmhealth")) {{
-                    viewTab = "vmhealth";
+                    viewTab = "health";
+                }} else if (sub.equals("health") || sub.equals("vmhealth") || sub.equals("qrdiag")) {{
+                    viewTab = "health";
+                }} else if (sub.equals("resetqr")) {{
+                    cfg.put("last_update_id", 0L);
+                    cfg.put("busy_until", 0L);
+                    cfg.put("worker_active", false);
+                    cfg.put("worker_pending_start_ms", 0L);
+                    cfg.put("worker_exiting_ms", 0L);
+                    cfg.put("queue", new JSONArray());
+                    callbackToast = "✅ QR bot state & last_update_id reset!";
+                    auditLevel = "ADMIN";
+                    auditEvent = "QR_STATE_RESET";
+                    auditUserDisp = formatUserDisplay(cfg, cid);
+                    auditDetail = "cleared last_update_id and worker locks";
+                    viewTab = "health";
                 }} else if (sub.equals("restart_vm")) {{
                     viewTab = "restart_vm";
                 }}
@@ -2379,16 +2541,11 @@ synchronized (System.class) {{
                     keyboard.put(r0);
                 }}
                 JSONArray r1 = new JSONArray();
-                r1.put("📊 Admin Dashboard");
-                r1.put("🧹 Reset VM App");
-                JSONArray r2 = new JSONArray();
-                r2.put("👥 List Users");
-                r2.put("🛑 Toggle Public Access");
+                r1.put("📊 Admin Console");
                 keyboard.put(r1);
-                keyboard.put(r2);
                 markup.put("keyboard", keyboard);
                 saveConfig(cfg);
-                replyText = "👑 Admin Control Ready\\nTap 📊 Admin Dashboard or use /dashboard, /restartvm, /adduser <id> [name], /removeuser <id>, /listusers, /logs, /exportlogs, /toggle.";
+                replyText = "👑 Admin Console Ready\\nTap 📊 Admin Console or use /dashboard, /qrdiag, /resetqr, /restartvm, /adduser <id> [name], /removeuser <id>, /toggle.";
                 replyMarkup = markup;
             }} else {{
                 JSONArray r1 = new JSONArray();
@@ -2399,10 +2556,30 @@ synchronized (System.class) {{
                 replyText = "Welcome! Press the button below to generate a QR code.";
                 replyMarkup = markup;
             }}
-        }} else if (canUseAdmin && (msgText.equals("/dashboard") || msgText.equals("/admin") || msgText.indexOf("Admin Dashboard") >= 0)) {{
+        }} else if (canUseAdmin && (msgText.equals("/dashboard") || msgText.equals("/admin") || msgText.indexOf("Admin Console") >= 0 || msgText.indexOf("Admin Dashboard") >= 0)) {{
             saveConfig(cfg);
             JSONObject view = renderDashboard(cfg, "home", 0, 0L, adminId);
             replyText = view.optString("text", "");
+            replyMarkup = view.optJSONObject("markup");
+        }} else if (canUseAdmin && msgText.equals("/qrdiag")) {{
+            saveConfig(cfg);
+            JSONObject view = renderDashboard(cfg, "health", 0, 0L, adminId);
+            replyText = view.optString("text", "");
+            replyMarkup = view.optJSONObject("markup");
+        }} else if (canUseAdmin && msgText.equals("/resetqr")) {{
+            cfg.put("last_update_id", 0L);
+            cfg.put("busy_until", 0L);
+            cfg.put("worker_active", false);
+            cfg.put("worker_pending_start_ms", 0L);
+            cfg.put("worker_exiting_ms", 0L);
+            cfg.put("queue", new JSONArray());
+            saveConfig(cfg);
+            auditLevel = "ADMIN";
+            auditEvent = "QR_STATE_RESET";
+            auditUserDisp = formatUserDisplay(cfg, cid);
+            auditDetail = "cleared last_update_id and worker locks via cmd";
+            JSONObject view = renderDashboard(cfg, "health", 0, 0L, adminId);
+            replyText = "✅ QR bot state & last_update_id reset!\\n\\n" + view.optString("text", "");
             replyMarkup = view.optJSONObject("markup");
         }} else if (canUseAdmin && (msgText.equalsIgnoreCase("/restartvm") || msgText.indexOf("Restart VM") >= 0)) {{
             saveConfig(cfg);
@@ -2511,7 +2688,7 @@ synchronized (System.class) {{
                 String requestedMode = "";
                 if (canUseAdmin && callbackData.equals("adm:restart_vm_ok")) {{
                     requestedMode = "restart_vm";
-                }} else if (canUseAdmin && msgText.indexOf("Reset VM") >= 0) {{
+                }} else if (canUseAdmin && (msgText.indexOf("Reset VM") >= 0 || callbackData.equals("adm:reset_app"))) {{
                     requestedMode = "reset";
                 }} else if ((!splitAdminBot || !isAdminBot) && (lowerMsg.equals("/qr") || lowerMsg.equals("qr") || msgText.indexOf("Take QR Screenshot") >= 0 || lowerMsg.indexOf("qr") >= 0 || lowerMsg.indexOf("screenshot") >= 0)) {{
                     requestedMode = "qr";
@@ -2697,7 +2874,14 @@ synchronized (System.class) {{
     }}
 }}
 
+if (tokenRotatedDetail.length() > 0) {{
+    appendAuditLog("WARN", "TOKEN_ROTATED", cid, "", tokenRotatedDetail);
+}}
 if (dupUid) {{
+    appendAuditLog("WARN", "DUP_UID_DROP", cid, "", "role=" + botRole + " uid=" + uid + " last_uid=" + dupLastUid + " msg=" + cleanLogText(msgText));
+    if (callbackId.length() > 0) {{
+        answerCallback(callbackId, "Already processed");
+    }}
     return "IGNORE";
 }}
 if (actionResult.equals("RUN")) {{
@@ -2818,7 +3002,7 @@ def build_init_status_script() -> str:
         "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=pub_bot_token}".trim();\n'
         'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
         "String botToken = pubBotToken;\n"
         "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
@@ -3003,7 +3187,7 @@ def build_vision_script() -> str:
         "import javax.crypto.Cipher;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=pub_bot_token}".trim();\n'
         'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
         "String botToken = pubBotToken;\n"
         "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
@@ -4118,7 +4302,7 @@ try {{
         if (pinLogo >= 10) {{
             cfg.put("vm_booting", false);
             cfg.put("vm_seen", true);
-            maybeStopGuestFpsHal(cfg, vmBooting);
+            maybeStopGuestFpsHal(cfg, true);
             if (mode.equals("reset") && resetStage == 0) {{
                 return handleResetInApp(cfg, cid, adminId);
             }}
@@ -4433,9 +4617,12 @@ def build_post_step_script() -> str:
         "import java.io.*;\n"
         "import java.net.HttpURLConnection;\n"
         "import java.net.URL;\n"
+        "import java.text.SimpleDateFormat;\n"
+        "import java.util.Date;\n"
+        "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=pub_bot_token}".trim();\n'
         'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
         "String botToken = pubBotToken;\n"
         "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
@@ -4444,6 +4631,8 @@ def build_post_step_script() -> str:
         + _BSH_READ_STREAM
         + "\n\n"
         + _BSH_TG_HTTP_HELPERS
+        + "\n\n"
+        + _BSH_AUDIT_HELPERS
         + "\n\n"
         + _BSH_WORKER_CONFIG_HELPERS
         + "\n\n"
@@ -4547,7 +4736,7 @@ def build_timeout_script() -> str:
         "import java.util.Locale;\n"
         "import org.json.JSONArray;\n"
         "import org.json.JSONObject;\n\n"
-        'String pubBotToken = "{lv=bot_token}".trim();\n'
+        'String pubBotToken = "{lv=pub_bot_token}".trim();\n'
         'String adminBotToken = "{lv=admin_bot_token}".trim();\n'
         "String botToken = pubBotToken;\n"
         "String alertBotToken = (adminBotToken.length() > 0) ? adminBotToken : pubBotToken;\n"
@@ -4762,42 +4951,47 @@ def build_macro(
     sg = SiguidGen("komobot-v2")
     actions: list[dict] = []
 
-    # 0. Identify which webhook trigger fired (komobotv2 vs komobotv2_admin)
+    # 0. Identify which webhook trigger fired (komobotv2 vs komobotv2_admin) into transient raw_body
+    #    and clear the source trigger variable immediately so stale JSON cannot leak across bots.
     actions.append(make_extract_text(sg, "public", "(.*)", "bot_role"))
+    actions.append(make_extract_text(sg, "", "(.*)", "raw_body"))
     actions.append(make_if_var_not_equals(sg, "admin_webhook_body", ""))
     actions.append(make_extract_text(sg, "admin", "(.*)", "bot_role"))
     actions.append(
-        make_extract_text(sg, "{lv=admin_webhook_body}", "([\\s\\S]*)", "webhook_body")
+        make_extract_text(sg, "{lv=admin_webhook_body}", "([\\s\\S]*)", "raw_body")
     )
     actions.append(make_extract_text(sg, "", "(.*)", "admin_webhook_body"))
     actions.append(make_end_if(sg))
+    actions.append(make_if_var_equals(sg, "bot_role", "public"))
+    actions.append(
+        make_extract_text(sg, "{lv=webhook_body}", "([\\s\\S]*)", "raw_body")
+    )
+    actions.append(make_extract_text(sg, "", "(.*)", "webhook_body"))
+    actions.append(make_end_if(sg))
 
-    # 1. Extract update_id, chat_id, msg_text safely from webhook_body
+    # 1. Extract update_id, chat_id, msg_text safely from raw_body, then clear raw_body
     actions.append(
         make_extract_text(
-            sg,
-            '{lv=webhook_body}\n"update_id":0',
-            '"update_id":\\s*(\\d+)',
-            "update_id",
+            sg, '{lv=raw_body}\n"update_id":0', '"update_id":\\s*(\\d+)', "update_id"
         )
     )
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"chat":{"id":0',
+            '{lv=raw_body}\n"chat":{"id":0',
             '"chat":\\s*\\{\\s*"id":\\s*(-?\\d+)',
             "chat_id",
         )
     )
     actions.append(
         make_extract_text(
-            sg, '{lv=webhook_body}\n"text":""', r'"text":\s*"([^"]{0,200})"', "msg_text"
+            sg, '{lv=raw_body}\n"text":""', r'"text":\s*"([^"]{0,200})"', "msg_text"
         )
     )
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"callback_query":{"id":""',
+            '{lv=raw_body}\n"callback_query":{"id":""',
             r'"callback_query":\s*\{[^}]{0,120}"id":\s*"([^"]{0,80})"',
             "callback_id",
         )
@@ -4805,7 +4999,7 @@ def build_macro(
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"data":""',
+            '{lv=raw_body}\n"data":""',
             r'"data":\s*"([^"]{0,100})"',
             "callback_data",
         )
@@ -4813,7 +5007,7 @@ def build_macro(
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"message":{"message_id":0',
+            '{lv=raw_body}\n"message":{"message_id":0',
             r'"message":\s*\{[^}]{0,80}"message_id":\s*(\d+)',
             "callback_msg_id",
         )
@@ -4821,7 +5015,7 @@ def build_macro(
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"from":{"id":0,"is_bot":false,"first_name":""',
+            '{lv=raw_body}\n"from":{"id":0,"is_bot":false,"first_name":""',
             r'"from":\s*\{[^}]{0,220}"is_bot":\s*false[^}]{0,220}"first_name":\s*"([^"\\]{0,64})"',
             "sender_name",
         )
@@ -4829,7 +5023,7 @@ def build_macro(
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"from":{"id":0,"is_bot":false,"username":""',
+            '{lv=raw_body}\n"from":{"id":0,"is_bot":false,"username":""',
             r'"from":\s*\{[^}]{0,220}"is_bot":\s*false[^}]{0,220}"username":\s*"([^"\\]{0,64})"',
             "sender_username",
         )
@@ -4837,11 +5031,12 @@ def build_macro(
     actions.append(
         make_extract_text(
             sg,
-            '{lv=webhook_body}\n"sender_user":{"id":0',
+            '{lv=raw_body}\n"sender_user":{"id":0',
             r'"(?:sender_user|forward_from)":\s*\{\s*"id":\s*(-?\d+)',
             "forward_user_id",
         )
     )
+    actions.append(make_extract_text(sg, "", "(.*)", "raw_body"))
 
     # 2. JavaAction #1: Telegram Router, Auth & Command Handler
     actions.append(
@@ -4940,13 +5135,14 @@ def build_macro(
         make_var("app_pin", value=app_pin_var, supports_input=True),
         make_var("bot_action"),
         make_var("bot_role", supports_input=False),
-        make_var("bot_token", value=bot_token_var, supports_input=True),
         make_var("callback_data", supports_input=False),
         make_var("callback_id", supports_input=False),
         make_var("callback_msg_id", supports_input=False),
         make_var("chat_id", supports_input=False),
         make_var("forward_user_id", supports_input=False),
         make_var("msg_text", supports_input=False),
+        make_var("pub_bot_token", value=bot_token_var, supports_input=True),
+        make_var("raw_body", working=True, supports_input=False),
         make_var("screen_action"),
         make_var("sender_name", supports_input=False),
         make_var("sender_username", supports_input=False),

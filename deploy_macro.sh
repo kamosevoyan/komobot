@@ -57,6 +57,66 @@ prompt_var ADMIN_ID_VAL "ADMIN_ID" "$DEFAULT_ADMIN_ID" 0
 prompt_var APP_PIN_VAL "APP_PIN" "$DEFAULT_APP_PIN" 1
 prompt_var APP_NAME_VAL "APP_NAME" "$DEFAULT_APP_NAME" 0
 
+verify_bot_token() {
+	local label="$1"
+	local token="$2"
+	local expected_suffix="$3"
+	python3 - "$label" "$token" "$expected_suffix" <<'PY'
+import json, sys, urllib.error, urllib.request
+
+label, token, expected_suffix = sys.argv[1], sys.argv[2], sys.argv[3]
+tail = f"...{token[-6:]}" if len(token) > 6 else "(short)"
+
+def call(method):
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            body = {"ok": False, "description": str(e)}
+        return e.code, body
+    except Exception as e:
+        return -1, {"ok": False, "description": str(e)}
+
+code, me = call("getMe")
+if code != 200 or not me.get("ok"):
+    desc = me.get("description", "unknown error")
+    print(f"Error: {label} [{tail}] getMe failed (HTTP {code}: {desc})", file=sys.stderr)
+    sys.exit(1)
+uname = me.get("result", {}).get("username", "?")
+wcode, wh = call("getWebhookInfo")
+if wcode != 200 or not wh.get("ok"):
+    desc = wh.get("description", "unknown error")
+    print(f"Error: {label} (@{uname}) getWebhookInfo failed (HTTP {wcode}: {desc})", file=sys.stderr)
+    sys.exit(1)
+info = wh.get("result", {})
+wurl = info.get("url", "")
+pend = info.get("pending_update_count", 0)
+werr = info.get("last_error_message", "")
+if not wurl:
+    print(f"Error: {label} (@{uname}) has an empty webhook URL (expected suffix /{expected_suffix})", file=sys.stderr)
+    sys.exit(1)
+if expected_suffix and not wurl.rstrip("/").endswith("/" + expected_suffix):
+    print(f"Error: {label} (@{uname}) webhook URL does not end with /{expected_suffix}", file=sys.stderr)
+    sys.exit(1)
+short_url = ("..." + wurl[-36:]) if len(wurl) > 39 else wurl
+print(f"  {label} [{tail}]: @{uname} LIVE | webhook={short_url} | pending={pend}")
+if werr:
+    print(f"  Warning: {label} last webhook error: {werr}", file=sys.stderr)
+PY
+}
+
+if [[ "${SKIP_TOKEN_CHECK:-0}" != "1" ]]; then
+	echo "==> Verifying Telegram bot tokens & webhooks (set SKIP_TOKEN_CHECK=1 to skip)..."
+	verify_bot_token "BOT_TOKEN" "$BOT_TOKEN_VAL" "komobotv2"
+	if [[ -n "$ADMIN_BOT_TOKEN_VAL" ]]; then
+		verify_bot_token "ADMIN_BOT_TOKEN" "$ADMIN_BOT_TOKEN_VAL" "komobotv2_admin"
+	fi
+fi
+
 echo "==> Generating Komobot_Controller.macro..."
 python3 "$SCRIPT_DIR/generate_macro.py" \
 	--bot-token "$BOT_TOKEN_VAL" \
@@ -363,11 +423,8 @@ stop_guest_fps_hal() {
 		timeout 10 adb connect "$guest" >/dev/null 2>&1 || true
 		out="$(timeout 20 adb -s "$guest" shell '
 state=$(getprop init.svc.vendor.fps_hal)
-if [ "$state" = running ] || [ "$state" = stopping ]; then
-  pid=$(getprop init.svc_debug_pid.vendor.fps_hal)
+if [ "$state" = running ]; then
   setprop ctl.stop vendor.fps_hal
-  sleep 0.5
-  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   sleep 0.5
   echo "state:$(getprop init.svc.vendor.fps_hal)"
 else
